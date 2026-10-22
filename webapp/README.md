@@ -176,6 +176,8 @@ G1 北京南→上海虹桥 因此从「直线 1176 km」修正为 **1318 km**�
 | `train_override` | `code`（主键，按车次不按日期）、`via_json`、`total_km`、`seg_km_json`、`note`、`updated_at` |
 | `coord_override` | `name`、`lat`、`lon` —— 车站坐标人工修正（**任何站都能改**，不限于缺坐标的） |
 | `line_override` | `name`（主键，线路名）、`seg_km_json`、`total_km`、`note`、`updated_at` —— 线路里程人工校正 |
+| `line_custom` | `name`、`stations_json`、`note` —— 用户新增的线路（档案里没有的） |
+| `station_custom` | `name`、`lat`、`lon`、`lines_json`、`tele`、`bureau`、`note` —— 用户新增的车站 |
 | `curate` | 全量扫描结果：每趟车的经由 / 里程 / 缺坐标摘要与问题标签 |
 
 `build_route_payload()` 里自动结果算完后再套人工值：
@@ -208,6 +210,38 @@ G1 北京南→上海虹桥 因此从「直线 1176 km」修正为 **1318 km**�
 生效是**即时**的：payload 每次请求现算，不缓存最终结果，改完刷新详情页就是新数据。
 `GET /api/curate/detail` 特地带 `use_override=False` 跑一遍，专门给编辑器显示「自动推断基线」，
 改错了还能对照原来是什么。
+
+### 新增线路 / 车站
+
+档案只有 417 条线、7579 个站，总会有缺的（新建线路、地方小站、专用线）。
+
+- **新增线路**：填线路名 + 沿线站序，每站可选填「自起点累计公里数」，不详就留空（存成 `null`，界面仍是 `-`）。
+  校验：至少两站、站序不重复、累计里程必须严格递增、不能与档案线路重名
+- **新增车站**：填站名 + 经纬度（可直接粘贴「经度,纬度」，复用校对页的拆分规则），可选填所属线路 / 电报码 / 路局。
+  已在站库里的站会被拒绝，避免与 `coord_override` 两套坐标打架
+- 自建的条目在详情里带「自建」标记，删除按钮点两下才生效（第二次确认）
+
+落库后走 `railcore._apply_custom()` → `cnrail.set_custom(lines, stations)`：
+
+- 自定义线路插在 `_LINES` 最前面，同名档案线路被覆盖（保存时已禁止重名，这里只是保险）
+- `rebuild_lines()` 会把它们一并算进 `_POS`，所以**新增的线路立刻能用于车次经由 / 里程推断**
+- 自定义车站合并进 `_STATIONS`（已有的站只补空字段：坐标 / 电报码 / 路局 / 线路），
+  再 `stations.reload_coords()` 让坐标缓存重新读，新站马上能在地图上画出来
+
+新增线路的里程若还想改，照旧用「编辑里程」，覆盖值存在 `line_override`，与自定义线路的数据分开；
+删除自定义线路时会连带清掉它的 `line_override`，免得以后重建同名线路套到旧值。
+
+### 地图：经由线路上的全部车站
+
+`cnrail.path_stations(stops, prefer=经由线路名)` 把经停站序列展开成「线路上全部车站」：
+
+- 相邻两站在同一条线上时，把该线中间的站补进来；里程按 `本趟车两站里程 / 该线两站里程` 的比例映射
+- `prefer` 是推断（或人工校正）出来的经由线路名，命中时优先按它展开，其次才按里程比匹配
+- 输出 `[{name, lat, lon, km, stop, idx}]`，`stop=False` 表示列车通过但不办客；线路所 / 中继站直接丢弃
+- `path`（画线用的折线）与 `lineStops`（打点用的车站）来自同一次展开，保证点位与折线严丝合缝
+
+前端两种地图后端都按这个画：实心蓝点＝停车站，旁边标「站名 + 发车时刻」（终到站标到达时刻）；
+浅灰小点＝通过站（不标字，标了会糊成一片），点一下看里程与所属车次。
 
 ### 校对页
 
@@ -265,6 +299,8 @@ G1 北京南→上海虹桥 因此从「直线 1176 km」修正为 **1318 km**�
 | `GET /api/transfer` | `from`、`to`、`date`、`middle` | 中转换乘 |
 | `GET /api/station` | `q` | 车站档案（路局 / 电报码 / 服务 / 连接线路 / 始发终到车次量） |
 | `GET /api/lines` | `q`、`limit` | 线路名检索 |
+| `GET /api/custom` | — | 用户新增的线路与车站清单 |
+| `GET /api/stations/names` | — | 全部站名（7579 条，给新增线路时的站名补全） |
 | `GET /api/line` | `q` | 线路详情（有序站点 + 累计里程 + 坐标，可直接画线）；另带 `kmBase`（档案原值）、`segKm`（各段生效里程，不详为 `null`）、`override` |
 | `GET /api/dates` | — | 含当日共 15 天，每天的下载状态 / 已确认开行数 / 待处理数 |
 | `GET /api/history` | — | 已有数据的全部日期（车次数 / 停站记录数 / 导出文件） |
@@ -282,6 +318,10 @@ G1 北京南→上海虹桥 因此从「直线 1176 km」修正为 **1318 km**�
 | `POST /api/override` | `code`、`via[]`、`totalKm`、`segKm`、`note` | 保存人工校正；`segKm` 形如 `{"0":205,"2":230}`（键是区间序号）；全为空即撤销 |
 | `POST /api/line/km` | `name`、`segKm`、`totalKm`、`note` | 保存线路里程人工校正，返回最新线路详情；全为空即撤销 |
 | `POST /api/line/km/clear` | `name` | 线路里程恢复档案值 |
+| `POST /api/line/new` | `name`、`stations[]`（`{name, km}`，km 可空）、`note` | 新增线路，返回线路详情 |
+| `POST /api/line/delete` | `name` | 删除自建线路（连带清掉它的里程校正） |
+| `POST /api/station/new` | `name`、`lat`、`lon`、`lines[]`、`tele`、`bureau`、`note` | 新增车站 |
+| `POST /api/station/delete` | `name` | 删除自建车站 |
 | `POST /api/coord` | `name`、`lat`、`lon` | 设置车站坐标（任何站，写 `coord_override`，立即生效并重算相关车次） |
 | `POST /api/coord/clear` | `name` | 撤销人工坐标，回到车站档案原值 |
 

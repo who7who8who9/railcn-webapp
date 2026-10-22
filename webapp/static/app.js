@@ -169,12 +169,16 @@ const TMapView = {
   setRoute(route) {
     this.route = route;
     this.clear();
-    const withCoord = route.stops.filter(s => s.lat != null);
+    // lineStops = 经由铁路线上的全部车站（含通过站），老接口没有时退回经停站
+    const raw = (route.lineStops && route.lineStops.length > 1)
+      ? route.lineStops
+      : route.stops.map(s => ({ ...s, stop: true }));
+    const pts = raw.filter(s => s.lat != null);
 
-    if (!withCoord.length) return;
+    if (!pts.length) return;
 
     // 线：外套 + 主线
-    const linePts = (route.path && route.path.length > 1) ? route.path : withCoord;
+    const linePts = (route.path && route.path.length > 1) ? route.path : pts;
     const path = linePts.map(s => this.g(s.lat, s.lon));
     this.layers.line = new TMap.MultiPolyline({
       map: this.map,
@@ -193,41 +197,49 @@ const TMapView = {
       zIndex: 5,
     });
 
-    // 站点点
-    const dotSvg = encodeURIComponent(
-      `<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22">
-        <circle cx="11" cy="11" r="6.5" fill="#ffffff" stroke="#1f6feb" stroke-width="2.5"/></svg>`
+    // 站点：本次停车用实心大蓝点，列车通过的中间站用小空心点
+    const stopSvg = encodeURIComponent(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20">
+        <circle cx="10" cy="10" r="6.5" fill="#1f6feb" stroke="#ffffff" stroke-width="3"/></svg>`
+    );
+    const passSvg = encodeURIComponent(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12">
+        <circle cx="6" cy="6" r="3" fill="#a9b7cc"/></svg>`
     );
     this.layers.stops = new TMap.MultiMarker({
       map: this.map,
       styles: {
-        s: new TMap.MarkerStyle({
-          width: 11, height: 11, anchor: { x: 5.5, y: 5.5 },
-          src: `data:image/svg+xml;charset=utf-8,${dotSvg}`,
+        stop: new TMap.MarkerStyle({
+          width: 20, height: 20, anchor: { x: 10, y: 10 },
+          src: `data:image/svg+xml;charset=utf-8,${stopSvg}`,
+        }),
+        pass: new TMap.MarkerStyle({
+          width: 12, height: 12, anchor: { x: 6, y: 6 },
+          src: `data:image/svg+xml;charset=utf-8,${passSvg}`,
         }),
       },
-      geometries: withCoord.map(s => ({
-        id: String(s.i), styleId: 's', position: this.g(s.lat, s.lon),
+      geometries: pts.map((s, k) => ({
+        id: String(k), styleId: s.stop ? 'stop' : 'pass', position: this.g(s.lat, s.lon),
       })),
       zIndex: 6,
     });
 
-    // 站名（点太多时只显示主要站）
-    const labelStep = withCoord.length > 26 ? Math.ceil(withCoord.length / 22) : 1;
-    const labeled = withCoord.filter((s, idx) =>
-      idx === 0 || idx === withCoord.length - 1 || idx % labelStep === 0);
+    // 站名 + 时刻：只标本次停车站（通过站太密，标了糊成一片）
+    const nStop = (route.stops || []).length;
+    const labeled = pts.map((s, k) => ({ s, k })).filter(o => o.s.stop);
     this.layers.labels = new TMap.MultiLabel({
       map: this.map,
       styles: {
         l: new TMap.LabelStyle({
-          color: '#26324a', size: 11, offset: { x: 0, y: -13 },
+          color: '#1a2b45', size: 11, offset: { x: 0, y: -14 },
           alignment: 'center', verticalAlignment: 'bottom',
-          backgroundColor: 'rgba(255,255,255,.82)', backgroundPadding: 2,
-          borderColor: 'rgba(255,255,255,0)', borderRadius: 3,
+          backgroundColor: 'rgba(255,255,255,.88)', backgroundPadding: 2,
+          borderColor: 'rgba(31,111,235,.28)', borderRadius: 3,
         }),
       },
-      geometries: labeled.map(s => ({
-        id: 'L' + s.i, styleId: 'l', position: this.g(s.lat, s.lon), content: s.name,
+      geometries: labeled.map(o => ({
+        id: 'L' + o.k, styleId: 'l', position: this.g(o.s.lat, o.s.lon),
+        content: this.labelText(o.s, nStop),
       })),
       zIndex: 7,
     });
@@ -251,30 +263,42 @@ const TMapView = {
       zIndex: 9,
     });
 
-    this.stops = withCoord;
+    this.stops = pts;
     this.layer = this.layers;
     // 注意：必须给一个有效初始位置。传 null 会在构造时立刻挂到地图，
     // SDK 内部读 position.x 直接抛 "Cannot read properties of null"。
     this.info = new TMap.InfoWindow({
-      map: this.map, position: this.g(withCoord[0].lat, withCoord[0].lon),
+      map: this.map, position: this.g(pts[0].lat, pts[0].lon),
       offset: { x: 0, y: -14 }, enableCustom: false,
     });
     this.info.close();
 
     this.layers.stops.on('click', evt => {
-      const idx = Number(evt.geometry.id);
-      const st = route.stops[idx - 1];
+      const st = pts[Number(evt.geometry.id)];
       if (!st) return;
       this.info.setPosition(this.g(st.lat, st.lon));
       this.info.setContent(this.stopHtml(st, route));
       this.info.open();
-      highlightStop(idx - 1);
+      if (st.stop) highlightStop((st.i || 1) - 1);
     });
 
     this.fit();
   },
 
+  /** 地图标签：停车站旁边写发车时刻，终到站写到达时刻；没有时刻就只写站名 */
+  labelText(st, nStop) {
+    const last = (st.i || 0) >= nStop;
+    const t = last ? (st.arr || st.dep) : (st.dep || st.arr);
+    if (!t) return st.name;
+    return `${st.name} ${t}${last ? '到' : '开'}`;
+  },
+
   stopHtml(st, route) {
+    if (!st.stop) {
+      return `<div class="iw"><b>${st.name}</b>
+        <div class="g">通过 · 里程 ${Math.round(st.km)} km</div>
+        <div class="g">${route.code} ${route.from} → ${route.to}</div></div>`;
+    }
     const arr = st.arr ? `${st.arr}${st.day > 0 ? `（${dayName(st.day)}）` : ''}` : '——';
     const dep = st.dep ? `${st.dep}${st.depDay > st.day ? `（${dayName(st.depDay)}）` : ''}` : '——';
     return `<div class="iw"><b>${st.name}</b>
@@ -295,7 +319,9 @@ const TMapView = {
   },
 
   fit() {
-    const pts = this.route?.stops.filter(s => s.lat != null);
+    const all = (this.route?.lineStops && this.route.lineStops.length > 1)
+      ? this.route.lineStops : (this.route?.stops || []);
+    const pts = all.filter(s => s.lat != null);
     if (!pts || !pts.length) return;
     let minLat = 90, maxLat = -90, minLon = 180, maxLon = -180;
     pts.forEach(s => {
@@ -401,7 +427,10 @@ const SvgView = {
     if (!route) return;
     this.gRoot.innerHTML = '';
     const v = this.view;
-    const pts = route.stops.filter(s => s.lat != null);
+    const all = (route.lineStops && route.lineStops.length > 1)
+      ? route.lineStops
+      : route.stops.map(s => ({ ...s, stop: true }));
+    const pts = all.filter(s => s.lat != null);
 
     // 网格底纹
     const grid = this.mk('g', { opacity: .5 });
@@ -424,28 +453,32 @@ const SvgView = {
     this.mk('path', { d, fill: 'none', stroke: '#ffffff', 'stroke-width': 9, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' });
     this.mk('path', { d, fill: 'none', stroke: '#1f6feb', 'stroke-width': 4.5, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' });
 
-    // 站点
-    const step = pts.length > 30 ? Math.ceil(pts.length / 24) : 1;
+    // 站点：本次停车实心点 + 站名与时刻，通过站小空心点
     this.stopNodes = {};
+    const nStop = (route.stops || []).length;
     pts.forEach((s, i) => {
       const p = px[i];
-      const isEnd = i === 0 || i === pts.length - 1;
+      const stop = s.stop !== false;
       const c = this.mk('circle', {
-        cx: p[0], cy: p[1], r: isEnd ? 5 : 3.6,
-        fill: isEnd ? '#1f6feb' : '#fff', stroke: isEnd ? '#fff' : '#1f6feb', 'stroke-width': 2,
+        cx: p[0], cy: p[1], r: stop ? 4.2 : 2.4,
+        fill: stop ? '#1f6feb' : '#a9b7cc',
+        stroke: stop ? '#fff' : 'none',
+        'stroke-width': stop ? 2 : 0,
         style: 'cursor:pointer',
       });
       c.addEventListener('click', () => {
         this.infoBox(s);
-        highlightStop(s.i - 1);
+        if (s.stop) highlightStop((s.i || 1) - 1);
       });
       this.stopNodes[s.i] = c;
 
-      if (isEnd || i % step === 0) {
+      if (stop) {
+        const last = (s.i || 0) >= nStop;
+        const t = last ? (s.arr || s.dep) : (s.dep || s.arr);
         this.mk('text', {
-          x: p[0] + 8, y: p[1] - 7, 'font-size': 11.5, fill: '#26324a',
+          x: p[0] + 7, y: p[1] - 6, 'font-size': 11, fill: '#1a2b45',
           stroke: '#fff', 'stroke-width': 3, 'paint-order': 'stroke', 'pointer-events': 'none',
-        }).textContent = s.name;
+        }).textContent = t ? `${s.name} ${t}${last ? '到' : '开'}` : s.name;
       }
     });
 
@@ -461,9 +494,14 @@ const SvgView = {
   },
 
   infoBox(st) {
-    const arr = st.arr ? `${st.arr}${st.day > 0 ? `(${dayName(st.day)})` : ''}` : '——';
-    const dep = st.dep ? `${st.dep}${st.depDay > st.day ? `(${dayName(st.depDay)})` : ''}` : '——';
-    const lines = [`${st.name}`, `第 ${st.i} 站 · ${Math.round(st.km)} km`, `到 ${arr} / 开 ${dep}`];
+    let lines;
+    if (st.stop === false) {
+      lines = [st.name, `通过 · ${Math.round(st.km)} km`];
+    } else {
+      const arr = st.arr ? `${st.arr}${st.day > 0 ? `(${dayName(st.day)})` : ''}` : '——';
+      const dep = st.dep ? `${st.dep}${st.depDay > st.day ? `(${dayName(st.depDay)})` : ''}` : '——';
+      lines = [st.name, `第 ${st.i} 站 · ${Math.round(st.km)} km`, `到 ${arr} / 开 ${dep}`];
+    }
     const p = this.toPx(this.proj(st.lat, st.lon));
     this.infoTxt.innerHTML = '';
     lines.forEach((t, i) => {
@@ -471,7 +509,8 @@ const SvgView = {
       ts.textContent = t;
     });
     this.infoTxt.setAttribute('transform', `translate(${p[0] + 12},${p[1] - 46})`);
-    const w = 120, h = 50;
+    const longest = lines.reduce((m, t) => Math.max(m, t.length), 0);
+    const w = Math.max(120, Math.round(longest * 8.4) + 22), h = 20 + lines.length * 14;
     this.infoRect.setAttribute('x', p[0] + 4);
     this.infoRect.setAttribute('y', p[1] - 62);
     this.infoRect.setAttribute('width', w);
@@ -590,7 +629,11 @@ const MapView = {
       }
     }
   },
-  setRoute(r) { this.call('setRoute', r); },
+  setRoute(r) {
+    const lg = $('#mapLegend');
+    if (lg) lg.classList.toggle('hidden', !(r && r.lineStops && r.lineStops.length));
+    this.call('setRoute', r);
+  },
   setTrain(p) { this.call('setTrain', p); },
   focusStop(i) { this.call('focusStop', i); },
   fit() { this.call('fit'); },
@@ -1171,6 +1214,192 @@ function mapResize() {
 let netKind = 'station';
 let netTimer = 0;
 
+/* ---------- 新增线路 / 车站 ---------- */
+const NM = { kind: 'line', rows: [], busy: false, stations: null };
+
+function nmClose() { $('#newModal').classList.add('hidden'); }
+
+function nmSetMsg(text, bad) {
+  const el = $('#nmMsg');
+  if (!el) return;
+  el.textContent = text || '';
+  el.className = 'nm-msg' + (bad ? ' bad' : '');
+}
+
+function nmOpen(kind) {
+  NM.kind = kind;
+  NM.busy = false;
+  NM.rows = kind === 'line' ? [{ name: '', km: '' }, { name: '', km: '' }] : [];
+  $('#nmTitle').textContent = kind === 'line' ? '新增线路' : '新增车站';
+  nmSetMsg('');
+  nmRender();
+  $('#newModal').classList.remove('hidden');
+  if (kind === 'line') nmLoadStations();
+  setTimeout(() => { const el = $('#nmName'); if (el) el.focus(); }, 40);
+}
+
+/** 站名 datalist（一次加载 7579 个站名，供新增线路时补全） */
+async function nmLoadStations() {
+  if (NM.stations) return;
+  try {
+    const d = await api('/api/stations/names');
+    NM.stations = d.items || [];
+    let dl = $('#nmStaList');
+    if (!dl) {
+      dl = document.createElement('datalist');
+      dl.id = 'nmStaList';
+      document.body.appendChild(dl);
+    }
+    dl.innerHTML = NM.stations.map(n => `<option value="${esc(n)}">`).join('');
+  } catch (e) { NM.stations = []; }
+}
+
+function nmRender() {
+  const body = $('#nmBody');
+  if (!body) return;
+
+  if (NM.kind === 'line') {
+    body.innerHTML = `
+      <div class="nm-field">
+        <label>线路名</label>
+        <input id="nmName" placeholder="比如 沪宁沿江高速线" autocomplete="off">
+        <span class="nm-tip">档案里已有的线路不能重名；重名会提示改用「编辑里程」</span>
+      </div>
+      <div class="nm-sec">
+        <div class="nm-sec-h"><b>沿线车站</b>
+          <span class="nm-tip">按从上到下的顺序；里程填「自起点起算的累计公里数」，不详就留空</span>
+          <button class="btn sm ghost" id="nmAddRow">+ 加一站</button>
+        </div>
+        <div class="nm-rows" id="nmRows"></div>
+      </div>
+      <div class="nm-field">
+        <label>备注</label>
+        <input id="nmNote" placeholder="可空，比如：2026 年调图新增">
+      </div>`;
+    nmRenderRows();
+    $('#nmAddRow').addEventListener('click', () => {
+      NM.rows.push({ name: '', km: '' });
+      nmRenderRows();
+      const rows = $$('#nmRows .nm-row');
+      if (rows.length) rows[rows.length - 1].querySelector('input.st').focus();
+    });
+    return;
+  }
+
+  body.innerHTML = `
+    <div class="nm-field">
+      <label>站名</label>
+      <input id="nmName" placeholder="比如 新桥镇" autocomplete="off">
+      <span class="nm-tip">车站库里已有的站会拒绝新增（改坐标请到「数据校对」）</span>
+    </div>
+    <div class="nm-field">
+      <label>经纬度</label>
+      <input id="nmPair" placeholder="可粘贴「经度,纬度」，如 121.523100,31.204800">
+      <div class="nm-pair">
+        <span>经度</span><input id="nmLon" type="number" step="0.000001" placeholder="121.5231">
+        <span>纬度</span><input id="nmLat" type="number" step="0.000001" placeholder="31.2048">
+      </div>
+    </div>
+    <div class="nm-field">
+      <label>所属线路（可空，多个用逗号分开）</label>
+      <input id="nmLines" placeholder="比如 沪宁沿江高速线">
+    </div>
+    <div class="nm-two">
+      <div class="nm-field"><label>电报码（可空）</label><input id="nmTele"></div>
+      <div class="nm-field"><label>路局（可空）</label><input id="nmBureau" placeholder="上海局"></div>
+    </div>
+    <div class="nm-field"><label>备注</label><input id="nmNote" placeholder="可空"></div>`;
+
+  const pair = $('#nmPair');
+  pair.addEventListener('input', () => {
+    const p = cuParsePair(pair.value);
+    if (!p) return;
+    $('#nmLon').value = fmtDeg(p.lon);
+    $('#nmLat').value = fmtDeg(p.lat);
+  });
+}
+
+function nmRenderRows() {
+  const box = $('#nmRows');
+  if (!box) return;
+  box.innerHTML = NM.rows.map((r, i) => `
+    <div class="nm-row" data-i="${i}">
+      <span class="i">${i + 1}</span>
+      <input class="st" list="nmStaList" value="${esc(r.name)}" placeholder="车站名" autocomplete="off">
+      <input class="km" type="number" step="0.1" min="0" inputmode="decimal"
+             value="${esc(r.km)}" placeholder="累计 km（可空）">
+      <button class="del" title="删掉这一行">×</button>
+    </div>`).join('');
+
+  $$('#nmRows .nm-row').forEach(row => {
+    const i = Number(row.dataset.i);
+    row.querySelector('input.st').addEventListener('input', e => { NM.rows[i].name = e.target.value; });
+    row.querySelector('input.km').addEventListener('input', e => { NM.rows[i].km = e.target.value; });
+    row.querySelector('.del').addEventListener('click', () => {
+      NM.rows.splice(i, 1);
+      nmRenderRows();
+    });
+  });
+}
+
+async function nmSave() {
+  if (NM.busy) return;
+  const name = ($('#nmName').value || '').trim();
+  if (!name) return nmSetMsg('先填名字', true);
+
+  if (NM.kind === 'line') {
+    const stations = NM.rows
+      .map(r => ({ name: (r.name || '').trim(), km: String(r.km || '').trim() === '' ? null : Number(r.km) }))
+      .filter(r => r.name);
+    const bad = stations.find(r => r.km != null && (!Number.isFinite(r.km) || r.km < 0));
+    if (bad) return nmSetMsg(`${bad.name} 的累计里程不对`, true);
+    if (stations.length < 2) return nmSetMsg('至少填两个车站', true);
+  } else {
+    const lv = ($('#nmLat').value || '').trim(), ov = ($('#nmLon').value || '').trim();
+    if (!lv || !ov) return nmSetMsg('经纬度要填齐，或直接粘贴「经度,纬度」', true);
+    if (!Number.isFinite(Number(lv)) || !Number.isFinite(Number(ov)))
+      return nmSetMsg('经纬度必须是数字', true);
+  }
+
+  NM.busy = true;
+  nmSetMsg('保存中…');
+  try {
+    if (NM.kind === 'line') {
+      const stations = NM.rows
+        .map(r => ({ name: (r.name || '').trim(), km: String(r.km || '').trim() === '' ? null : Number(r.km) }))
+        .filter(r => r.name);
+      const r = await postJSON('/api/line/new', {
+        name, stations, note: ($('#nmNote').value || '').trim(),
+      });
+      nmClose();
+      switchTab('net');
+      netKind = 'line';
+      $$('.net-toggle .chipsel').forEach(b => b.classList.toggle('active', b.dataset.kind === 'line'));
+      $('#netQ').value = r.line.name;
+      showLine(r.line.name);
+    } else {
+      const r = await postJSON('/api/station/new', {
+        name,
+        lat: Number($('#nmLat').value), lon: Number($('#nmLon').value),
+        lines: ($('#nmLines').value || '').trim(),
+        tele: ($('#nmTele').value || '').trim(),
+        bureau: ($('#nmBureau').value || '').trim(),
+        note: ($('#nmNote').value || '').trim(),
+      });
+      nmClose();
+      switchTab('net');
+      netKind = 'station';
+      $$('.net-toggle .chipsel').forEach(b => b.classList.toggle('active', b.dataset.kind === 'station'));
+      $('#netQ').value = r.station.name;
+      showStation(r.station.name);
+    }
+  } catch (e) {
+    nmSetMsg(e.message, true);
+  } finally {
+    NM.busy = false;
+  }
+}
+
 async function searchNet() {
   const q = $('#netQ').value.trim();
   clearTimeout(netTimer);                       // 防止待触发的联想把下拉框又翻开
@@ -1195,7 +1424,8 @@ async function showStation(q) {
       <div class="dhead">
         <div class="l1"><span class="code">${d.name}</span>
           ${d.tele ? `<span class="tag">电报码 ${d.tele}</span>` : ''}
-          ${d.type ? `<span class="tag">${d.type}</span>` : ''}</div>
+          ${d.type ? `<span class="tag">${d.type}</span>` : ''}
+          ${d.custom ? '<span class="tag manual">自建</span><button class="btn sm ghost ln-edit" id="stDel">删除</button>' : ''}</div>
         <div class="l2">${[d.province, d.city, d.district].filter(Boolean).join(' / ') || d.loc || ''}</div>
         <div class="l3">
           ${d.bureau ? `<span>${d.bureau}</span>` : ''}
@@ -1215,6 +1445,23 @@ async function showStation(q) {
           <div class="km"></div></li>
       </ul>`;
     det.classList.add('show');
+    const stDel = $('#stDel');
+    if (stDel) {
+      let armed = false;
+      stDel.addEventListener('click', async () => {
+        if (!armed) {
+          armed = true;
+          stDel.textContent = '确认删除？';
+          setTimeout(() => { armed = false; stDel.textContent = '删除'; }, 3000);
+          return;
+        }
+        try {
+          await postJSON('/api/station/delete', { name: d.name });
+          det.classList.remove('show');
+          box.innerHTML = `<div class="empty">已删除自建车站「${d.name}」</div>`;
+        } catch (e) { stDel.textContent = '删除失败'; }
+      });
+    }
     $$('#netDetail .chip[data-line]').forEach(b =>
       b.addEventListener('click', () => showLine(b.dataset.line)));
     if (d.lat != null) {
@@ -1229,7 +1476,7 @@ async function showStation(q) {
 }
 
 /* ---------- 线路里程：人工校正 ---------- */
-const LN = { data: null, segKm: {}, totalKm: '', editing: false, busy: false };
+const LN = { data: null, segKm: {}, totalKm: '', editing: false, busy: false, mode: 'seg' };
 
 const lnKmText = v => (v == null ? '-' : `${v} km`);
 
@@ -1242,6 +1489,18 @@ function lnSegBase(d) {
     if (a == null || b == null || b < a) return null;
     return Math.round((b - a) * 10) / 10;
   });
+}
+
+/** 档案累计里程（只看档案值，不受手填影响），不详为 null */
+function lnCumBase() {
+  const seg = lnSegBase(LN.data);
+  const st = (LN.data && LN.data.stations) || [];
+  const cum = [st.length && st[0].kmBase != null ? st[0].kmBase : 0];
+  for (let i = 0; i < seg.length; i++) {
+    cum[i + 1] = (cum[i] == null || seg[i] == null)
+      ? null : Math.round((cum[i] + seg[i]) * 10) / 10;
+  }
+  return cum;
 }
 
 /** 与后端 cnrail._rebuild_km 同规则，算出「当前输入下」的区间与累计里程 */
@@ -1296,6 +1555,8 @@ function lnSetDirty(msg) {
 function lnRenderSegs() {
   const boxEl = $('#lnSegs');
   if (!boxEl) return;
+  if (LN.mode === 'cum') return lnRenderCum();
+
   const d = LN.data, base = lnSegBase(d), st = d.stations || [];
   boxEl.innerHTML = st.slice(0, -1).map((p, i) => {
     const a = base[i];
@@ -1338,6 +1599,12 @@ function lnRenderSegs() {
     };
     inp.addEventListener('input', apply);
     inp.addEventListener('blur', apply);
+    inp.addEventListener('keydown', e => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      const next = row.nextElementSibling;
+      if (next) next.querySelector('input.km').focus(); else inp.blur();
+    });
     clr.addEventListener('click', () => {
       inp.value = '';
       delete LN.segKm[i];
@@ -1348,6 +1615,100 @@ function lnRenderSegs() {
       lnRefreshPreview();
       lnSetDirty('有未保存的修改');
     });
+  });
+}
+
+/** 累计模式：直接填「自起点站到这一站的公里数」，内部反算成段距保存 */
+function lnRenderCum() {
+  const boxEl = $('#lnSegs');
+  const d = LN.data, st = (d && d.stations) || [];
+  if (st.length < 2) {
+    boxEl.innerHTML = '<div class="ve-note">这条线只有一站，没有可填的里程。</div>';
+    return;
+  }
+  const eff = lnEffective(), baseCum = lnCumBase();
+  const first = st[0].name;
+  boxEl.innerHTML = st.slice(1).map((p, k) => {
+    const i = k + 1;
+    const has = LN.segKm[i - 1] != null;
+    const prev = eff.cum[i - 1], cur = eff.cum[i], base = baseCum[i];
+    const locked = prev == null;
+    const dd = (cur != null && base != null) ? Math.round((cur - base) * 10) / 10 : null;
+    const dtxt = dd == null ? '' : (Math.abs(dd) < 0.05 ? '=' : (dd > 0 ? '+' : '') + dd.toFixed(1));
+    return `<div class="seg-row cum${has ? ' manual' : ''}${locked ? ' lock' : ''}" data-i="${i}">
+      <span class="i">${i + 1}</span>
+      <span class="od" title="自 ${esc(first)} 起算">${esc(p.name)}</span>
+      <input class="km" type="number" step="0.1" min="0" max="20000" inputmode="decimal"
+             value="${has && cur != null ? cur : ''}" placeholder="${cur == null ? '-' : cur.toFixed(1)}"
+             ${locked ? 'disabled' : ''}
+             title="${locked ? '前面有里程不详的区间，先切到「按段距」补齐' : `留空沿用当前累计 ${cur == null ? '-' : cur.toFixed(1)} km`}">
+      <span class="u">km</span>
+      <button class="seg-clr" title="恢复档案值"${has ? '' : ' disabled'}>↺</button>
+      <span class="auto">${dtxt}</span>
+    </div>`;
+  }).join('');
+
+  $$('#lnSegs .seg-row').forEach(row => {
+    const i = Number(row.dataset.i);
+    const inp = row.querySelector('input.km');
+    const clr = row.querySelector('.seg-clr');
+    const apply = () => {
+      const raw = inp.value.trim();
+      const c = Number(raw);
+      if (raw === '' || !Number.isFinite(c) || c <= 0) {
+        delete LN.segKm[i - 1];
+        row.classList.remove('manual', 'bad');
+        clr.disabled = true;
+      } else {
+        const prev = lnEffective().cum[i - 1];
+        const dv = prev == null ? null : Math.round((c - prev) * 10) / 10;
+        if (dv == null || dv <= 0) {
+          row.classList.add('bad');
+          lnSetDirty(prev == null
+            ? '前面有里程不详的区间，先切到「按段距」补齐'
+            : `第 ${i + 1} 站的累计要大于前一站的 ${prev.toFixed(1)} km`);
+          return;
+        }
+        row.classList.remove('bad');
+        row.classList.add('manual');
+        clr.disabled = false;
+        LN.segKm[i - 1] = dv;
+      }
+      lnRefreshCumRows();
+      lnRefreshPreview();
+      lnSetDirty('有未保存的修改');
+    };
+    inp.addEventListener('input', apply);
+    inp.addEventListener('keydown', e => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      const next = row.nextElementSibling;
+      if (next) next.querySelector('input.km').focus(); else inp.blur();
+    });
+    clr.addEventListener('click', () => {
+      delete LN.segKm[i - 1];
+      lnRenderSegs();
+      lnRefreshPreview();
+      lnSetDirty('有未保存的修改');
+    });
+  });
+}
+
+/** 累计模式下只刷新数值（不重建输入框，免得输入时丢焦点） */
+function lnRefreshCumRows() {
+  const eff = lnEffective(), baseCum = lnCumBase();
+  $$('#lnSegs .seg-row.cum').forEach(row => {
+    const i = Number(row.dataset.i);
+    const inp = row.querySelector('input.km');
+    const has = LN.segKm[i - 1] != null;
+    if (document.activeElement !== inp) {
+      inp.value = has && eff.cum[i] != null ? eff.cum[i] : '';
+      inp.placeholder = eff.cum[i] == null ? '-' : eff.cum[i].toFixed(1);
+    }
+    const dd = (eff.cum[i] != null && baseCum[i] != null)
+      ? Math.round((eff.cum[i] - baseCum[i]) * 10) / 10 : null;
+    const el = row.querySelector('.auto');
+    if (el) el.textContent = dd == null ? '' : (Math.abs(dd) < 0.05 ? '=' : (dd > 0 ? '+' : '') + dd.toFixed(1));
   });
 }
 
@@ -1441,7 +1802,11 @@ function lnRenderHead() {
       <span class="tag${d.totalKm == null ? ' warn' : ''}">${lnKmText(d.totalKm)}</span>
       ${d.kmManual ? '<span class="tag manual">人工里程</span>' : ''}
       ${d.kmComplete ? '' : '<span class="tag warn">里程不完整</span>'}
-      <button class="btn sm ln-edit${LN.editing ? ' on' : ''}" id="lnEditBtn">${LN.editing ? '收起编辑' : '编辑里程'}</button>
+      ${d.custom ? '<span class="tag manual">自建</span>' : ''}
+      <span class="ln-acts">
+        ${d.custom ? '<button class="btn sm ghost" id="lnDel">删除</button>' : ''}
+        <button class="btn sm${LN.editing ? ' on' : ''}" id="lnEditBtn">${LN.editing ? '收起编辑' : '编辑里程'}</button>
+      </span>
     </div>
     <div class="l2">坐标覆盖 ${d.coordCoverage}% · 点击站点查看所属线路 · <span id="lnFoot"></span></div>`;
   $('#lnEditBtn').addEventListener('click', () => {
@@ -1450,6 +1815,28 @@ function lnRenderHead() {
     lnRenderHead();
     lnRenderEditor();
   });
+  const del = $('#lnDel');
+  if (del) {
+    let armed = false;
+    del.addEventListener('click', async () => {
+      if (!armed) {
+        armed = true;
+        del.textContent = '确认删除？';
+        setTimeout(() => { armed = false; del.textContent = '删除'; }, 3000);
+        return;
+      }
+      try {
+        await postJSON('/api/line/delete', { name: d.name });
+        LN.data = null; LN.segKm = {}; LN.totalKm = ''; LN.editing = false;
+        lnWide(false);
+        $('#netDetail').classList.remove('show');
+        $('#paneNet').classList.remove('line-only');
+        $('#netList').innerHTML = `<div class="empty">已删除自建线路「${d.name}」</div>`;
+      } catch (e) {
+        del.textContent = '删除失败';
+      }
+    });
+  }
   lnRefreshPreview();
 }
 
@@ -1464,7 +1851,13 @@ function lnRenderEditor() {
   host.innerHTML = `
     <div class="lnkm-head">
       <b>线路里程</b>
-      <span class="lnkm-hint">灰字是档案值，留空沿用；填了就锁住这一段，不详的段显示 -</span>
+      <div class="segmode" id="lnMode">
+        <button data-mode="seg" class="${LN.mode === 'seg' ? 'on' : ''}" title="填相邻两站之间的公里数">按段距</button>
+        <button data-mode="cum" class="${LN.mode === 'cum' ? 'on' : ''}" title="填自起点站算起的累计公里数">按累计</button>
+      </div>
+      <span class="lnkm-hint">${LN.mode === 'seg'
+        ? '灰字是档案值，留空沿用；填了就锁住这一段，不详的段显示 -'
+        : '填「从起点站到这一站」的累计公里数，不详的显示 -'}</span>
       <div class="lnkm-btns">
         <button class="btn sm primary" id="lnSave">保存</button>
         <button class="btn sm" id="lnResetAll">全部恢复档案</button>
@@ -1484,6 +1877,13 @@ function lnRenderEditor() {
       <span class="lnkm-seg" id="lnMsg"></span>
     </div>
     <div class="ve-note">档案里 ${segs.length} 段，其中 ${known} 段有里程；填了总里程时，只有没手填的段会等比缩放到「总里程 − 手填段之和」。保存后车次详情、地图、时间轴全部同步。</div>`;
+
+  $$('#lnMode button').forEach(b => b.addEventListener('click', () => {
+    if (LN.mode === b.dataset.mode) return;
+    LN.mode = b.dataset.mode;
+    $$('#lnMode button').forEach(x => x.classList.toggle('on', x.dataset.mode === LN.mode));
+    lnRenderEditor();
+  }));
 
   lnRenderSegs();
   $('#lnSave').addEventListener('click', lnSave);
@@ -1882,6 +2282,15 @@ async function boot() {
     $('#netQ').placeholder = netKind === 'station' ? '北京南' : '京沪高速';
     if ($('#netQ').value.trim()) searchNet();
   }));
+  // 新增线路 / 车站
+  $('#btnNewLine') && $('#btnNewLine').addEventListener('click', () => nmOpen('line'));
+  $('#btnNewStation') && $('#btnNewStation').addEventListener('click', () => nmOpen('station'));
+  $('#nmSave').addEventListener('click', nmSave);
+  $('#nmCancel').addEventListener('click', nmClose);
+  $('#newModal').addEventListener('click', e => { if (e.target.id === 'newModal') nmClose(); });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && !$('#newModal').classList.contains('hidden')) nmClose();
+  });
 
   // dock
   $('#btnPlay').addEventListener('click', () => {
@@ -1972,7 +2381,7 @@ const CU_FILTERS = [
 const CU = {
   filter: 'todo', q: '', items: [], total: 0, limit: 60,
   sel: null, detail: null, via: [], segKm: {}, lines: null, poll: null,
-  coordQ: '', coordOnlyMiss: false,
+  coordQ: '', coordOnlyMiss: false, mode: 'seg',
 };
 
 const esc = s => String(s == null ? '' : s)
@@ -2243,8 +2652,14 @@ function cuRenderEditor() {
     </div>
 
     <div class="ce-card">
-      <h4>站间里程
-        <span class="hint">相邻两站之间的公里数；灰字是自动值，留空就沿用，右侧显示与自动值的差</span>
+      <h4>${CU.mode === 'cum' ? '累计里程' : '站间里程'}
+        <span class="segmode" id="ceSegMode">
+          <button data-mode="seg" class="${CU.mode === 'seg' ? 'on' : ''}" title="填相邻两站之间的公里数">按段距</button>
+          <button data-mode="cum" class="${CU.mode === 'cum' ? 'on' : ''}" title="填自始发站算起的累计公里数">按累计</button>
+        </span>
+        <span class="hint">${CU.mode === 'cum'
+          ? '从始发站算起的累计公里数；空白框里的灰字是当前值，右侧显示与自动累计的差'
+          : '相邻两站之间的公里数；灰字是自动值，留空就沿用，右侧显示与自动值的差'}</span>
         <span class="right">
           <button id="ceSegClear" class="btn sm ghost">全部恢复自动</button>
         </span>
@@ -2318,6 +2733,11 @@ function cuRenderEditor() {
     cuRenderStops();
     cuCheck();
   });
+  $$('#ceSegMode button').forEach(b => b.addEventListener('click', () => {
+    if (CU.mode === b.dataset.mode) return;
+    CU.mode = b.dataset.mode;
+    cuRenderEditor();
+  }));
   $('#ceSegClear').addEventListener('click', () => {
     CU.segKm = {};
     cuRenderSegKm();
@@ -2686,6 +3106,8 @@ function cuRenderSegKm() {
     cuSegSummary();
     return;
   }
+  if (CU.mode === 'cum') return cuRenderSegCum();
+
   box.innerHTML = stops.slice(0, -1).map((s, i) => {
     const a = auto[i] || 0;
     const v = CU.segKm[i];
@@ -2748,6 +3170,97 @@ function cuRenderSegKm() {
     });
   });
   cuSegSummary();
+}
+
+/** 累计模式：填「从始发站到这一站」的累计公里数，内部反算成段距 */
+function cuRenderSegCum() {
+  const box = $('#ceSegList');
+  const stops = (CU.detail && CU.detail.stops) || [];
+  const eff = cuEffectiveKm();
+  const first = stops.length ? stops[0].name : '';
+  box.innerHTML = stops.slice(1).map((s, k) => {
+    const i = k + 1;
+    const has = CU.segKm[i - 1] != null;
+    const cur = eff.cum[i];
+    const base = Number(s.km || 0);
+    const dd = Math.round((cur - base) * 10) / 10;
+    const dtxt = Math.abs(dd) < 0.05 ? '=' : (dd > 0 ? '+' : '') + dd.toFixed(1);
+    return `<div class="seg-row cum${has ? ' manual' : ''}" data-i="${i}">
+      <span class="i">${i + 1}</span>
+      <span class="od" title="自 ${esc(first)} 起算">${esc(s.name)}</span>
+      <input class="km" type="number" step="0.1" min="0" max="20000" inputmode="decimal"
+             value="${has ? cur.toFixed(1) : ''}" placeholder="${cur.toFixed(1)}"
+             title="留空沿用当前累计 ${cur.toFixed(1)} km">
+      <span class="u">km</span>
+      <button class="seg-clr" title="恢复自动值"${has ? '' : ' disabled'}>↺</button>
+      <span class="auto" title="与自动累计的差">${dtxt}</span>
+    </div>`;
+  }).join('');
+
+  $$('#ceSegList .seg-row').forEach(row => {
+    const i = Number(row.dataset.i);
+    const inp = row.querySelector('input.km');
+    const clr = row.querySelector('.seg-clr');
+    const apply = () => {
+      const raw = inp.value.trim();
+      const c = Number(raw);
+      if (raw === '' || !Number.isFinite(c) || c <= 0) {
+        delete CU.segKm[i - 1];
+        row.classList.remove('manual', 'bad');
+        clr.disabled = true;
+      } else {
+        const prev = cuEffectiveKm().cum[i - 1];
+        const dv = Math.round((c - prev) * 10) / 10;
+        if (dv <= 0) {
+          row.classList.add('bad');
+          cuMsg('bad', `第 ${i + 1} 站的累计要大于前一站的 ${prev.toFixed(1)} km`);
+          return;
+        }
+        row.classList.remove('bad');
+        row.classList.add('manual');
+        clr.disabled = false;
+        CU.segKm[i - 1] = dv;
+      }
+      cuRefreshCumRows();
+      cuSegSummary();
+      cuRenderStops();
+      cuCheck();
+    };
+    inp.addEventListener('input', apply);
+    inp.addEventListener('keydown', e => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      const next = row.nextElementSibling;
+      if (next) next.querySelector('input.km').focus(); else inp.blur();
+    });
+    clr.addEventListener('click', () => {
+      delete CU.segKm[i - 1];
+      cuRenderSegKm();
+      cuRenderStops();
+      cuCheck();
+    });
+  });
+  cuSegSummary();
+}
+
+/** 累计模式刷新数值（不重建输入框，避免丢焦点） */
+function cuRefreshCumRows() {
+  const stops = (CU.detail && CU.detail.stops) || [];
+  const eff = cuEffectiveKm();
+  $$('#ceSegList .seg-row.cum').forEach(row => {
+    const i = Number(row.dataset.i);
+    const inp = row.querySelector('input.km');
+    const has = CU.segKm[i - 1] != null;
+    const cur = eff.cum[i];
+    if (document.activeElement !== inp) {
+      inp.value = has ? cur.toFixed(1) : '';
+      inp.placeholder = cur.toFixed(1);
+    }
+    const base = Number((stops[i] || {}).km || 0);
+    const dd = Math.round((cur - base) * 10) / 10;
+    const el = row.querySelector('.auto');
+    if (el) el.textContent = Math.abs(dd) < 0.05 ? '=' : (dd > 0 ? '+' : '') + dd.toFixed(1);
+  });
 }
 
 function cuSegSummary() {

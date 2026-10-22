@@ -25,6 +25,7 @@ SEARCH_DIRS = [
 ]
 
 _STATIONS: Optional[Dict[str, dict]] = None
+_STATIONS_RAW: Optional[Dict[str, dict]] = None                  # 档案原值，用户新增的车站在副本上合并
 _LINES: Optional[List[dict]] = None
 _LINES_RAW: Optional[List[dict]] = None                          # 档案原值，人工里程在副本上生效
 _BY_LINE: Optional[Dict[str, dict]] = None
@@ -35,6 +36,10 @@ _LOADED = False
 # 人工里程：{线路名: {"segKm": {"0": 12.3}, "totalKm": 240.0}}
 # 键是区间序号（第 i 站 → 第 i+1 站），与站名解耦
 _LINE_OVR: Dict[str, dict] = {}
+
+# 用户新增的线路 / 车站（档案里没有的）
+_CUSTOM_LINES: Dict[str, dict] = {}
+_CUSTOM_STATIONS: Dict[str, dict] = {}
 
 
 def _find(fn: str) -> Optional[str]:
@@ -62,18 +67,19 @@ def _key(name: str) -> str:
 
 
 def load(force: bool = False) -> bool:
-    global _STATIONS, _LINES_RAW, _LOADED
+    global _STATIONS, _STATIONS_RAW, _LINES_RAW, _LOADED
     if _LOADED and not force:
         return bool(_STATIONS)
 
     sp, lp = _find("cnrail_stations.json"), _find("cnrail_lines.json")
     if not sp or not lp:
-        _LOADED, _STATIONS, _LINES_RAW = True, {}, []
+        _LOADED, _STATIONS, _STATIONS_RAW, _LINES_RAW = True, {}, {}, []
         rebuild_lines()
         return False
 
     with open(sp, encoding="utf-8") as f:
         _STATIONS = json.load(f)
+    _STATIONS_RAW = dict(_STATIONS)
     with open(lp, encoding="utf-8") as f:
         _LINES_RAW = json.load(f)
 
@@ -158,7 +164,9 @@ def _line_with_override(raw: dict, ov: Optional[dict]) -> dict:
 def rebuild_lines() -> None:
     """把人工里程套回线路表，并重建「站名 → 线路里程」索引"""
     global _LINES, _BY_LINE, _POS, _POSALL
-    raw_lines = _LINES_RAW or []
+    custom = _CUSTOM_LINES or {}
+    raw_lines = list(custom.values())
+    raw_lines += [r for r in (_LINES_RAW or []) if r.get("name") not in custom]
     _LINES = [_line_with_override(r, _LINE_OVR.get(r.get("name"))) for r in raw_lines]
     _BY_LINE = {ln["name"]: ln for ln in _LINES}
 
@@ -183,6 +191,42 @@ def set_line_overrides(mapping: Optional[Dict[str, dict]]) -> None:
     """设置全部人工线路里程（railcore 启动与保存时调用）；已加载则立即重建"""
     global _LINE_OVR
     _LINE_OVR = {k: v for k, v in (mapping or {}).items() if v}
+    if _LOADED:
+        rebuild_lines()
+
+
+def set_custom(lines: Optional[Dict[str, dict]] = None,
+               stations: Optional[Dict[str, dict]] = None) -> None:
+    """
+    设置用户新增的线路 / 车站（railcore 启动与保存时调用）。
+    lines    {线路名: {name, n, totalKm, kmComplete, kmReliable, stations:[{name, km}], custom:True}}
+    stations {站名键: {name, lat, lon, lines:[], tele, bureau, custom:True}}
+    """
+    global _CUSTOM_LINES, _CUSTOM_STATIONS, _STATIONS
+    _ensure()
+    if lines is not None:
+        _CUSTOM_LINES = {k: v for k, v in lines.items() if v}
+    if stations is not None:
+        _CUSTOM_STATIONS = {k: v for k, v in stations.items() if v}
+        merged: Dict[str, dict] = dict(_STATIONS_RAW or {})
+        for key, st in _CUSTOM_STATIONS.items():
+            base = merged.get(key)
+            if base:
+                cur = dict(base)                     # 别改到档案原值
+                for f in ("lat", "lon"):
+                    if cur.get(f) is None and st.get(f) is not None:
+                        cur[f] = st[f]
+                for f in ("tele", "bureau"):
+                    if not cur.get(f) and st.get(f):
+                        cur[f] = st[f]
+                if st.get("lines"):
+                    cur["lines"] = list(dict.fromkeys(
+                        list(cur.get("lines") or []) + list(st["lines"])))
+                cur["custom"] = True
+                merged[key] = cur
+            else:
+                merged[key] = dict(st)
+        _STATIONS = merged
     if _LOADED:
         rebuild_lines()
 
@@ -500,45 +544,85 @@ def refine_km(stops: Sequence[dict], fallback_haversine=None) -> dict:
             "mode": mode, "factor": round(factor, 3)}
 
 
-def expand_path(stops: Sequence[dict], max_points: int = 1500) -> List[dict]:
+def _pick_segment(ka_: str, kb_: str, ka: float, kb: float):
+    """在「相邻经停站对」之间找一条能贴合的线路：返回 (线路序号, 起站位, 止站位, 起里程, 跨度, 比例)"""
+    best = None
+    if not _POS:
+        return None
+    for li, pa, lka in _POS.get(ka_, ()):
+        for lj, pb, lkb in _POS.get(kb_, ()):
+            if li != lj or lka is None or lkb is None or pb <= pa:
+                continue
+            span = lkb - lka
+            if span < 1:
+                continue
+            ratio = (kb - ka) / span
+            if 0.7 <= ratio <= 1.4:                  # 里程口径要一致，否则不是同一段
+                if best is None or pb - pa > best[2] - best[1]:
+                    best = (li, pa, pb, lka, span, ratio)
+    return best
+
+
+def path_stations(stops: Sequence[dict], max_points: int = 2000,
+                  prefer: Optional[Sequence[str]] = None) -> List[dict]:
     """
-    把「经停站序列」展开成贴合线路的多段折线：
-    对每对相邻经停站，若两者同在一条有里程的线路上，就把该线中间的站补进来，
-    再按累计里程比例映射到本趟车的里程坐标。返回 [{lat, lon, km}]（km 单调递增）。
+    把「经停站序列」展开成「经由铁路线上的全部车站」：
+    相邻两站若在同一条线路上，就把该线中间的站补进来，按里程比例映射到本趟车的里程坐标。
+
+    prefer 是优先采用的线路名（人工 / 自动推断出来的经由），命中时优先按它展开。
+
+    返回 [{name, lat, lon, km, stop, idx}]：
+      stop=True  本趟车停车（含始发、终到），idx 为在 stops 里的下标
+      stop=False 列车通过但不办客的中间站
     """
     _ensure()
     pts: List[dict] = []
     n = len(stops)
+    prefs = [_norm(x) for x in (prefer or []) if x]
 
-    def push(lat, lon, km):
+    def push(name, lat, lon, km, stop=False, idx=None):
         if lat is None or lon is None:
             return
-        if pts and abs(pts[-1]["lat"] - lat) < 1e-7 and abs(pts[-1]["lon"] - lon) < 1e-7:
-            pts[-1]["km"] = km
+        if not stop:
+            # 线路所 / 中继站不是车站，不往地图上堆
+            nk = _norm(name)
+            if nk.endswith("线路所") or nk.endswith("所") or nk.endswith("中继站") or "线路所" in nk:
+                return
+        if pts and _key(pts[-1]["name"]) == _key(name):
+            pts[-1]["km"] = round(km, 1)
+            if stop:
+                pts[-1]["stop"] = True
+                pts[-1]["idx"] = idx
             return
-        pts.append({"lat": round(lat, 5), "lon": round(lon, 5), "km": round(km, 1)})
+        pts.append({"name": name, "lat": round(float(lat), 5), "lon": round(float(lon), 5),
+                    "km": round(float(km), 1), "stop": bool(stop), "idx": idx})
 
     for i in range(n):
         s = stops[i]
-        push(s.get("lat"), s.get("lon"), s.get("km") or 0.0)
+        push(s.get("name"), s.get("lat"), s.get("lon"), s.get("km") or 0.0, True, i)
         if i == n - 1:
             break
         a, b = s, stops[i + 1]
-        ka, kb = a.get("km") or 0.0, b.get("km") or 0.0
-        ka_, kb_ = _key(a["name"]), _key(b["name"])
-        best = None
-        if _POS:
-            for li, pa, lka in _POS.get(ka_, ()):
-                for lj, pb, lkb in _POS.get(kb_, ()):
+        ka, kb = float(a.get("km") or 0.0), float(b.get("km") or 0.0)
+        best = _pick_segment(_key(a["name"]), _key(b["name"]), ka, kb)
+        if prefs and best is not None:
+            # 有经由记录时，优先用经由里点到的那条线
+            hits = []
+            for li, pa, lka in _POS.get(_key(a["name"]), ()):
+                for lj, pb, lkb in _POS.get(_key(b["name"]), ()):
                     if li != lj or lka is None or lkb is None or pb <= pa:
+                        continue
+                    if _norm(_LINES[li]["name"]) not in prefs:
                         continue
                     span = lkb - lka
                     if span < 1:
                         continue
                     ratio = (kb - ka) / span
-                    if 0.7 <= ratio <= 1.4:          # 里程口径要一致，否则不是同一段
-                        if best is None or pb - pa > best[2]:
-                            best = (li, pa, pb, lka, span, ratio)
+                    if 0.7 <= ratio <= 1.4:
+                        hits.append((li, pa, pb, lka, span, ratio))
+            if hits:
+                hits.sort(key=lambda c: c[2] - c[1])     # 同一对站取最直接的那一段
+                best = hits[0]
         if not best:
             continue
         li, pa, pb, lka, span, ratio = best
@@ -547,10 +631,17 @@ def expand_path(stops: Sequence[dict], max_points: int = 1500) -> List[dict]:
             c = coord(mid["name"])
             if not c or mid["km"] is None:
                 continue
-            push(c[0], c[1], ka + (mid["km"] - lka) * ratio)
+            push(mid["name"], c[0], c[1], ka + (mid["km"] - lka) * ratio)
             if len(pts) > max_points:
                 return pts
     return pts
+
+
+def expand_path(stops: Sequence[dict], max_points: int = 1500,
+                prefer: Optional[Sequence[str]] = None) -> List[dict]:
+    """同 path_stations，但只取画线需要的 {lat, lon, km}（km 单调递增）"""
+    return [{"lat": p["lat"], "lon": p["lon"], "km": p["km"]}
+            for p in path_stations(stops, max_points, prefer)]
 
 
 def stats() -> dict:

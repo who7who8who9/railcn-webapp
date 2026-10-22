@@ -640,3 +640,64 @@ a{color:var(--accent)}
 .dhead .l1 .tag{flex:0 0 auto}
 .dhead .l1 .ln-edit{flex:0 0 auto}
 .lnkm-warn{font-size:11px;color:#b45309}
+
+/* ---------- 段距 / 累计 切换 ---------- */
+.segmode{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:#fff;flex:0 0 auto}
+.segmode button{border:none;background:transparent;padding:0 10px;height:24px;font:inherit;font-size:11px;
+  color:#5a6884;cursor:pointer;white-space:nowrap}
+.segmode button + button{border-left:1px solid var(--line)}
+.segmode button:hover{background:#f5f9ff}
+.segmode button.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.seg-row.cum .od{color:#3d4a60}
+.seg-row.cum input.km{text-align:right}
+.seg-row.bad input.km{border-color:#d92d20;box-shadow:0 0 0 3px rgba(217,45,32,.12)}
+.seg-row.lock{opacity:.55}
+.seg-row.lock input.km{background:#f6f8fc;cursor:not-allowed}
+.seg-row.bad .u{color:#d92d20}
+/* ---------- 地图图例 ---------- */
+.map-legend{position:absolute;left:12px;bottom:104px;z-index:8;display:flex;align-items:center;gap:10px;
+  background:rgba(255,255,255,.92);border:1px solid var(--line);border-radius:8px;padding:5px 9px;
+  font-size:11px;color:#3d4a60;box-shadow:0 2px 8px rgba(23,42,74,.08);pointer-events:none}
+.map-legend.hidden{display:none}
+.map-legend i{display:inline-flex;align-items:center;gap:4px;font-style:normal}
+.map-legend .dot{width:9px;height:9px;border-radius:50%;background:#1f6feb;border:2px solid #fff;
+  box-shadow:0 0 0 1px #1f6feb;display:inline-block}
+.map-legend .ps{width:7px;height:7px;border-radius:50%;background:#a9b7cc;display:inline-block}
+
+/* ---------- 新增线路 / 车站 ---------- */
+.net-add{margin-left:auto;display:inline-flex;gap:6px}
+.modal-card.wide{width:620px;max-width:calc(100vw - 40px);max-height:calc(100vh - 80px);
+  overflow:auto;display:flex;flex-direction:column}
+.modal-card.wide h3{font-size:14px;margin-bottom:12px}
+.nm-body{display:flex;flex-direction:column;gap:11px;min-height:0}
+.nm-field{display:flex;flex-direction:column;gap:5px;min-width:0}
+.nm-field label{font-size:11.5px;color:#5a6884}
+.modal-card .nm-body input{width:100%;height:32px;border:1px solid var(--line);border-radius:8px;
+  padding:0 9px;font:inherit;font-size:12px;outline:none;background:#fff;box-sizing:border-box}
+.modal-card .nm-body input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.nm-tip{font-size:10.5px;color:var(--muted);line-height:1.5}
+.nm-two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.nm-pair{display:flex;align-items:center;gap:7px;margin-top:2px}
+.nm-pair span{font-size:11px;color:#5a6884;flex:0 0 auto}
+.nm-pair input{flex:1 1 0;min-width:0}
+.nm-sec{border:1px solid var(--line-2);border-radius:10px;padding:9px 10px;background:#fbfdff}
+.nm-sec-h{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.nm-sec-h b{font-size:12px;color:#33415c}
+.nm-sec-h .btn{margin-left:auto}
+.nm-sec-h .nm-tip{flex:1 1 100%;order:3}
+.nm-rows{margin-top:8px;display:flex;flex-direction:column;gap:5px;max-height:300px;overflow:auto}
+.nm-row{display:grid;grid-template-columns:22px minmax(0,1fr) 120px 24px;gap:7px;align-items:center}
+.nm-row .i{font-size:10.5px;color:#9aa6ba;font-family:ui-monospace,Menlo,monospace;text-align:right}
+.nm-row .del{border:none;background:#f4f6fa;color:#8d99ac;border-radius:6px;height:26px;cursor:pointer;
+  font-size:13px;line-height:1;padding:0}
+.nm-row .del:hover{background:#fdeceb;color:#d92d20}
+.modal-card .nm-row input{height:28px}
+.modal-card .nm-row input.km{text-align:right;font-family:ui-monospace,Menlo,monospace;font-size:11.5px}
+.nm-msg{margin-right:auto;font-size:11.5px;color:#0f7a45;line-height:1.5;max-width:340px}
+.nm-msg.bad{color:#d92d20}
+.dhead .l1 .ln-acts{margin-left:auto;display:flex;gap:6px;flex:0 0 auto}
+
+.modal-card .nm-body input[type=number]{appearance:textfield;-moz-appearance:textfield}
+.modal-card .nm-body input[type=number]::-webkit-outer-spin-button,
+.modal-card .nm-body input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+.dhead .l1 .tag + .btn{margin-left:4px}

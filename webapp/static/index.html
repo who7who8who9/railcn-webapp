@@ -78,6 +78,10 @@
           <div class="net-toggle">
             <button class="chipsel active" data-kind="station">车站</button>
             <button class="chipsel" data-kind="line">线路</button>
+            <span class="net-add">
+              <button id="btnNewStation" class="btn sm ghost" title="车站库里没有的车站，可以自己补">+ 车站</button>
+              <button id="btnNewLine" class="btn sm ghost" title="线路库里没有的线路，可以自己补">+ 线路</button>
+            </span>
           </div>
         </div>
         <div id="netList" class="list"></div>
@@ -147,6 +151,10 @@
       <div id="map"></div>
       <svg id="fallback" class="hidden" xmlns="http://www.w3.org/2000/svg"></svg>
       <div id="mapHint" class="map-hint hidden"></div>
+      <div id="mapLegend" class="map-legend hidden">
+        <i><span class="dot"></span>本次停车（旁注发车时刻，终到为到达）</i>
+        <i><span class="ps"></span>经由线路通过站</i>
+      </div>
 
       <div id="hud" class="hud hidden">
         <div class="hud-top">
@@ -204,6 +212,18 @@
       <button id="keySave" class="btn primary">保存并刷新</button>
     </div>
     <p class="muted small">不配置也能用：路线会以「无底图示意模式」绘制，站点、时刻、位置推算功能不受影响。</p>
+  </div>
+</div>
+
+<div id="newModal" class="modal hidden">
+  <div class="modal-card wide">
+    <h3 id="nmTitle">新增线路</h3>
+    <div id="nmBody" class="nm-body"></div>
+    <div class="modal-actions">
+      <span id="nmMsg" class="nm-msg"></span>
+      <button id="nmCancel" class="btn ghost">取消</button>
+      <button id="nmSave" class="btn primary">保存</button>
+    </div>
   </div>
 </div>
 

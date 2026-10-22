@@ -154,6 +154,30 @@ class Handler(BaseHTTPRequestHandler):
                 refreshed = curate.refresh_station(res["name"])
                 return self.json({"ok": True, "refreshed": refreshed, **res})
 
+            # ---- 新增线路 / 车站 ----
+            if path == "/api/line/new":
+                ln = railcore.save_custom_line(
+                    payload.get("name"), payload.get("stations") or [],
+                    payload.get("note") or "",
+                )
+                return self.json({"ok": True, "line": ln})
+
+            if path == "/api/line/delete":
+                hit = railcore.delete_custom_line(payload.get("name"))
+                return self.json({"ok": True, "deleted": hit})
+
+            if path == "/api/station/new":
+                st = railcore.save_custom_station(
+                    payload.get("name"), payload.get("lat"), payload.get("lon"),
+                    payload.get("lines") or [], payload.get("tele") or "",
+                    payload.get("bureau") or "", payload.get("note") or "",
+                )
+                return self.json({"ok": True, "station": st})
+
+            if path == "/api/station/delete":
+                hit = railcore.delete_custom_station(payload.get("name"))
+                return self.json({"ok": True, "deleted": hit})
+
             if path == "/api/coord/clear":
                 res = railcore.clear_coord(payload.get("name"))
                 refreshed = curate.refresh_station(res["name"])
@@ -287,6 +311,16 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/curate/detail":
             return self.json(curate.detail(one("code")))
+
+        # ---- 用户新增的线路 / 车站 ----
+        if path == "/api/custom":
+            return self.json({"lines": railcore.list_custom_lines(),
+                              "stations": railcore.list_custom_stations()})
+
+        if path == "/api/stations/names":
+            names = sorted({v.get("name") for v in (cnrail._STATIONS or {}).values()
+                            if v.get("name")})
+            return self.json({"items": names, "count": len(names)})
 
         if path == "/api/curate/lineNames":
             items = [{"name": l["name"], "n": l.get("n"), "totalKm": l.get("totalKm"),

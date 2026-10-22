@@ -116,6 +116,27 @@ def init_db() -> None:
                 updated_at  REAL
             );
 
+            -- 用户新增的线路（档案里没有的）
+            CREATE TABLE IF NOT EXISTS line_custom (
+                name          TEXT PRIMARY KEY,
+                stations_json TEXT,        -- [{"name":"XX","km":12.3}]  km 可为 null
+                note          TEXT,
+                created_at    REAL,
+                updated_at    REAL
+            );
+
+            -- 用户新增的车站（档案里没有的）
+            CREATE TABLE IF NOT EXISTS station_custom (
+                name        TEXT PRIMARY KEY,
+                lat         REAL,
+                lon         REAL,
+                lines_json  TEXT,          -- ["XX线"]
+                tele        TEXT,
+                bureau      TEXT,
+                note        TEXT,
+                updated_at  REAL
+            );
+
             -- 数据校对扫描结果（curate.py 生成）
             CREATE TABLE IF NOT EXISTS curate (
                 code        TEXT PRIMARY KEY,
@@ -362,6 +383,204 @@ def _apply_line_overrides() -> None:
         name: {"segKm": ov.get("segKm") or {}, "totalKm": ov.get("totalKm")}
         for name, ov in line_override_map().items()
     })
+
+
+# ---------------------------------------------------------------------------
+# 用户新增的线路 / 车站（档案里没有的，存库后合并进 cnrail 的内存表）
+# ---------------------------------------------------------------------------
+
+def _norm_line_name(name: str) -> str:
+    return re.sub(r"\s+", "", str(name or ""))
+
+
+def _build_custom_line(name: str, stations, note: str = "") -> dict:
+    """校验并整理一条新增线路：站序 + 每站「自起点累计里程」（可空）"""
+    nm = _norm_line_name(name)
+    if not nm:
+        raise ValueError("线路名不能为空")
+    if len(nm) > 30:
+        raise ValueError("线路名太长（最多 30 字）")
+
+    clean: List[dict] = []
+    seen = set()
+    for it in stations or []:
+        sn = _norm_line_name(it.get("name") if isinstance(it, dict) else it)
+        if not sn:
+            continue
+        if sn in seen:
+            raise ValueError("站点重复：" + sn)
+        seen.add(sn)
+        raw = it.get("km") if isinstance(it, dict) else None
+        try:
+            km = float(raw) if raw not in (None, "") else None
+        except (TypeError, ValueError):
+            raise ValueError(f"{sn} 的里程不是数字")
+        if km is not None and km < 0:
+            raise ValueError(f"{sn} 的里程不能为负")
+        clean.append({"name": sn, "km": round(km, 1) if km is not None else None})
+
+    if len(clean) < 2:
+        raise ValueError("一条线路至少要两个站")
+
+    last = None
+    for p in clean:
+        if p["km"] is None:
+            continue
+        if last is not None and p["km"] <= last:
+            raise ValueError(f"{p['name']} 的累计里程要大于前一站（{last} km）")
+        last = p["km"]
+
+    total = clean[-1]["km"] if clean[-1]["km"] is not None else None
+    complete = all(p["km"] is not None for p in clean)
+    return {
+        "name": nm, "n": len(clean), "totalKm": total,
+        "kmComplete": complete, "kmReliable": complete,
+        "custom": True, "note": (note or "").strip(), "stations": clean,
+    }
+
+
+def list_custom_lines() -> List[dict]:
+    try:
+        with db() as conn:
+            rows = conn.execute(
+                "SELECT name, stations_json, note, updated_at FROM line_custom ORDER BY name"
+            ).fetchall()
+    except sqlite3.Error:
+        return []
+    out = []
+    for row in rows:
+        try:
+            sts = json.loads(row["stations_json"] or "[]")
+        except (TypeError, ValueError):
+            sts = []
+        out.append({"name": row["name"], "stations": sts, "n": len(sts),
+                    "note": row["note"], "updatedAt": row["updated_at"]})
+    return out
+
+
+def save_custom_line(name: str, stations, note: str = "") -> dict:
+    ln = _build_custom_line(name, stations, note)
+    if cnrail.line(ln["name"]):
+        raise ValueError(f"线路库里已经有「{ln['name']}」，改里程请用「编辑里程」")
+    now = time.time()
+    with _db_lock, db() as conn:
+        conn.execute(
+            """INSERT INTO line_custom(name, stations_json, note, created_at, updated_at)
+               VALUES(?,?,?,?,?)
+               ON CONFLICT(name) DO UPDATE SET stations_json=excluded.stations_json,
+                 note=excluded.note, updated_at=excluded.updated_at""",
+            (ln["name"], json.dumps(ln["stations"], ensure_ascii=False), ln["note"], now, now),
+        )
+    _apply_custom()
+    return cnrail.line_detail(ln["name"]) or ln
+
+
+def delete_custom_line(name: str) -> bool:
+    global _line_ovr_cache
+    nm = _norm_line_name(name)
+    with _db_lock, db() as conn:
+        hit = conn.execute("DELETE FROM line_custom WHERE name=?", (nm,)).rowcount > 0
+        # 顺手清掉这条线的里程校正，免得下次新建同名线路时套用旧值
+        conn.execute("DELETE FROM line_override WHERE name=?", (nm,))
+    if hit:
+        _line_ovr_cache = None
+        _apply_custom()
+        _apply_line_overrides()
+    return hit
+
+
+def list_custom_stations() -> List[dict]:
+    try:
+        with db() as conn:
+            rows = conn.execute(
+                "SELECT name, lat, lon, lines_json, tele, bureau, note, updated_at "
+                "FROM station_custom ORDER BY name"
+            ).fetchall()
+    except sqlite3.Error:
+        return []
+    out = []
+    for row in rows:
+        try:
+            lines = json.loads(row["lines_json"] or "[]")
+        except (TypeError, ValueError):
+            lines = []
+        out.append({"name": row["name"], "lat": row["lat"], "lon": row["lon"],
+                    "lines": lines, "tele": row["tele"], "bureau": row["bureau"],
+                    "note": row["note"], "updatedAt": row["updated_at"]})
+    return out
+
+
+def save_custom_station(name: str, lat, lon, lines=None, tele: str = "",
+                        bureau: str = "", note: str = "") -> dict:
+    nm = _norm_line_name(name)
+    if not nm:
+        raise ValueError("站名不能为空")
+    if cnrail.station(nm):
+        raise ValueError(f"车站库里已经有「{nm}」，改坐标请到「数据校对」里改")
+    try:
+        lat, lon = float(lat), float(lon)
+    except (TypeError, ValueError):
+        raise ValueError("经纬度必须是数字")
+    if not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
+        raise ValueError("经纬度超出范围")
+    if isinstance(lines, str):
+        lines = [x for x in re.split(r"[,，、;；\s]+", lines) if x]
+    lines = [x.strip() for x in (lines or []) if str(x).strip()]
+
+    now = time.time()
+    with _db_lock, db() as conn:
+        conn.execute(
+            """INSERT INTO station_custom(name, lat, lon, lines_json, tele, bureau, note, updated_at)
+               VALUES(?,?,?,?,?,?,?,?)
+               ON CONFLICT(name) DO UPDATE SET lat=excluded.lat, lon=excluded.lon,
+                 lines_json=excluded.lines_json, tele=excluded.tele,
+                 bureau=excluded.bureau, note=excluded.note, updated_at=excluded.updated_at""",
+            (nm, lat, lon, json.dumps(lines, ensure_ascii=False),
+             (tele or "").strip(), (bureau or "").strip(), (note or "").strip(), now),
+        )
+    _apply_custom()
+    reg = globals().get("stations")
+    if reg is not None:
+        try:
+            reg.reload_coords()               # 让新站的坐标立刻可用
+        except Exception:                     # noqa: BLE001
+            pass
+    return {"name": nm, "lat": lat, "lon": lon, "lines": lines}
+
+
+def delete_custom_station(name: str) -> bool:
+    nm = _norm_line_name(name)
+    with _db_lock, db() as conn:
+        hit = conn.execute("DELETE FROM station_custom WHERE name=?", (nm,)).rowcount > 0
+    if hit:
+        _apply_custom()
+        reg = globals().get("stations")
+        if reg is not None:
+            try:
+                reg.reload_coords()
+            except Exception:                 # noqa: BLE001
+                pass
+    return hit
+
+
+def _apply_custom() -> None:
+    """把库里新增的线路 / 车站合并进 cnrail"""
+    lines: Dict[str, dict] = {}
+    for it in list_custom_lines():
+        try:
+            ln = _build_custom_line(it["name"], it["stations"], it.get("note") or "")
+        except ValueError:
+            continue
+        lines[ln["name"]] = ln
+    sts: Dict[str, dict] = {}
+    for it in list_custom_stations():
+        if _norm_line_name(it["name"]):
+            sts[cnrail._key(it["name"])] = {
+                "name": it["name"], "lat": it["lat"], "lon": it["lon"],
+                "lines": it.get("lines") or [], "tele": it.get("tele") or "",
+                "bureau": it.get("bureau") or "", "custom": True,
+            }
+    cnrail.set_custom(lines, sts)
 
 
 def get_line_override(name: str) -> Optional[dict]:
@@ -1010,12 +1229,27 @@ def build_route_payload(code: str, date: str, force: bool = False,
             s["lines"] = []
 
     # ---- 展开成沿线折线（把线路中间站补进路径，地图不再是一根直线）----
+    # line_stops 同时给出「经由铁路线上的全部车站」，并标出哪些是本趟车停车站
     path: List[dict] = []
+    line_stops: List[dict] = []
     if with_path:
         try:
-            path = cnrail.expand_path(stops)
+            detail = cnrail.path_stations(
+                stops, prefer=[s.get("line") for s in (via.get("segs") or []) if s.get("line")])
         except Exception:                             # noqa: BLE001
-            path = []
+            detail = []
+        path = [{"lat": p["lat"], "lon": p["lon"], "km": p["km"]} for p in detail]
+        for p in detail:
+            item = {"name": p["name"], "lat": p["lat"], "lon": p["lon"],
+                    "km": p["km"], "stop": p["stop"]}
+            if p["stop"] and p.get("idx") is not None:
+                st = stops[p["idx"]]
+                item.update({
+                    "i": st["i"], "arr": st["arr"], "dep": st["dep"],
+                    "day": st.get("day", 0), "depDay": st.get("depDay", st.get("day", 0)),
+                    "stayMin": st.get("stayMin", 0),
+                })
+            line_stops.append(item)
 
     total_km = stops[-1]["km"] if stops else 0.0
 
@@ -1071,6 +1305,8 @@ def build_route_payload(code: str, date: str, force: bool = False,
         "stops": stops,
         "path": path,
         "pathPoints": len(path),
+        "lineStops": line_stops,
+        "linePassCount": sum(1 for p in line_stops if not p["stop"]),
         "missingCoords": missing,
         "coverage": round((len(stops) - len(missing)) / max(len(stops), 1) * 100, 1),
         "source": "cache" if from_cache else "live",
@@ -1222,13 +1458,17 @@ def station_detail(q: str) -> dict:
         "found": True,
         **{k: st.get(k) for k in ("name", "key", "en", "type", "loc", "province", "city",
                                   "district", "opened", "bureau", "tele", "services",
-                                  "wikidata", "lat", "lon", "coordSrc", "lines")},
+                                  "wikidata", "lat", "lon", "coordSrc", "lines", "custom")},
         "trainsFrom": as_start,
         "trainsTo": as_end,
     }
 
 
 init_db()
+try:
+    _apply_custom()                  # 用户新增的线路 / 车站先合进 cnrail
+except Exception:                    # 库坏了也不能让服务起不来
+    pass
 try:
     _apply_line_overrides()          # 人工线路里程在进程启动时就套进 cnrail
 except Exception:                    # 库坏了也不能让服务起不来

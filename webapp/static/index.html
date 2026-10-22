@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>railcn · 列车运行查询</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🚄</text></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">🚄</span>
+      <b>railcn</b>
+      <span class="sub">列车运行查询</span>
+    </div>
+    <div class="searchbar">
+      <div class="field grow">
+        <input id="q" autocomplete="off" placeholder="车次号，如 G1、G1033、D2287">
+        <div id="sugg" class="suggest hidden"></div>
+      </div>
+      <div class="field">
+        <input id="date" type="date">
+      </div>
+      <button id="btnSearch" class="btn primary">查询车次</button>
+    </div>
+    <div class="topright">
+      <span id="stats" class="stats"></span>
+      <button id="btnKey" class="btn ghost" title="配置腾讯地图 Key">地图</button>
+    </div>
+  </header>
+
+  <main>
+    <aside class="side">
+      <div class="tabs">
+        <button class="tab active" data-tab="train">车次详情</button>
+        <button class="tab" data-tab="od">站站查询</button>
+        <button class="tab" data-tab="net">车站/线路</button>
+        <button class="tab" data-tab="dl">数据下载</button>
+        <button class="tab" data-tab="hist">历史数据</button>
+      </div>
+
+      <!-- 车次 -->
+      <div id="paneTrain" class="pane">
+        <div id="trainList" class="list"></div>
+        <div id="detail" class="detail"></div>
+      </div>
+
+      <!-- 站站 -->
+      <div id="paneOD" class="pane hidden">
+        <div class="od-form">
+          <div class="od-row">
+            <div class="field"><label>出发</label><input id="odFrom" placeholder="北京南" autocomplete="off"><div class="suggest hidden" id="sugFrom"></div></div>
+            <button id="btnSwap" class="btn swap" title="交换">⇄</button>
+            <div class="field"><label>到达</label><input id="odTo" placeholder="上海虹桥" autocomplete="off"><div class="suggest hidden" id="sugTo"></div></div>
+          </div>
+          <div class="od-row">
+            <div class="field"><label>日期</label><input id="odDate" type="date"></div>
+            <button id="btnOD" class="btn primary">查余票</button>
+          </div>
+        </div>
+        <div id="odList" class="list"></div>
+      </div>
+
+      <!-- 车站 / 线路 -->
+      <div id="paneNet" class="pane hidden">
+        <div class="od-form">
+          <div class="od-row">
+            <div class="field" style="flex:1"><label>车站或线路名</label>
+              <input id="netQ" placeholder="北京南 / 京沪高速" autocomplete="off">
+              <div class="suggest hidden" id="sugNet"></div>
+            </div>
+            <button id="btnNet" class="btn primary">查询</button>
+          </div>
+          <div class="net-toggle">
+            <button class="chipsel active" data-kind="station">车站</button>
+            <button class="chipsel" data-kind="line">线路</button>
+          </div>
+        </div>
+        <div id="netList" class="list"></div>
+        <div id="netDetail" class="detail"></div>
+      </div>
+
+      <!-- 数据下载 -->
+      <div id="paneDL" class="pane hidden">
+        <div class="dl-head">
+          <div class="dl-h1">按日期下载全部车次与经停站</div>
+          <div class="dl-h2">含当日共 <b>15</b> 天；数据永久保存在本地 <code>rail.db</code>，已下载的车次不会重复抓取</div>
+          <div class="dl-ctrl">
+            <label>并发线程</label>
+            <select id="dlWorkers">
+              <option value="2">2（最慢最稳）</option>
+              <option value="4">4</option>
+              <option value="6" selected>6（推荐）</option>
+              <option value="8">8（最快，易限流）</option>
+            </select>
+            <button id="dlRefresh" class="btn ghost">刷新</button>
+          </div>
+        </div>
+        <div id="dlList" class="dl-list"></div>
+        <div id="dlDetail" class="dl-detail"></div>
+      </div>
+
+      <!-- 历史数据 -->
+      <div id="paneHist" class="pane hidden">
+        <div class="dl-head">
+          <div class="dl-h1">历史数据 · 已下载到本地</div>
+          <div class="dl-h2">包含全部已落库的日期（下载窗口内的和更早的都在），可检索车次、查看经停站、随时导出</div>
+          <div class="dl-ctrl">
+            <button id="histRefresh" class="btn sm">刷新</button>
+            <span id="histSum" class="hist-sum"></span>
+          </div>
+        </div>
+        <div id="histDates" class="hist-dates"></div>
+        <div class="hist-bar">
+          <input id="histQ" placeholder="车次号 / 始发站 / 终到站" autocomplete="off">
+          <button id="histGo" class="btn sm primary">检索</button>
+        </div>
+        <div id="histList" class="list"></div>
+        <div id="histFoot" class="hist-foot"></div>
+      </div>
+    </aside>
+
+    <section class="stage">
+      <div id="map"></div>
+      <svg id="fallback" class="hidden" xmlns="http://www.w3.org/2000/svg"></svg>
+      <div id="mapHint" class="map-hint hidden"></div>
+
+      <div id="hud" class="hud hidden">
+        <div class="hud-top">
+          <span id="hudCode" class="tcode">--</span>
+          <span id="hudRoute" class="hud-route"></span>
+        </div>
+        <div id="hudState" class="hud-state">—</div>
+        <div class="meter"><div id="hudBar" class="meter-fill"></div></div>
+        <div class="hud-grid">
+          <div><span class="k">已行</span><b id="hudKm">—</b></div>
+          <div><span class="k">剩余</span><b id="hudLeft">—</b></div>
+          <div><span class="k">下一站</span><b id="hudNext">—</b></div>
+          <div><span class="k">速度</span><b id="hudSpeed">—</b></div>
+        </div>
+      </div>
+
+      <div id="dock" class="dock hidden">
+        <button id="btnPlay" class="btn round" title="播放/暂停">▶</button>
+        <div class="dock-mid">
+          <div id="tl" class="tl" tabindex="0" role="slider" aria-label="运行时间轴"
+               aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+            <div class="tl-rail"><div id="tlFill" class="tl-fill"></div></div>
+            <div id="tlTicks" class="tl-ticks"></div>
+            <div id="tlKnob" class="tl-knob"><span id="tlTip" class="tl-tip"></span></div>
+          </div>
+          <div id="tlBand" class="tl-band hidden"></div>
+          <div class="dock-labels"><span id="labA">—</span><span id="labNow">—</span><span id="labB">—</span></div>
+        </div>
+        <div class="dock-right">
+          <button class="btn speed" data-speed="1">1×</button>
+          <button class="btn speed active" data-speed="60">60×</button>
+          <button class="btn speed" data-speed="300">300×</button>
+          <button id="btnNow" class="btn ghost">此刻</button>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="keyModal" class="modal hidden">
+  <div class="modal-card">
+    <h3>配置腾讯地图 Key</h3>
+    <p class="muted">地图底图使用腾讯位置服务（GL JS）。在 <a href="https://lbs.qq.com/dev/console/application/mine" target="_blank" rel="noreferrer">腾讯位置服务控制台</a> 创建应用并添加 Key（Web端），把 Key 粘贴到下面。Key 只保存在本机浏览器 localStorage 中。</p>
+    <input id="keyInput" placeholder="粘贴你的腾讯地图 Key">
+    <div class="modal-actions">
+      <button id="keyCancel" class="btn ghost">取消</button>
+      <button id="keySave" class="btn primary">保存并刷新</button>
+    </div>
+    <p class="muted small">不配置也能用：路线会以「无底图示意模式」绘制，站点、时刻、位置推算功能不受影响。</p>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

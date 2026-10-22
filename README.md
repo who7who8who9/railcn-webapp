@@ -1,0 +1,102 @@
+# railcn · 12306 车次行程可视化
+
+把 12306 的车次与经停站数据做成一个**纯本地网页**：输入车次就能看完整时刻表，在地图上沿真实铁路线还原列车此刻跑到哪了，还能按日期把当天所有车次批量落库、随时回看。
+
+零 Web 框架、零构建步骤、零数据库服务 —— 只有 Python 标准库 + SQLite + 原生 JS。
+
+```
+G1 北京南 → 上海虹桥
+始发 · 第 1 日 10-22 周四 07:00  →  终到 · 第 1 日 10-22 周四 11:38
+经停 7 站 · 1318 km · 经由 京沪高铁
+```
+
+## 它能做什么
+
+| 模块 | 说明 |
+|---|---|
+| 车次详情 | 输入车次回车，出经停站时刻表（到/发/停留/里程），地图同步画出线路 |
+| 跨日显示 | 长交路车次明确区分第 1/2/3 日：行程带、跨零点分隔行、时刻旁 `+1`/`+2` 角标 |
+| 列车位置 | 按时刻表把「运行时长」换算成绝对时间，在站间按里程插值定位，带 HUD 显示下一站与剩余时间 |
+| 时间轴 | 自绘时间条（不依赖原生 `range`），可拖拽/点击/方向键，支持 1×/60×/300× 倍速播放整段行程 |
+| 站站查询 | 输入起终站查实时余票（席别 / 票价 / 余票数），点一行直接跳到该车次行程 |
+| 车站 / 线路 | 7579 个车站档案、417 条线路的途经站序与累计里程，可互相跳转 |
+| 批量下载 | 选日期批量抓当天**全部车次 + 经停站**，断点续传、自适应限速、导出 JSON/CSV |
+| 历史数据 | 已落库的任意日期都能翻，按车次/始发/终到检索，只读本地库不打扰 12306 |
+
+## 快速开始
+
+```bash
+# 1. 依赖（服务本体只用标准库，网络请求需要 requests）
+pip install -r requirements.txt
+
+# 2. 启动
+cd webapp
+python server.py --port 8686 --open
+```
+
+Windows 也可以直接双击 `webapp\start.bat`。
+
+打开 <http://127.0.0.1:8686/>，默认会加载一趟标杆车。
+
+> **地图**：带 Key 时用腾讯位置服务渲染，没有 Key 自动降级为 SVG 示意地图（功能不减，只是没有底图）。
+> Key 填在页面右上角「地图 Key」，存在浏览器 `localStorage`，不会写进代码。
+
+## 目录结构
+
+```
+railcn/
+├─ config.py                  API 常量 / 字段索引（来自 TrainClaw，原样复用）
+├─ trainclaw.py               12306 客户端 + 经停站解析（来自 TrainClaw）
+├─ collect_trains_p2.py       批量采集车次清单（两阶段前缀搜索）
+├─ collect_routes.py          批量采集经停站
+├─ cnrail_data_v2.xlsx        车站 / 线路 / 线路站序 原始底表
+├─ data/
+│   ├─ cnrail_stations.json   7579 个车站档案（路局 / 电报码 / 连接线路 / 坐标）
+│   ├─ cnrail_lines.json      417 条线路（途经站序 + 累计里程 + 可信标记）
+│   ├─ cnrail_index.json      极简坐标索引 {站名: [lat, lon]}
+│   └─ cnrail_meta.json       生成参数 / 坐标修正模型 / 统计
+├─ tools/
+│   └─ xlsx_to_json.py        Excel → 上面四个 JSON（含坐标反解与里程校验）
+└─ webapp/
+    ├─ server.py              本地 HTTP 服务（标准库 ThreadingHTTPServer）
+    ├─ railcore.py            SQLite 缓存 + 坐标 + 时刻表 → 地图数据结构
+    ├─ cnrail.py              cnrail JSON 的加载与查询（里程 / 路径展开）
+    ├─ collector.py           按日期批量下载（并发 / 断点续传 / 自适应限速）
+    ├─ railgraph.py           （实验）OSM 铁路几何 A* 路由
+    ├─ data/                  stations.json、station_coords.json（rail.db 运行时生成）
+    ├─ tools/                 坐标抓取、Excel 导入等一次性脚本
+    └─ static/                index.html / style.css / app.js
+```
+
+技术细节（数据模型、接口列表、坐标修正、里程判定）见 [`webapp/README.md`](webapp/README.md)。
+
+## 仓库里没有的东西
+
+为了让 clone 下来轻一点，以下文件被 `.gitignore` 排除，按需自行生成：
+
+| 文件 | 体积 | 重建方式 |
+|---|---|---|
+| `webapp/data/rail.db` | 数十 MB | 运行时自动创建；或 `python webapp/tools/import_data.py` 灌入已有 Excel |
+| `webapp/data/exports/` | — | 在「历史数据」页导出 |
+| `webapp/data/railways.geojson` | 326 MB | `python webapp/tools/fetch_geojson.py` |
+| `webapp/data/rail_graph.pkl` | 57 MB | 首次运行 `railgraph.py` 时生成 |
+
+所以刚 clone 下来时**车次详情、站站查询、批量下载、历史数据都能直接用**（`rail.db` 会自己建），只有「沿真实铁路线绘制」需要用上面的脚本补几何数据。
+
+## 几个实现上的坑（值得一看）
+
+- **底表坐标是做过偏移的**：`cnrail_data_v2.xlsx` 里的经纬度不是真实值，而是 `data = s·true + t` 的仿射变换。用 OSM 坐标做稳健回归反解出 `s, t`，残差中位约 50 m，再逐站回填 —— 否则北京南会落到山西。
+- **站间距和站序对不上**：线路里程表常缺站（京沪线 150 站只有 58 个里程值）。用「里程 / 大圆距离」的弯曲系数筛掉错配，里程因此分 `real`（实测）/ `hybrid`（部分实测）/ `estimate`（按直距估算）三档，并在界面上标明。
+- **`running_time` 会缺**：缺失时用「到达时刻 + 日差 × 1440 − 始发时刻」反推，并保证单调不减，否则跨日车次会算错天。
+- **12306 搜索接口 403**：放弃按前缀枚举车次，改用 `train_no` 跨日期不变这一特性复用编号。
+- **SQLite 写锁争用**：开 WAL + 每 40 条批写，日期列表接口从 13 s 降到 0.03 s。
+
+## 免责声明
+
+- 车次、经停站、票价与余票数据版权归**中国铁路 12306** 所有。本项目仅调用其公开接口做个人学习与研究，请低频访问、勿用于商业用途或大规模抓取。
+- 地图与车站坐标来自 **© OpenStreetMap contributors**（ODbL），经 HOT 中国铁路导出整理。
+- 余票与票价仅供参考，以 12306 官方为准。
+
+## 许可
+
+[Apache License 2.0](LICENSE)。本项目包含来自 [TrainClaw](https://github.com/AI4MSE/TrainClaw)（Apache-2.0）的代码，署名见 [NOTICE](NOTICE)。

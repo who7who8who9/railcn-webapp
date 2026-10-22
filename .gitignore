@@ -1,0 +1,40 @@
+# ---------- 运行时数据库 / 导出 ----------
+webapp/data/rail.db
+webapp/data/rail.db-wal
+webapp/data/rail.db-shm
+webapp/data/railcn.db
+webapp/data/exports/
+
+# ---------- 体积过大的生成物（可按 README 自行重建） ----------
+webapp/data/railways.geojson
+webapp/data/railways_geojson.zip
+webapp/data/rail_graph.pkl
+webapp/data/osm_stations.json
+*.geojson
+*.pkl
+
+# ---------- 可再抓取的中间缓存 ----------
+cache/
+*.log
+
+# ---------- 第三方二进制 ----------
+*.exe
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# ---------- 编辑器 / 系统 ----------
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- 本地工具目录 ----------
+.workbuddy/

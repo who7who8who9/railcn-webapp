@@ -1,0 +1,6 @@
+# railcn 运行依赖
+# 服务本体只用标准库，仅网络请求需要 requests
+requests>=2.28
+
+# 下面的工具脚本需要（tools/xlsx_to_json.py、webapp/tools/import_data.py 读 Excel）
+openpyxl>=3.1

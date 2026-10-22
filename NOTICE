@@ -1,0 +1,33 @@
+railcn — 12306 车次行程可视化
+Copyright 2026 The railcn Authors
+
+--------------------------------------------------------------------------
+本作品 (Apache License 2.0) 包含来自以下项目的代码：
+
+  TrainClaw — 车票查询 AI 助手 / China Rail Ticket Query
+  https://github.com/AI4MSE/TrainClaw
+  Copyright AI4MSE
+  Licensed under the Apache License, Version 2.0
+
+  原样复用，未作修改的文件：
+    config.py       API 常量 / 字段索引 / 座位映射
+    trainclaw.py    TrainAPI 客户端（Cookie 管理、重试、经停站解析）
+
+  在此之上新增/改写的内容：
+    webapp/         本地网页服务与前端（server.py / railcore.py / cnrail.py /
+                    collector.py / railgraph.py / static/*）
+    tools/          cnrail_data_v2.xlsx → JSON 的转换与坐标反解
+    collect_*.py    批量采集脚本
+
+--------------------------------------------------------------------------
+地图与地理数据：
+
+  © OpenStreetMap contributors — 铁路线几何与车站坐标，遵循 ODbL 许可
+  https://www.openstreetmap.org/copyright
+  数据经 HOT (Humanitarian OpenStreetMap Team) 中国铁路导出整理。
+
+  腾讯位置服务 — 可选的可视化底图，使用需自备 Key 并遵守其服务条款。
+
+--------------------------------------------------------------------------
+车次、经停站、票价与余票数据版权归中国铁路 12306 所有，本仓库不主张任何权利，
+仅用于个人学习与研究，请勿用于商业用途。

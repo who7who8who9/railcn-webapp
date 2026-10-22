@@ -313,6 +313,14 @@ def search_line(q: str, limit: int = 20) -> List[dict]:
              "kmManual": l.get("kmManual", False)} for l in hits[:limit]]
 
 
+def line_station_names(name: str) -> Optional[List[str]]:
+    """某条线路按站序排好的站名（只取名字，供校对页「经由」选站用）"""
+    ln = line(name)
+    if not ln:
+        return None
+    return [p.get("name") for p in (ln.get("stations") or []) if p.get("name")]
+
+
 def line_detail(name: str) -> Optional[dict]:
     """线路 + 站点坐标（供地图绘制）、站间里程（供编辑）"""
     ln = line(name)

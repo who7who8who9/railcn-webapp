@@ -242,6 +242,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/lines":
             return self.json({"items": cnrail.search_line(one("q"), int(one("limit", "24")))})
 
+        if path == "/api/line/stops":
+            nm = one("q") or one("name")
+            items = cnrail.line_station_names(nm) if nm else None
+            return self.json({"name": nm, "found": items is not None,
+                              "items": items or [], "count": len(items or [])})
+
         if path == "/api/line":
             d = cnrail.line_detail(one("q"))
             if not d:

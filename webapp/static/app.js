@@ -2766,17 +2766,6 @@ async function cuLoadLineNames() {
   } catch (e) { CU.lines = []; CU.lineMap = new Map(); }
 }
 
-/** 站点自动补全用的 datalist（每趟车单独一套站名） */
-function cuBindStations(names) {
-  let dl = $('#cuStaList');
-  if (!dl) {
-    dl = document.createElement('datalist');
-    dl.id = 'cuStaList';
-    document.body.appendChild(dl);
-  }
-  dl.innerHTML = (names || []).map(n => `<option value="${esc(n)}">`).join('');
-}
-
 function cuChainHtml(segs, gaps) {
   // 区间与缺口都带 i0（在经停对里的序号），按运行顺序合并，缺口就落在正确位置
   const items = [];
@@ -2920,7 +2909,6 @@ function cuRenderEditor() {
     </details>`;
 
 
-  cuBindStations(d.stations);
   cuRenderViaRows();
   cuRenderSegKm();
   cuRenderStops();
@@ -3098,8 +3086,14 @@ function cuApplyCoord(name, r) {
   cuLoad();
 }
 
-/* ---------- 线路下拉：可搜索、可键盘选，也允许填库外线路名 ---------- */
-const CB = { box: null, items: [], idx: -1 };
+/* ---------- 通用下拉：线路名 / 该线路的车站名，可搜索、可键盘选 ---------- */
+const CB = { box: null, items: [], idx: -1, kick: null };
+
+/** 线路车站名单缓存：{线路名: [站名…]}，避免同一段反复请求 */
+const CUSTA = { cache: new Map(), pending: new Map() };
+
+const cbKind = box => box.dataset.cbkind || 'line';
+const cbInput = box => box.querySelector('input');
 
 function cbLineList(q) {
   const all = CU.lines || [];
@@ -3114,11 +3108,75 @@ function cbLineList(q) {
   return hits.slice(0, 200);
 }
 
+/** 车站候选：该行线路在库里的全部车站；线路不在库里就退回这趟车的经停站 */
+function cbStaList(box, q) {
+  const all = box._cands || [];
+  const v = (q || '').trim();
+  if (!v) return all;
+  const hits = all.filter(n => n.includes(v));
+  hits.sort((a, b) => (b.startsWith(v) ? 1 : 0) - (a.startsWith(v) ? 1 : 0)
+    || a.length - b.length);
+  return hits;
+}
+
+function cbUnkick() {
+  if (!CB.kick) return;
+  window.removeEventListener('scroll', CB.kick, true);
+  window.removeEventListener('resize', CB.kick);
+  CB.kick = null;
+}
+
+/** 下拉打开期间：页面/容器一滚动就收起，免得浮层跟输入框错位 */
+function cbKick() {
+  cbUnkick();
+  CB.kick = e => {
+    if (e && e.target && e.target.closest && e.target.closest('.cb-pop')) return;
+    cbClose();
+  };
+  window.addEventListener('scroll', CB.kick, true);
+  window.addEventListener('resize', CB.kick);
+}
+
 function cbClose() {
-  if (CB.box) CB.box.classList.remove('open');
+  if (CB.box) {
+    CB.box.classList.remove('open');
+    const pop = CB.box.querySelector('.cb-pop');
+    if (pop) {
+      pop.classList.remove('up');
+      ['position', 'left', 'top', 'bottom', 'width', 'minWidth']
+        .forEach(k => { pop.style[k] = ''; });
+    }
+  }
+  cbUnkick();
   CB.box = null;
   CB.items = [];
   CB.idx = -1;
+}
+
+/**
+ * 定位：校对页右侧是可滚动容器（.curate-stage），absolute 下拉会被裁掉，
+ * 所以打开期间改成 fixed，按输入框的屏幕坐标贴上去；宽度取列宽与 196px 的较大值。
+ */
+function cbPlace(box) {
+  const inp = cbInput(box);
+  const pop = box.querySelector('.cb-pop');
+  if (!inp || !pop) return;
+  const r = inp.getBoundingClientRect();
+  const need = Math.min(pop.scrollHeight || 240, 246);
+  pop.classList.toggle('up', r.bottom + need + 16 > window.innerHeight && r.top > need + 16);
+  const w = Math.max(r.width, 196);
+  const left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8));
+  pop.style.position = 'fixed';
+  pop.style.left = left + 'px';
+  pop.style.width = w + 'px';
+  pop.style.minWidth = w + 'px';
+  if (pop.classList.contains('up')) {
+    pop.style.top = 'auto';
+    pop.style.bottom = (window.innerHeight - r.top + 4) + 'px';
+  } else {
+    pop.style.bottom = 'auto';
+    pop.style.top = (r.bottom + 4) + 'px';
+  }
 }
 
 function cbHilite(box) {
@@ -3136,10 +3194,11 @@ function cbHilite(box) {
 }
 
 /** 重建下拉内容：有匹配就先列匹配，非精确匹配时把「用当前输入」放在最后一项 */
-function cbPaintList(box, q) {
+function cbPaintList(box, q, noHilite) {
   const pop = box.querySelector('.cb-pop');
   if (!pop) return;
   const v = (q || '').trim();
+  if (cbKind(box) === 'sta') return cbPaintSta(box, pop, v, noHilite);
   const list = cbLineList(v);
   const exact = list.some(l => l.name === v);
   const rows = list.slice();
@@ -3159,44 +3218,98 @@ function cbPaintList(box, q) {
     : '<div class="cb-empty">线路库里没有匹配项 —— 直接输入的字就是自定义线路名</div>';
 }
 
+/** 车站下拉内容：候选取自该行线路在库里的站名（按站序），库外站名也能填 */
+function cbPaintSta(box, pop, v, noHilite) {
+  const all = box._cands || [];
+  if (!all.length) {
+    pop.innerHTML = box._loading
+      ? '<div class="cb-empty">正在读取这条线路的车站…</div>'
+      : '<div class="cb-empty">这一行还没有可用的车站名单 —— 先在上面选/填线路名，也可以直接手打站名</div>';
+    CB.items = [];
+    CB.idx = -1;
+    return;
+  }
+  const list = cbStaList(box, v);
+  const exact = list.includes(v);
+  const rows = list.slice(0, 200).map(n => ({ name: n }));
+  if (v && !exact) rows.push({ name: v, custom: true });
+  CB.items = rows;
+  const hit = list.indexOf(v);
+  CB.idx = noHilite ? -1 : (hit >= 0 ? hit : (rows.length ? 0 : -1));
+  pop.innerHTML = rows.map((r, k) => {
+    const mt = r.custom ? '用这个名称'
+      : (box._candsKind === 'line' ? '' : '本次经停');
+    return `<div class="cb-item${k === CB.idx ? ' active' : ''}${r.custom ? ' custom' : ''}"
+      data-k="${k}"><span class="nm">${esc(r.name)}</span><span class="mt">${esc(mt)}</span></div>`;
+  }).join('');
+}
+
 function cbOpen(box, i, all) {
   if (CB.box && CB.box !== box) cbClose();
-  const inp = box.querySelector('input.line');
+  const inp = cbInput(box);
+  if (!inp) return;
   box.classList.add('open');
   CB.box = box;
-  cbPaintList(box, all ? '' : inp.value);
-  if (all) {                                  // 看全部时仍把当前值标出来
-    const k = CB.items.findIndex(r => r.name === inp.value.trim());
-    if (k >= 0) { CB.idx = k; cbHilite(box); }
+  if (cbKind(box) === 'sta' && !(box._cands || []).length && box._load) box._load();
+  // 车站框里的旧值可能不属于新线路：这时先列出全部候选，别只留一个「用这个名称」
+  const val = inp.value.trim();
+  const miss = cbKind(box) === 'sta' && val && (box._cands || []).indexOf(val) < 0;
+  if (miss && !all) {
+    cbPaintList(box, '', true);               // 不预先高亮，回车不会误改
+  } else {
+    cbPaintList(box, all ? '' : inp.value);
+    if (all) {                                // 看全部时仍把当前值标出来
+      const k = CB.items.findIndex(r => r.name === inp.value.trim());
+      if (k >= 0) { CB.idx = k; cbHilite(box); }
+    }
   }
-  const pop = box.querySelector('.cb-pop');
-  // 下面空间不够就往上翻
-  const r = inp.getBoundingClientRect();
-  const need = Math.min(pop.scrollHeight || 240, 246);
-  pop.classList.toggle('up', r.bottom + need + 16 > window.innerHeight && r.top > need + 16);
+  cbPlace(box);
+  cbKick();
 }
 
 function cbPick(box, i, name) {
-  const inp = box.querySelector('input.line');
+  const inp = cbInput(box);
+  if (!inp) return;
   inp.value = name;
-  if (i != null && CU.via[i]) CU.via[i].line = name;
+  if (i != null && CU.via[i]) {
+    if (cbKind(box) === 'line') {
+      CU.via[i].line = name;
+      cuSyncRowCands(i);                      // 换了线路 → 这一行的车站候选跟着换
+    } else if (box.dataset.field === 'from') {
+      CU.via[i].from = name;
+    } else {
+      CU.via[i].to = name;
+    }
+  }
   cbClose();
   cuCheck();
 }
 
-function cuBindLineCombo(box, i) {
-  const inp = box.querySelector('input.line');
+/** 下拉绑定：kind=line 写回线路名，kind=sta 按 data-field 写回起始/终止站 */
+function cbBind(box, i) {
+  const inp = cbInput(box);
   const pop = box.querySelector('.cb-pop');
+  if (!inp || !pop) return;
+  const kind = cbKind(box);
+  const field = box.dataset.field || '';
+  const write = v => {
+    if (i == null || !CU.via[i]) return;
+    if (kind === 'line') { CU.via[i].line = v; cuSyncRowCands(i); }
+    else if (field === 'from') CU.via[i].from = v;
+    else CU.via[i].to = v;
+  };
   inp.addEventListener('focus', () => {
     inp.select();                              // 直接打字就是替换，不用先全删
     cbOpen(box, i);
   });
   inp.addEventListener('click', () => { if (CB.box !== box) cbOpen(box, i); });
   inp.addEventListener('input', () => {
-    if (i != null && CU.via[i]) CU.via[i].line = inp.value;
+    write(inp.value);
     CB.box = box;
-    cbPaintList(box, inp.value);
     box.classList.add('open');
+    cbPaintList(box, inp.value);
+    cbPlace(box);
+    cbKick();
     cuCheck();
   });
   inp.addEventListener('keydown', e => {
@@ -3223,7 +3336,7 @@ function cuBindLineCombo(box, i) {
     e.preventDefault();                       // 别让输入框失焦
     if (box.classList.contains('open')) { cbClose(); return; }
     inp.focus();
-    cbOpen(box, i, true);                     // ▾ 展开全部线路
+    cbOpen(box, i, true);                     // ▾ 展开全部
   });
   pop.addEventListener('click', e => {
     const it = e.target.closest('.cb-item');
@@ -3237,6 +3350,70 @@ document.addEventListener('pointerdown', e => {
   if (CB.box && !CB.box.contains(e.target)) cbClose();
 }, true);
 
+/* ---------- 「经由」里的车站候选：跟着线路走 ---------- */
+
+/** 取某条线路的车站名单（带缓存；取不到就返回空数组） */
+async function cuLineStops(name) {
+  if (CUSTA.cache.has(name)) return CUSTA.cache.get(name);
+  if (CUSTA.pending.has(name)) return CUSTA.pending.get(name);
+  const p = api('/api/line/stops', { q: name })
+    .then(d => {
+      const arr = (d && d.items) || [];
+      if (arr.length) CUSTA.cache.set(name, arr);
+      CUSTA.pending.delete(name);
+      return arr;
+    })
+    .catch(() => { CUSTA.pending.delete(name); return []; });
+  CUSTA.pending.set(name, p);
+  return p;
+}
+
+/** 下拉正开着就按新候选重画一次 */
+function cuRepaintOpen(boxes) {
+  if (!CB.box || !boxes.includes(CB.box)) return;
+  if (!CB.box.classList.contains('open')) return;
+  const inp = cbInput(CB.box);
+  const val = inp.value.trim();
+  const miss = cbKind(CB.box) === 'sta' && val
+    && (CB.box._cands || []).indexOf(val) < 0;
+  cbPaintList(CB.box, miss ? '' : val, !!miss);
+  cbPlace(CB.box);
+}
+
+/** 线路所 / 中继站不是客运营业站，候选里不列（需要时仍可手打） */
+const cuNotStation = n => /(所|中继站|线路所)$/.test(n);
+
+/**
+ * 刷新某一行的车站候选：
+ * - 线路命中库内线路 → 该线路的全部车站（含不停车的通过站）
+ * - 线路名不在库 / 还没填 → 退回这趟车的经停站
+ */
+async function cuSyncRowCands(i) {
+  const row = $$('#ceViaRows .ve-row')[i];
+  if (!row) return;
+  const boxes = $$('.combo[data-cbkind="sta"]', row);
+  if (!boxes.length) return;
+  const lineName = ((CU.via[i] && CU.via[i].line) || '').trim();
+  const fallback = (CU.detail && CU.detail.stations) || [];
+  const inLib = !!(lineName && CU.lineMap && CU.lineMap.has(lineName));
+
+  const apply = (names, kind, loading) => {
+    boxes.forEach(b => { b._cands = names; b._candsKind = kind; b._loading = !!loading; });
+    cuRepaintOpen(boxes);
+  };
+
+  if (!inLib) { apply(fallback, 'stop', false); return; }
+  if (CUSTA.cache.has(lineName)) {
+    apply(CUSTA.cache.get(lineName).filter(n => !cuNotStation(n)), 'line', false);
+    return;
+  }
+
+  apply([], 'line', true);                    // 先把「正在读取」挂上
+  const names = await cuLineStops(lineName);
+  const clean = names.filter(n => !cuNotStation(n));
+  apply(clean.length ? clean : fallback, clean.length ? 'line' : 'stop', false);
+}
+
 function cuRenderViaRows() {
   const box = $('#ceViaRows');
   if (!box) return;
@@ -3248,28 +3425,36 @@ function cuRenderViaRows() {
   }
   box.innerHTML = CU.via.map((r, i) => `
     <div class="ve-row" data-i="${i}">
-      <div class="combo">
+      <div class="combo" data-cbkind="line">
         <input class="line" value="${esc(r.line)}" placeholder="点这里选线路，或直接输入"
                autocomplete="off" spellcheck="false">
         <button type="button" class="cb-toggle" tabindex="-1" title="展开线路列表">▾</button>
         <div class="cb-pop"></div>
       </div>
-      <input class="from" list="cuStaList" value="${esc(r.from)}" placeholder="起始站">
-      <input class="to" list="cuStaList" value="${esc(r.to)}" placeholder="终止站">
+      <div class="combo sta" data-cbkind="sta" data-field="from">
+        <input class="sta" value="${esc(r.from)}" placeholder="起始站"
+               autocomplete="off" spellcheck="false">
+        <button type="button" class="cb-toggle" tabindex="-1" title="这条线路上的车站">▾</button>
+        <div class="cb-pop"></div>
+      </div>
+      <div class="combo sta" data-cbkind="sta" data-field="to">
+        <input class="sta" value="${esc(r.to)}" placeholder="终止站"
+               autocomplete="off" spellcheck="false">
+        <button type="button" class="cb-toggle" tabindex="-1" title="这条线路上的车站">▾</button>
+        <div class="cb-pop"></div>
+      </div>
       <button class="del" title="删除这一段">×</button>
     </div>`).join('');
 
   $$('#ceViaRows .ve-row').forEach(row => {
     const i = Number(row.dataset.i);
-    cuBindLineCombo(row.querySelector('.combo'), i);
-    const fr = row.querySelector('input.from');
-    fr.addEventListener('input', () => { CU.via[i].from = fr.value; cuCheck(); });
-    const to = row.querySelector('input.to');
-    to.addEventListener('input', () => { CU.via[i].to = to.value; cuCheck(); });
+    cbBind(row.querySelector('.combo[data-cbkind="line"]'), i);
+    $$('.combo[data-cbkind="sta"]', row).forEach(b => cbBind(b, i));
     row.querySelector('.del').addEventListener('click', () => {
       CU.via.splice(i, 1);
       cuRenderViaRows();
     });
+    cuSyncRowCands(i);                        // 异步补上这一行的车站候选
   });
   cbClose();
   cuCheck();
@@ -3527,9 +3712,16 @@ function cuCheck() {
 
   rows.forEach((r, i) => {
     if (!(r.line || '').trim()) bad.push(`第 ${i + 1} 段没填线路名`);
+    const ls = CUSTA.cache.get((r.line || '').trim());
+    const lsSet = ls && ls.length ? new Set(ls) : null;   // 库里线路的站名（含通过站）
     [r.from, r.to].forEach(n => {
       const v = (n || '').trim();
-      if (v && !known.has(v)) bad.push(`「${v}」不在这趟车的 ${known.size} 个经停站里`);
+      if (!v) return;
+      if (lsSet) {
+        if (!lsSet.has(v)) bad.push(`「${v}」不在线路「${r.line}」的车站里`);
+      } else if (!known.has(v)) {
+        bad.push(`「${v}」不在这趟车的 ${known.size} 个经停站里`);
+      }
     });
   });
   for (let i = 1; i < rows.length; i++) {
@@ -3571,7 +3763,7 @@ function cuCheck() {
     ? bad.map(m => `<div class="bad">· ${esc(m)}</div>`).join('')
       + (note.length ? note.map(m => `<div>· ${esc(m)}</div>`).join('') : '')
     : (rows.length
-      ? (note.length ? note.map(m => `<div>· ${esc(m)}</div>`).join('') : '<div class="good">✓ 区间首尾相接，站名都在经停表里</div>')
+      ? (note.length ? note.map(m => `<div>· ${esc(m)}</div>`).join('') : '<div class="good">✓ 区间首尾相接，站名都能对上</div>')
       : '');
 }
 

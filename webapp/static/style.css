@@ -610,6 +610,11 @@ a{color:var(--accent)}
 .seg-row.manual{background:#f7fdf9}
 .seg-row.manual input.km{border-color:#c8e9d5}
 .seg-row.manual .auto{color:#4c8f68}
+/* 人工标了「不详」(-) 的段：琥珀色，和"没填"区分开 */
+.seg-row.unk{background:#fffaf0}
+.seg-row.unk input.km{border-color:#f0d9a8;color:#a8741a;font-weight:600;text-align:center}
+.seg-row.unk .auto{color:#b98a2c}
+.seg-row.bad input.km{border-color:#e8a39c;box-shadow:0 0 0 2px rgba(217,45,32,.10)}
 .seg-note b{color:#33415c}
 .st-line .k .chg{font-style:normal;font-size:9.5px;color:#0f7a45;background:#e8f6ee;
   border-radius:4px;padding:0 4px;margin-left:5px}

@@ -96,6 +96,7 @@ def _rebuild_km(stations: List[dict], seg_km: Optional[dict] = None,
     区间：档案有前后两站里程时取差；人工填的段覆盖。
     累计：某段不详则该段之后的里程都记为 None（不详就如实标不详，不外推）。
     给了总里程时，只把**没手填**的段等比缩放到 total_km − 手填段之和。
+    seg_km 里值为 None 的段表示「明确不详」：即使档案里有值也作废，且不参与总里程缩放。
     """
     n = len(stations)
     base = [p.get("km") for p in stations]
@@ -106,18 +107,28 @@ def _rebuild_km(stations: List[dict], seg_km: Optional[dict] = None,
             seg[i] = round(float(b) - float(a), 1)
 
     manual: Dict[int, float] = {}
+    unknown: set = set()
     for k, v in (seg_km or {}).items():
         try:
             i = int(k)
+        except (TypeError, ValueError):
+            continue
+        if not (0 <= i < n - 1):
+            continue
+        if v is None or (isinstance(v, str) and v.strip() in ("-", "—", "不详", "未知", "?")):
+            seg[i] = None
+            unknown.add(i)
+            continue
+        try:
             f = float(v)
         except (TypeError, ValueError):
             continue
-        if 0 <= i < n - 1 and f >= 0:
+        if f >= 0:
             seg[i] = round(f, 1)
             manual[i] = seg[i]
 
     if total_km:
-        rest = [i for i in range(n - 1) if i not in manual]
+        rest = [i for i in range(n - 1) if i not in manual and i not in unknown]
         rest_sum = sum(seg[i] for i in rest if seg[i] is not None)
         target = float(total_km) - sum(manual.values())
         if rest and rest_sum > 0 and target > 0:

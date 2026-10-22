@@ -201,12 +201,17 @@ def _clean_via(via) -> List[dict]:
     return out
 
 
-def _clean_seg_km(seg_km) -> Dict[str, float]:
+_NA_TOKENS = {"-", "--", "—", "——", "–", "~", "～", "?", "？", "不详", "未知", "n/a", "na", "unknown", "无"}
+
+
+def _clean_seg_km(seg_km) -> Dict[str, Optional[float]]:
     """站间里程整理成 {"0": 203.4}：键是区间序号（第 i 站 → 第 i+1 站），值是公里数。
 
-    允许传 dict 或 list（list 的下标就是区间序号），非法项直接丢掉。
+    允许传 dict 或 list（list 的下标就是区间序号）。
+    值为 None 或 "-" / "不详" 之类的记号表示**这一段里程明确不详**（存 None）：
+    与「没填」（键不存在，沿用档案值）是两回事，不详的段之后累计里程不再外推。
     """
-    out: Dict[str, float] = {}
+    out: Dict[str, Optional[float]] = {}
     if not seg_km:
         return out
     if isinstance(seg_km, dict):
@@ -221,6 +226,12 @@ def _clean_seg_km(seg_km) -> Dict[str, float]:
         except (TypeError, ValueError):
             continue
         if idx < 0:
+            continue
+        if v is None:
+            out[str(idx)] = None               # 明确不详
+            continue
+        if isinstance(v, str) and v.strip().lower() in _NA_TOKENS:
+            out[str(idx)] = None
             continue
         try:
             km = float(v)

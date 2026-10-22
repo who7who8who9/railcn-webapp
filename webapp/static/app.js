@@ -1647,6 +1647,16 @@ const LN = { data: null, segKm: {}, totalKm: '', editing: false, busy: false, mo
 
 const lnKmText = v => (v == null ? '-' : `${v} km`);
 
+/** 「不详」记号：填这些等于把这一段里程标成明确不详（存 null，跟"没填"不一样） */
+const LN_NA_RE = /^(?:-+|—+|–+|~+|～+|\?+|？+|不详|未知|没有|无|unknown|n\/?a)$/i;
+const lnIsNA = s => LN_NA_RE.test(String(s == null ? '' : s).trim());
+
+/** 这一段是人工标的「不详」吗（键存在且值为 null） */
+const lnSegUnk = i => Object.prototype.hasOwnProperty.call(LN.segKm, i) && LN.segKm[i] === null;
+
+/** 这一段有没有人工输入（数值或"不详"） */
+const lnSegSet = i => Object.prototype.hasOwnProperty.call(LN.segKm, i);
+
 /** 档案区间里程（相邻两站相减），不详为 null */
 function lnSegBase(d) {
   const st = (d && d.stations) || [];
@@ -1673,14 +1683,17 @@ function lnCumBase() {
 /** 与后端 cnrail._rebuild_km 同规则，算出「当前输入下」的区间与累计里程 */
 function lnEffective() {
   const d = LN.data, seg = lnSegBase(d);
+  const manual = [];
   Object.keys(LN.segKm).forEach(k => {
     const i = Number(k);
-    if (i >= 0 && i < seg.length && LN.segKm[k] != null) seg[i] = LN.segKm[k];
+    if (!(i >= 0 && i < seg.length)) return;
+    const v = LN.segKm[k];
+    if (v === null) { seg[i] = null; manual.push(String(i)); }   // 明确不详
+    else if (typeof v === 'number' && Number.isFinite(v) && v > 0) { seg[i] = v; manual.push(String(i)); }
   });
   const total = Number(LN.totalKm);
   if (LN.totalKm !== '' && Number.isFinite(total) && total > 0) {
-    const manual = Object.keys(LN.segKm).filter(k => LN.segKm[k] != null);
-    const manualSum = manual.reduce((s, k) => s + LN.segKm[k], 0);
+    const manualSum = manual.reduce((s, k) => s + (Number(LN.segKm[k]) || 0), 0);
     const rest = seg.map((val, i) => i).filter(i => seg[i] != null && !manual.includes(String(i)));
     const restSum = rest.reduce((s, i) => s + seg[i], 0);
     const target = total - manualSum;
@@ -1712,11 +1725,11 @@ function lnWide(on) {
   setTimeout(() => { MapView.fit && MapView.fit(); }, 60);
 }
 
-function lnSetDirty(msg) {
+function lnSetDirty(msg, bad) {
   const el = $('#lnMsg');
   if (!el) return;
   el.textContent = msg || '';
-  el.classList.toggle('bad', /失败/.test(msg || ''));
+  el.classList.toggle('bad', bad != null ? !!bad : /失败/.test(msg || ''));
 }
 
 function lnRenderSegs() {
@@ -1727,18 +1740,19 @@ function lnRenderSegs() {
   const d = LN.data, base = lnSegBase(d), st = d.stations || [];
   boxEl.innerHTML = st.slice(0, -1).map((p, i) => {
     const a = base[i];
-    const has = Object.prototype.hasOwnProperty.call(LN.segKm, i) && LN.segKm[i] != null;
+    const unk = lnSegUnk(i);                       // 人工标了"不详"
+    const has = lnSegSet(i) && !unk;               // 人工填了数字
     const v = has ? LN.segKm[i] : null;
     const delta = has && a != null ? Math.round((v - a) * 10) / 10 : null;
     const dtxt = delta == null ? '' : (Math.abs(delta) < 0.05 ? '=' : (delta > 0 ? '+' : '') + delta.toFixed(1));
-    return `<div class="seg-row${has ? ' manual' : ''}" data-i="${i}">
+    return `<div class="seg-row${has ? ' manual' : ''}${unk ? ' unk' : ''}" data-i="${i}">
       <span class="i">${i + 1}</span>
       <span class="od" title="${esc(p.name)} → ${esc(st[i + 1].name)}">${esc(p.name)}<em>→</em>${esc(st[i + 1].name)}</span>
-      <input class="km" type="number" step="0.1" min="0" max="5000" inputmode="decimal"
-             value="${has ? v : ''}" placeholder="${a == null ? '-' : a.toFixed(1)}"
-             title="${a == null ? '档案没有这一段的里程，可直接填' : '留空沿用档案值 ' + a.toFixed(1) + ' km'}">
+      <input class="km" type="text" inputmode="decimal" autocomplete="off"
+             value="${unk ? '-' : (has ? v : '')}" placeholder="${a == null ? '-' : a.toFixed(1)}"
+             title="留空沿用档案值${a == null ? '（档案也是不详）' : ' ' + a.toFixed(1) + ' km'}；填「-」表示这一段明确不详">
       <span class="u">km</span>
-      <button class="seg-clr" title="恢复这一段的档案值"${has ? '' : ' disabled'}>↺</button>
+      <button class="seg-clr" title="恢复这一段的档案值"${has || unk ? '' : ' disabled'}>↺</button>
       <span class="auto">${dtxt}</span>
     </div>`;
   }).join('');
@@ -1747,25 +1761,46 @@ function lnRenderSegs() {
     const i = Number(row.dataset.i);
     const inp = row.querySelector('input.km');
     const clr = row.querySelector('.seg-clr');
-    const apply = () => {
-      const raw = inp.value.trim();
-      const n = Number(raw);
-      if (raw === '' || !Number.isFinite(n) || n <= 0) delete LN.segKm[i];
-      else LN.segKm[i] = n;
-      const on = Object.prototype.hasOwnProperty.call(LN.segKm, i);
-      row.classList.toggle('manual', on);
-      clr.disabled = !on;
+    const repaint = () => {
+      const unk = lnSegUnk(i);
+      const has = lnSegSet(i) && !unk;
+      row.classList.toggle('manual', has);
+      row.classList.toggle('unk', unk);
+      clr.disabled = !(has || unk);
       const base = lnSegBase(LN.data)[i];
       const aEl = row.querySelector('.auto');
       if (aEl) {
-        const dd = on && base != null ? Math.round((LN.segKm[i] - base) * 10) / 10 : null;
+        const dd = has && base != null ? Math.round((LN.segKm[i] - base) * 10) / 10 : null;
         aEl.textContent = dd == null ? '' : (Math.abs(dd) < 0.05 ? '=' : (dd > 0 ? '+' : '') + dd.toFixed(1));
       }
+    };
+    const apply = () => {
+      const raw = inp.value.trim();
+      if (raw === '') {
+        delete LN.segKm[i];                       // 空 = 沿用档案值
+        row.classList.remove('bad');
+      } else if (lnIsNA(raw)) {
+        LN.segKm[i] = null;                       // - = 明确不详
+        row.classList.remove('bad');
+      } else {
+        const n = Number(raw.replace(/[^0-9.]/g, ''));
+        if (!Number.isFinite(n) || n <= 0 || n > 5000) {
+          row.classList.add('bad');
+          lnSetDirty(`第 ${i + 1} 段要填正数（km），或填「-」表示不详`, true);
+          return;
+        }
+        LN.segKm[i] = Math.round(n * 10) / 10;
+        row.classList.remove('bad');
+      }
+      repaint();
       lnRefreshPreview();
       lnSetDirty('有未保存的修改');
     };
     inp.addEventListener('input', apply);
-    inp.addEventListener('blur', apply);
+    inp.addEventListener('blur', () => {
+      if (lnSegUnk(i)) inp.value = '-';           // 统一显示成半角 -
+      apply();
+    });
     inp.addEventListener('keydown', e => {
       if (e.key !== 'Enter') return;
       e.preventDefault();
@@ -1775,7 +1810,7 @@ function lnRenderSegs() {
     clr.addEventListener('click', () => {
       inp.value = '';
       delete LN.segKm[i];
-      row.classList.remove('manual');
+      row.classList.remove('manual', 'unk', 'bad');
       clr.disabled = true;
       const aEl = row.querySelector('.auto');
       if (aEl) aEl.textContent = '';
@@ -1797,20 +1832,21 @@ function lnRenderCum() {
   const first = st[0].name;
   boxEl.innerHTML = st.slice(1).map((p, k) => {
     const i = k + 1;
-    const has = LN.segKm[i - 1] != null;
+    const unk = lnSegUnk(i - 1);
+    const has = lnSegSet(i - 1) && !unk;
     const prev = eff.cum[i - 1], cur = eff.cum[i], base = baseCum[i];
-    const locked = prev == null;
+    const locked = prev == null && !unk;
     const dd = (cur != null && base != null) ? Math.round((cur - base) * 10) / 10 : null;
     const dtxt = dd == null ? '' : (Math.abs(dd) < 0.05 ? '=' : (dd > 0 ? '+' : '') + dd.toFixed(1));
-    return `<div class="seg-row cum${has ? ' manual' : ''}${locked ? ' lock' : ''}" data-i="${i}">
+    return `<div class="seg-row cum${has ? ' manual' : ''}${unk ? ' unk' : ''}${locked ? ' lock' : ''}" data-i="${i}">
       <span class="i">${i + 1}</span>
       <span class="od" title="自 ${esc(first)} 起算">${esc(p.name)}</span>
-      <input class="km" type="number" step="0.1" min="0" max="20000" inputmode="decimal"
-             value="${has && cur != null ? cur : ''}" placeholder="${cur == null ? '-' : cur.toFixed(1)}"
+      <input class="km" type="text" inputmode="decimal" autocomplete="off"
+             value="${unk ? '-' : (has && cur != null ? cur : '')}" placeholder="${cur == null ? '-' : cur.toFixed(1)}"
              ${locked ? 'disabled' : ''}
-             title="${locked ? '前面有里程不详的区间，先切到「按段距」补齐' : `留空沿用当前累计 ${cur == null ? '-' : cur.toFixed(1)} km`}">
+             title="${locked ? '前面有里程不详的区间，先切到「按段距」补齐' : `留空沿用当前累计 ${cur == null ? '-' : cur.toFixed(1)} km；填「-」表示这一站起累计不详`}">
       <span class="u">km</span>
-      <button class="seg-clr" title="恢复档案值"${has ? '' : ' disabled'}>↺</button>
+      <button class="seg-clr" title="恢复档案值"${has || unk ? '' : ' disabled'}>↺</button>
       <span class="auto">${dtxt}</span>
     </div>`;
   }).join('');
@@ -1821,22 +1857,27 @@ function lnRenderCum() {
     const clr = row.querySelector('.seg-clr');
     const apply = () => {
       const raw = inp.value.trim();
-      const c = Number(raw);
-      if (raw === '' || !Number.isFinite(c) || c <= 0) {
+      if (raw === '') {
         delete LN.segKm[i - 1];
-        row.classList.remove('manual', 'bad');
+        row.classList.remove('manual', 'bad', 'unk');
         clr.disabled = true;
+      } else if (lnIsNA(raw)) {
+        LN.segKm[i - 1] = null;                     // - = 这一站起累计不详
+        row.classList.remove('bad');
+        row.classList.add('unk');
+        clr.disabled = false;
       } else {
+        const c = Number(raw.replace(/[^0-9.]/g, ''));
         const prev = lnEffective().cum[i - 1];
-        const dv = prev == null ? null : Math.round((c - prev) * 10) / 10;
+        const dv = (prev == null || !Number.isFinite(c)) ? null : Math.round((c - prev) * 10) / 10;
         if (dv == null || dv <= 0) {
           row.classList.add('bad');
           lnSetDirty(prev == null
             ? '前面有里程不详的区间，先切到「按段距」补齐'
-            : `第 ${i + 1} 站的累计要大于前一站的 ${prev.toFixed(1)} km`);
+            : `第 ${i + 1} 站的累计要大于前一站的 ${prev.toFixed(1)} km`, true);
           return;
         }
-        row.classList.remove('bad');
+        row.classList.remove('bad', 'unk');
         row.classList.add('manual');
         clr.disabled = false;
         LN.segKm[i - 1] = dv;
@@ -1846,6 +1887,7 @@ function lnRenderCum() {
       lnSetDirty('有未保存的修改');
     };
     inp.addEventListener('input', apply);
+    inp.addEventListener('blur', () => { if (lnSegUnk(i - 1)) inp.value = '-'; });
     inp.addEventListener('keydown', e => {
       if (e.key !== 'Enter') return;
       e.preventDefault();
@@ -1867,12 +1909,14 @@ function lnRefreshCumRows() {
   $$('#lnSegs .seg-row.cum').forEach(row => {
     const i = Number(row.dataset.i);
     const inp = row.querySelector('input.km');
-    const has = LN.segKm[i - 1] != null;
+    const unk = lnSegUnk(i - 1);
+    const has = lnSegSet(i - 1) && !unk;
     if (document.activeElement !== inp) {
-      inp.value = has && eff.cum[i] != null ? eff.cum[i] : '';
+      inp.value = unk ? '-' : (has && eff.cum[i] != null ? eff.cum[i] : '');
       inp.placeholder = eff.cum[i] == null ? '-' : eff.cum[i].toFixed(1);
     }
-    const dd = (eff.cum[i] != null && baseCum[i] != null)
+    row.classList.toggle('unk', unk);
+    const dd = (has && eff.cum[i] != null && baseCum[i] != null)
       ? Math.round((eff.cum[i] - baseCum[i]) * 10) / 10 : null;
     const el = row.querySelector('.auto');
     if (el) el.textContent = dd == null ? '' : (Math.abs(dd) < 0.05 ? '=' : (dd > 0 ? '+' : '') + dd.toFixed(1));
@@ -1902,6 +1946,7 @@ function lnRefreshPreview() {
     });
   }
   const nManual = Object.keys(LN.segKm).filter(k => LN.segKm[k] != null).length;
+  const nUnk = Object.keys(LN.segKm).filter(k => LN.segKm[k] === null).length;
   const warn = $('#lnWarn');
   if (warn) {
     const decl = hasTyped ? typed : (LN.data && LN.data.totalKm);
@@ -1913,6 +1958,7 @@ function lnRefreshPreview() {
     tag.textContent = [
       `${st.length} 站`,
       nManual ? `手填 ${nManual} 段` : '',
+      nUnk ? `不详 ${nUnk} 段` : '',
       LN.totalKm !== '' ? `总里程 ${LN.totalKm} km` : '',
     ].filter(Boolean).join(' · ');
   }
@@ -2023,8 +2069,8 @@ function lnRenderEditor() {
         <button data-mode="cum" class="${LN.mode === 'cum' ? 'on' : ''}" title="填自起点站算起的累计公里数">按累计</button>
       </div>
       <span class="lnkm-hint">${LN.mode === 'seg'
-        ? '灰字是档案值，留空沿用；填了就锁住这一段，不详的段显示 -'
-        : '填「从起点站到这一站」的累计公里数，不详的显示 -'}</span>
+        ? '灰字是档案值，留空沿用；填数字锁住这一段；填「-」表示这一段里程不详'
+        : '填「从起点站到这一站」的累计公里数；填「-」表示这一站起不详'}</span>
       <div class="lnkm-btns">
         <button class="btn sm primary" id="lnSave">保存</button>
         <button class="btn sm" id="lnResetAll">全部恢复档案</button>
@@ -2043,7 +2089,7 @@ function lnRenderEditor() {
       <span class="lnkm-warn" id="lnWarn"></span>
       <span class="lnkm-seg" id="lnMsg"></span>
     </div>
-    <div class="ve-note">档案里 ${segs.length} 段，其中 ${known} 段有里程；填了总里程时，只有没手填的段会等比缩放到「总里程 − 手填段之和」。保存后车次详情、地图、时间轴全部同步。</div>`;
+    <div class="ve-note">档案里 ${segs.length} 段，其中 ${known} 段有里程（其余不详）。填「-」= 这一段里程明确不详，它之后的累计不再外推；填总里程时只有没手填、也没标不详的段会等比缩放。保存后车次详情、地图、时间轴全部同步。</div>`;
 
   $$('#lnMode button').forEach(b => b.addEventListener('click', () => {
     if (LN.mode === b.dataset.mode) return;

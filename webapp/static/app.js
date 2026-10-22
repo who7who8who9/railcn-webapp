@@ -1970,6 +1970,8 @@ function cuRenderEditor() {
       </h4>
       <div class="cu-coord-list" id="cuCoordList">${cuCoordRowsHtml()}</div>
       <div class="ve-note">经纬度按 <b>WGS-84</b>（与 OSM 一致）填写，页面会自行换算成腾讯地图坐标系。
+        也可以直接把 <code class="inline">经度,纬度</code> 粘到任一格里（如
+        <code class="inline">115.67135293489208,37.32526706163806</code>），会自动拆成两格并校验顺序。
         保存后地图定位、线路走向、里程插值立即重算；「还原」回到车站档案里的原值。</div>
     </div>
 
@@ -2020,18 +2022,46 @@ function cuRenderEditor() {
 }
 
 /* ---------- 车站坐标编辑 ---------- */
+/** 「经度,纬度」成对输入：也接受中文逗号 / 分号 / 空格，并做顺序自检 */
+function cuParsePair(text) {
+  const s = String(text).trim();
+  const m = s.match(/^([-+]?\d+(?:\.\d+)?)\s*[,，;；\s]\s*([-+]?\d+(?:\.\d+)?)$/);
+  if (!m) return null;
+  const a = Number(m[1]), b = Number(m[2]);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+
+  const inLat = v => Math.abs(v) <= 90;
+  const inLon = v => Math.abs(v) <= 180;
+  let lon, lat;
+  if (!inLat(b) && inLat(a)) {
+    lat = a; lon = b;                       // 第二值超出 ±90，它只能是经度 → 粘的是「纬度,经度」
+  } else if (!inLat(a) && inLat(b)) {
+    lon = a; lat = b;                       // 第一值超出 ±90，它只能是经度 → 「经度,纬度」
+  } else if (a >= 73 && a <= 136 && b >= 3 && b <= 54) {
+    lon = a; lat = b;                       // 中国境内：先经度、后纬度
+  } else if (b >= 73 && b <= 136 && a >= 3 && a <= 54) {
+    lon = b; lat = a;                       // 反过来写的也认
+  } else {
+    lon = a; lat = b;                       // 兜底按「经度,纬度」
+  }
+  if (!inLon(lon) || !inLat(lat)) return null;
+  return { lat, lon };
+}
+
+const fmtDeg = v => String(Number(Number(v).toFixed(6)));
+
 function cuCoordRowHtml(s, i) {
   const src = s.coordSource === 'manual' ? 'manual' : (s.lat == null ? 'none' : 'base');
   const srcCn = { manual: '人工', base: '档案', none: '缺失' }[src];
-  const lat = s.lat == null ? '' : Number(s.lat).toFixed(5);
-  const lon = s.lon == null ? '' : Number(s.lon).toFixed(5);
+  const lat = s.lat == null ? '' : fmtDeg(s.lat);
+  const lon = s.lon == null ? '' : fmtDeg(s.lon);
   const tip = s.lat == null
     ? '档案里没有这个站的坐标'
-    : `档案原值 ${Number(s.baseLat).toFixed(5)}, ${Number(s.baseLon).toFixed(5)}`;
+    : `档案原值 ${fmtDeg(s.baseLat)}, ${fmtDeg(s.baseLon)}`;
   return `<div class="coord-row ${src}" data-nm="${esc(s.name)}" data-i="${i}">
     <span class="nm" title="${esc(s.name)}"><i>${i + 1}</i>${esc(s.name)}</span>
-    <input class="lat" value="${lat}" placeholder="纬度" title="纬度 -90 ~ 90">
-    <input class="lon" value="${lon}" placeholder="经度" title="经度 -180 ~ 180">
+    <input class="lat" value="${lat}" placeholder="纬度" title="纬度 -90 ~ 90｜也可粘贴「经度,纬度」一次填两格">
+    <input class="lon" value="${lon}" placeholder="经度" title="经度 -180 ~ 180｜也可粘贴「经度,纬度」一次填两格">
     <span class="src ${src}" title="${esc(tip)}">${srcCn}</span>
     <button class="btn sm coord-save">保存</button>
     <button class="btn sm ghost coord-clear"${s.coordSource === 'manual' ? '' : ' disabled'}>还原</button>
@@ -2060,12 +2090,22 @@ function cuBindCoordRows() {
   $$('#cuCoordList .coord-clear').forEach(b => b.addEventListener('click', () => {
     cuClearCoord(b.closest('.coord-row').dataset.nm);
   }));
-  // 输完直接回车保存
-  $$('#cuCoordList .coord-row input').forEach(inp => inp.addEventListener('keydown', e => {
-    if (e.key !== 'Enter') return;
-    e.preventDefault();
-    e.target.closest('.coord-row').querySelector('.coord-save').click();
-  }));
+  // 输完直接回车保存；任何一个格子里粘「经度,纬度」都自动拆成两格
+  $$('#cuCoordList .coord-row input').forEach(inp => {
+    inp.addEventListener('keydown', e => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      e.target.closest('.coord-row').querySelector('.coord-save').click();
+    });
+    inp.addEventListener('input', e => {
+      const pair = cuParsePair(e.target.value);
+      if (!pair) return;
+      const row = e.target.closest('.coord-row');
+      row.querySelector('.lat').value = fmtDeg(pair.lat);
+      row.querySelector('.lon').value = fmtDeg(pair.lon);
+      cuMsg('ok', `${row.dataset.nm}：已按「经度, 纬度」拆开 → 经度 ${fmtDeg(pair.lon)}、纬度 ${fmtDeg(pair.lat)}，按回车保存`);
+    });
+  });
 }
 
 /** 把一次坐标变动同步到编辑器各处（列表徽标 / 汇总 / 经停站表 / 左侧清单） */
@@ -2255,7 +2295,7 @@ async function cuSaveCoord(name, latv, lonv, btn) {
   try {
     const r = await cuPost('/api/coord', { name, lat, lon });
     cuApplyCoord(name, r);
-    cuMsg('ok', `${name} 坐标已保存为 ${Number(r.lat).toFixed(5)}, ${Number(r.lon).toFixed(5)}${r.refreshed ? `（重算 ${r.refreshed} 趟车）` : ''}`);
+    cuMsg('ok', `${name} 坐标已保存为 ${fmtDeg(r.lat)}, ${fmtDeg(r.lon)}${r.refreshed ? `（重算 ${r.refreshed} 趟车）` : ''}`);
   } catch (e) {
     btn.disabled = false;
     btn.textContent = '保存';
@@ -2272,7 +2312,7 @@ async function cuClearCoord(name) {
     cuApplyCoord(name, r);
     cuMsg('ok', r.source === 'none'
       ? `${name} 已还原（车站档案里也没有这个站的坐标）`
-      : `${name} 已还原为档案值 ${Number(r.lat).toFixed(5)}, ${Number(r.lon).toFixed(5)}`);
+      : `${name} 已还原为档案值 ${fmtDeg(r.lat)}, ${fmtDeg(r.lon)}`);
   } catch (e) {
     if (btn) { btn.disabled = false; btn.textContent = '还原'; }
     cuMsg('bad', '还原失败：' + e.message);

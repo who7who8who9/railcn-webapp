@@ -26,10 +26,15 @@ SEARCH_DIRS = [
 
 _STATIONS: Optional[Dict[str, dict]] = None
 _LINES: Optional[List[dict]] = None
+_LINES_RAW: Optional[List[dict]] = None                          # 档案原值，人工里程在副本上生效
 _BY_LINE: Optional[Dict[str, dict]] = None
 _POS: Optional[Dict[str, List[Tuple[int, int, float]]]] = None   # 站名 -> [(线路序号, 站位, 里程)]
 _POSALL: Optional[Dict[str, List[Tuple[int, int]]]] = None       # 站名 -> [(线路序号, 站位)]，不限里程可信
 _LOADED = False
+
+# 人工里程：{线路名: {"segKm": {"0": 12.3}, "totalKm": 240.0}}
+# 键是区间序号（第 i 站 → 第 i+1 站），与站名解耦
+_LINE_OVR: Dict[str, dict] = {}
 
 
 def _find(fn: str) -> Optional[str]:
@@ -57,37 +62,130 @@ def _key(name: str) -> str:
 
 
 def load(force: bool = False) -> bool:
-    global _STATIONS, _LINES, _BY_LINE, _POS, _POSALL, _LOADED
+    global _STATIONS, _LINES_RAW, _LOADED
     if _LOADED and not force:
         return bool(_STATIONS)
 
     sp, lp = _find("cnrail_stations.json"), _find("cnrail_lines.json")
     if not sp or not lp:
-        _LOADED, _STATIONS, _LINES = True, {}, []
+        _LOADED, _STATIONS, _LINES_RAW = True, {}, []
+        rebuild_lines()
         return False
 
     with open(sp, encoding="utf-8") as f:
         _STATIONS = json.load(f)
     with open(lp, encoding="utf-8") as f:
-        _LINES = json.load(f)
+        _LINES_RAW = json.load(f)
 
+    rebuild_lines()
+    _LOADED = True
+    return True
+
+
+def _rebuild_km(stations: List[dict], seg_km: Optional[dict] = None,
+                total_km: Optional[float] = None) -> Tuple[List[Optional[float]], List[Optional[float]]]:
+    """
+    由「站间里程」重建累计里程。返回 (累计, 区间)。
+
+    区间：档案有前后两站里程时取差；人工填的段覆盖。
+    累计：某段不详则该段之后的里程都记为 None（不详就如实标不详，不外推）。
+    给了总里程时，只把**没手填**的段等比缩放到 total_km − 手填段之和。
+    """
+    n = len(stations)
+    base = [p.get("km") for p in stations]
+    seg: List[Optional[float]] = [None] * max(n - 1, 0)
+    for i in range(n - 1):
+        a, b = base[i], base[i + 1]
+        if a is not None and b is not None and b >= a:
+            seg[i] = round(float(b) - float(a), 1)
+
+    manual: Dict[int, float] = {}
+    for k, v in (seg_km or {}).items():
+        try:
+            i = int(k)
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= i < n - 1 and f >= 0:
+            seg[i] = round(f, 1)
+            manual[i] = seg[i]
+
+    if total_km:
+        rest = [i for i in range(n - 1) if i not in manual]
+        rest_sum = sum(seg[i] for i in rest if seg[i] is not None)
+        target = float(total_km) - sum(manual.values())
+        if rest and rest_sum > 0 and target > 0:
+            r = target / rest_sum
+            for i in rest:
+                if seg[i] is not None:
+                    seg[i] = round(seg[i] * r, 1)
+
+    cum: List[Optional[float]] = [None] * n
+    if n:
+        cum[0] = round(float(base[0]), 1) if base[0] is not None else 0.0
+    for i in range(n - 1):
+        if seg[i] is None or cum[i] is None:
+            cum[i + 1] = None
+        else:
+            cum[i + 1] = round(cum[i] + seg[i], 1)
+    return cum, seg
+
+
+def _line_with_override(raw: dict, ov: Optional[dict]) -> dict:
+    """档案线路 + 人工里程 → 生效线路（不动原字典，累积里程全部重算）"""
+    ln = {k: v for k, v in raw.items() if k != "stations"}
+    stations = [dict(p) for p in (raw.get("stations") or [])]
+    ln["stations"] = stations
+    ln["totalKmBase"] = raw.get("totalKm")
+    ln["kmManual"] = False
+    if not ov:
+        return ln
+
+    cum, seg = _rebuild_km(stations, ov.get("segKm"), ov.get("totalKm"))
+    for p, c in zip(stations, cum):
+        p["kmBase"] = p.get("km")
+        p["km"] = c
+    total = cum[-1] if cum and cum[-1] is not None else (
+        float(ov["totalKm"]) if ov.get("totalKm") else raw.get("totalKm"))
+    ln["totalKm"] = total
+    ln["kmComplete"] = bool(seg) and all(s is not None for s in seg) and all(c is not None for c in cum)
+    ln["kmReliable"] = True if ln["kmComplete"] else bool(raw.get("kmReliable"))
+    ln["kmManual"] = True
+    ln["segKm"] = {str(i): v for i, v in enumerate(seg) if v is not None}
+    return ln
+
+
+def rebuild_lines() -> None:
+    """把人工里程套回线路表，并重建「站名 → 线路里程」索引"""
+    global _LINES, _BY_LINE, _POS, _POSALL
+    raw_lines = _LINES_RAW or []
+    _LINES = [_line_with_override(r, _LINE_OVR.get(r.get("name"))) for r in raw_lines]
     _BY_LINE = {ln["name"]: ln for ln in _LINES}
 
-    # 反向索引：站名 -> [(线路序号, 站位, 里程)]
     pos: Dict[str, List[Tuple[int, int, float]]] = {}
     posall: Dict[str, List[Tuple[int, int]]] = {}
     for li, ln in enumerate(_LINES):
-        reliable = bool(ln.get("kmReliable", ln.get("kmComplete")))
+        # 人工填过里程的线路也进索引（只取已知的站，缺口段本来也不会有值），
+        # 否则用户改完里程，车次里程还是按老数据估算
+        reliable = bool(ln.get("kmReliable") or ln.get("kmComplete") or ln.get("kmManual"))
         for pi, p in enumerate(ln.get("stations") or []):
             k = _key(p.get("name", ""))
-            if k:
-                posall.setdefault(k, []).append((li, pi))
-            if reliable and p.get("km") is not None and k:
+            if not k:
+                continue
+            posall.setdefault(k, []).append((li, pi))
+            if reliable and p.get("km") is not None:
                 pos.setdefault(k, []).append((li, pi, p["km"]))
     _POS = pos
     _POSALL = posall
-    _LOADED = True
-    return True
+
+
+def set_line_overrides(mapping: Optional[Dict[str, dict]]) -> None:
+    """设置全部人工线路里程（railcore 启动与保存时调用）；已加载则立即重建"""
+    global _LINE_OVR
+    _LINE_OVR = {k: v for k, v in (mapping or {}).items() if v}
+    if _LOADED:
+        rebuild_lines()
+
 
 
 def _ensure() -> None:
@@ -144,15 +242,17 @@ def search_line(q: str, limit: int = 20) -> List[dict]:
         return []
     if not q:
         return [{"name": l["name"], "n": l["n"], "totalKm": l["totalKm"],
-                 "color": l.get("color")} for l in _LINES[:limit]]
+                 "color": l.get("color"), "kmComplete": l.get("kmComplete"),
+                 "kmManual": l.get("kmManual", False)} for l in _LINES[:limit]]
     hits = [l for l in _LINES if q in _norm(l["name"])]
     hits.sort(key=lambda l: (_norm(l["name"]).index(q), len(l["name"])))
     return [{"name": l["name"], "n": l["n"], "totalKm": l["totalKm"],
-             "color": l.get("color"), "kmComplete": l["kmComplete"]} for l in hits[:limit]]
+             "color": l.get("color"), "kmComplete": l.get("kmComplete"),
+             "kmManual": l.get("kmManual", False)} for l in hits[:limit]]
 
 
 def line_detail(name: str) -> Optional[dict]:
-    """线路 + 站点坐标（供地图绘制）"""
+    """线路 + 站点坐标（供地图绘制）、站间里程（供编辑）"""
     ln = line(name)
     if not ln:
         return None
@@ -160,9 +260,18 @@ def line_detail(name: str) -> Optional[dict]:
     for p in ln["stations"]:
         c = coord(p["name"])
         pts.append({"name": _key(p["name"]), "km": p["km"],
+                    "kmBase": p.get("kmBase", p["km"]),
                     "lat": c[0] if c else None, "lon": c[1] if c else None})
-    return {**ln, "stations": pts,
-            "coordCoverage": round(sum(1 for p in pts if p["lat"] is not None) / max(len(pts), 1) * 100, 1)}
+    n = len(pts)
+    seg = []
+    for i in range(n - 1):
+        a, b = pts[i]["km"], pts[i + 1]["km"]
+        seg.append(round(float(b) - float(a), 1) if (a is not None and b is not None) else None)
+    ov = _LINE_OVR.get(ln["name"]) or {}
+    return {**ln, "stations": pts, "segKm": seg,
+            "override": {"segKm": ov.get("segKm") or {}, "totalKm": ov.get("totalKm"),
+                         "note": ov.get("note") or ""} if ov else None,
+            "coordCoverage": round(sum(1 for p in pts if p["lat"] is not None) / max(n, 1) * 100, 1)}
 
 
 # --------------------------------------------------------------------------

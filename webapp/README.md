@@ -175,6 +175,7 @@ G1 北京南→上海虹桥 因此从「直线 1176 km」修正为 **1318 km**�
 |---|---|
 | `train_override` | `code`（主键，按车次不按日期）、`via_json`、`total_km`、`seg_km_json`、`note`、`updated_at` |
 | `coord_override` | `name`、`lat`、`lon` —— 车站坐标人工修正（**任何站都能改**，不限于缺坐标的） |
+| `line_override` | `name`（主键，线路名）、`seg_km_json`、`total_km`、`note`、`updated_at` —— 线路里程人工校正 |
 | `curate` | 全量扫描结果：每趟车的经由 / 里程 / 缺坐标摘要与问题标签 |
 
 `build_route_payload()` 里自动结果算完后再套人工值：
@@ -188,6 +189,21 @@ G1 北京南→上海虹桥 因此从「直线 1176 km」修正为 **1318 km**�
 
 `seg_km_json` 的键是「区间序号」而不是站名，因为区间序号在同一趟车的上下行、不同日期里都稳定，
 站名偶尔会因经停变化（加开 / 甩站）而错位。
+
+### 线路里程人工校正
+
+线路的里程来自 `cnrail_lines.json`（417 条线，其中 182 条有站缺里程、2 条没有总里程）。
+「车站 / 线路」页选中线路后点「编辑里程」，改的是**这条线本身**：
+
+- 相邻两站逐段列出，灰字是档案值，档案缺的段显示 `-`（不详），留空即沿用
+- 填了就锁住该段；底部的「线路总里程」同样可改，填了就把**没手填的段**缩放到「总里程 − 手填段之和」
+- 保存进 `line_override`；「全部恢复档案」删掉这条记录
+
+生效方式和车次里程不同：`railcore` 启动时把 `line_override` 灌进 `cnrail`，
+`cnrail.rebuild_lines()` 用人工值重算各站累计里程并**重建「站名 → 线路里程」索引**，
+所以之后车次里程配对（`refine_km` / `_pair_km_raw`）用的就是改过的数；缺口的段保持 `None`，
+不会外推（界面上仍是 `-`）。人工改过的线路即使档案标着「里程不完整」也会进索引 ——
+否则改完不生效，等于白填。
 
 生效是**即时**的：payload 每次请求现算，不缓存最终结果，改完刷新详情页就是新数据。
 `GET /api/curate/detail` 特地带 `use_override=False` 跑一遍，专门给编辑器显示「自动推断基线」，
@@ -249,7 +265,7 @@ G1 北京南→上海虹桥 因此从「直线 1176 km」修正为 **1318 km**�
 | `GET /api/transfer` | `from`、`to`、`date`、`middle` | 中转换乘 |
 | `GET /api/station` | `q` | 车站档案（路局 / 电报码 / 服务 / 连接线路 / 始发终到车次量） |
 | `GET /api/lines` | `q`、`limit` | 线路名检索 |
-| `GET /api/line` | `q` | 线路详情（有序站点 + 累计里程 + 坐标，可直接画线） |
+| `GET /api/line` | `q` | 线路详情（有序站点 + 累计里程 + 坐标，可直接画线）；另带 `kmBase`（档案原值）、`segKm`（各段生效里程，不详为 `null`）、`override` |
 | `GET /api/dates` | — | 含当日共 15 天，每天的下载状态 / 已确认开行数 / 待处理数 |
 | `GET /api/history` | — | 已有数据的全部日期（车次数 / 停站记录数 / 导出文件） |
 | `GET /api/history/trains` | `date`、`q`、`limit`、`offset` | 某日车次清单（含「是否已下载经停站」标记），可检索分页 |
@@ -264,6 +280,8 @@ G1 北京南→上海虹桥 因此从「直线 1176 km」修正为 **1318 km**�
 | `GET /api/curate/lineNames` | — | 全部线路（417 条，带站数 / 总里程，给编辑器下拉用；`items[]` 为对象，`names[]` 是纯名字） |
 | `POST /api/curate/scan` · `GET /api/curate/stop` | — | 全量扫描开始 / 停止（后台线程，进度可轮询） |
 | `POST /api/override` | `code`、`via[]`、`totalKm`、`segKm`、`note` | 保存人工校正；`segKm` 形如 `{"0":205,"2":230}`（键是区间序号）；全为空即撤销 |
+| `POST /api/line/km` | `name`、`segKm`、`totalKm`、`note` | 保存线路里程人工校正，返回最新线路详情；全为空即撤销 |
+| `POST /api/line/km/clear` | `name` | 线路里程恢复档案值 |
 | `POST /api/coord` | `name`、`lat`、`lon` | 设置车站坐标（任何站，写 `coord_override`，立即生效并重算相关车次） |
 | `POST /api/coord/clear` | `name` | 撤销人工坐标，回到车站档案原值 |
 

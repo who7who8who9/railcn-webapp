@@ -107,6 +107,15 @@ def init_db() -> None:
                 updated_at  REAL
             );
 
+            -- 人工校正：线路里程（按线路，站间 / 总里程）
+            CREATE TABLE IF NOT EXISTS line_override (
+                name        TEXT PRIMARY KEY,
+                seg_km_json TEXT,          -- {"0":12.3} 站间里程，键是区间序号
+                total_km    REAL,          -- 手工线路总里程，未手填段按比例缩放
+                note        TEXT,
+                updated_at  REAL
+            );
+
             -- 数据校对扫描结果（curate.py 生成）
             CREATE TABLE IF NOT EXISTS curate (
                 code        TEXT PRIMARY KEY,
@@ -310,6 +319,111 @@ def list_overrides() -> Dict[str, dict]:
             "note": row["note"], "updatedAt": row["updated_at"],
         }
     return out
+
+
+# ---------------------------------------------------------------------------
+# 线路里程人工校正（按线路，写库后立即套回 cnrail 的内存线路表）
+# ---------------------------------------------------------------------------
+
+_line_ovr_cache: Optional[Dict[str, dict]] = None
+
+
+def list_line_overrides() -> Dict[str, dict]:
+    try:
+        with db() as conn:
+            rows = conn.execute(
+                "SELECT name, seg_km_json, total_km, note, updated_at FROM line_override"
+            ).fetchall()
+    except sqlite3.Error:
+        return {}
+    out: Dict[str, dict] = {}
+    for row in rows:
+        try:
+            seg = _clean_seg_km(json.loads(row["seg_km_json"] or "{}"))
+        except (TypeError, ValueError):
+            seg = {}
+        out[row["name"]] = {
+            "segKm": seg, "totalKm": row["total_km"],
+            "note": row["note"], "updatedAt": row["updated_at"],
+        }
+    return out
+
+
+def line_override_map() -> Dict[str, dict]:
+    global _line_ovr_cache
+    if _line_ovr_cache is None:
+        _line_ovr_cache = list_line_overrides()
+    return _line_ovr_cache
+
+
+def _apply_line_overrides() -> None:
+    """把库里的人工线路里程灌进 cnrail，并重建「站名→线路里程」索引"""
+    cnrail.set_line_overrides({
+        name: {"segKm": ov.get("segKm") or {}, "totalKm": ov.get("totalKm")}
+        for name, ov in line_override_map().items()
+    })
+
+
+def get_line_override(name: str) -> Optional[dict]:
+    ln = cnrail.line(name)
+    if not ln:
+        return None
+    ov = line_override_map().get(ln["name"])
+    return {"name": ln["name"], **ov} if ov else None
+
+
+def save_line_override(name: str, seg_km=None, total_km=None, note: str = "") -> dict:
+    """
+    保存线路里程人工校正：seg_km 键为区间序号（第 i 站 → 第 i+1 站）。
+    全部为空即撤销，回到档案值。站间里程与总里程可同时给：
+    给了总里程时只把「没手填」的段等比缩放到 totalKm − 手填段之和。
+    """
+    ln = cnrail.line(name)
+    if not ln:
+        raise ValueError("线路库里没有这条线：" + str(name or ""))
+    lname = ln["name"]
+    segs = _clean_seg_km(seg_km)
+    try:
+        km = float(total_km) if total_km not in (None, "", 0) else None
+    except (TypeError, ValueError):
+        raise ValueError("总里程必须是数字")
+    if km is not None and not (1 <= km <= 20000):
+        raise ValueError("线路总里程超出合理范围（1~20000 km）")
+
+    nseg = max(len(ln.get("stations") or []) - 1, 0)
+    bad = [k for k in segs if int(k) >= nseg]
+    if bad:
+        raise ValueError(f"区间序号超出范围（这条线共 {nseg} 段）")
+
+    note = (note or "").strip()
+    if not segs and km is None and not note:
+        clear_line_override(lname)
+        return {"name": lname, "cleared": True}
+
+    with _db_lock, db() as conn:
+        conn.execute(
+            """INSERT INTO line_override(name, seg_km_json, total_km, note, updated_at)
+               VALUES(?,?,?,?,?)
+               ON CONFLICT(name) DO UPDATE SET
+                 seg_km_json=excluded.seg_km_json, total_km=excluded.total_km,
+                 note=excluded.note, updated_at=excluded.updated_at""",
+            (lname, json.dumps(segs, ensure_ascii=False), km, note, time.time()),
+        )
+    global _line_ovr_cache
+    _line_ovr_cache = None
+    _apply_line_overrides()
+    return {"name": lname, "segKm": segs, "totalKm": km, "note": note}
+
+
+def clear_line_override(name: str) -> bool:
+    ln = cnrail.line(name)
+    lname = ln["name"] if ln else _norm(name)
+    with _db_lock, db() as conn:
+        hit = conn.execute("DELETE FROM line_override WHERE name=?", (lname,)).rowcount > 0
+    global _line_ovr_cache
+    _line_ovr_cache = None
+    _apply_line_overrides()
+    return hit
 
 
 def set_coord(name: str, lat: float, lon: float) -> dict:
@@ -1115,3 +1229,7 @@ def station_detail(q: str) -> dict:
 
 
 init_db()
+try:
+    _apply_line_overrides()          # 人工线路里程在进程启动时就套进 cnrail
+except Exception:                    # 库坏了也不能让服务起不来
+    pass

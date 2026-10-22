@@ -607,3 +607,36 @@ a{color:var(--accent)}
 .seg-note b{color:#33415c}
 .st-line .k .chg{font-style:normal;font-size:9.5px;color:#0f7a45;background:#e8f6ee;
   border-radius:4px;padding:0 4px;margin-left:5px}
+
+/* ---------- 线路里程编辑（车站/线路页） ---------- */
+.dhead .l1 .ln-edit{margin-left:auto}
+.dhead .tag.manual{background:#e8f6ee;color:#0f7a45}
+.lnkm{padding:11px 16px 13px;border-bottom:1px solid var(--line);background:#fbfdff}
+.lnkm-head{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.lnkm-head b{font-size:12.5px;color:#33415c}
+.lnkm-hint{font-size:11px;color:var(--muted)}
+.lnkm-btns{margin-left:auto;display:flex;gap:6px}
+.lnkm .seg-list{margin-top:9px;background:#fff;max-height:296px}
+.lnkm .seg-row{grid-template-columns:24px minmax(0,1fr) 84px 22px 24px 46px}
+.lnkm-foot{display:flex;align-items:center;gap:8px;margin-top:10px;flex-wrap:wrap;
+  font-size:11.5px;color:#3d4a60}
+.lnkm-foot label{font-size:11.5px;color:#5a6884}
+.lnkm-foot input{width:106px;height:28px;border:1px solid var(--line);border-radius:7px;
+  padding:0 8px;font:inherit;font-size:12px;font-family:ui-monospace,Menlo,monospace;
+  text-align:right;outline:none;background:#fff;box-sizing:border-box}
+.lnkm-foot input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.lnkm-foot input::-webkit-outer-spin-button,.lnkm-foot input::-webkit-inner-spin-button{
+  -webkit-appearance:none;margin:0}
+.lnkm-foot .u{color:var(--muted);margin-left:-4px}
+.lnkm-sum{font-family:ui-monospace,Menlo,monospace;color:#33415c}
+.lnkm-seg{margin-left:auto;font-size:11px;color:#0f7a45}
+.lnkm-seg.bad{color:#b42318}
+.lnkm .ve-note{margin-top:7px}
+.side.wide{width:560px;flex:0 0 560px}
+.dhead .l1 .code{white-space:nowrap;flex:0 0 auto}
+/* 线路详情：列表为空时把整列高度让给详情 */
+#paneNet.line-only #netList{flex:0 0 0;overflow:hidden;min-height:0}
+.dhead .l1{flex-wrap:wrap;row-gap:6px}
+.dhead .l1 .tag{flex:0 0 auto}
+.dhead .l1 .ln-edit{flex:0 0 auto}
+.lnkm-warn{font-size:11px;color:#b45309}

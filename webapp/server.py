@@ -132,6 +132,21 @@ class Handler(BaseHTTPRequestHandler):
                 curate.refresh_one(code)
                 return self.json({"ok": True, **res})
 
+            if path == "/api/line/km":
+                res = railcore.save_line_override(
+                    payload.get("name"),
+                    payload.get("segKm") or {},
+                    payload.get("totalKm"),
+                    payload.get("note") or "",
+                )
+                return self.json({"ok": True, **res,
+                                  "line": cnrail.line_detail(res["name"])})
+
+            if path == "/api/line/km/clear":
+                res = railcore.clear_line_override(payload.get("name"))
+                return self.json({"ok": True, "cleared": res,
+                                  "line": cnrail.line_detail(payload.get("name"))})
+
             if path == "/api/coord":
                 res = railcore.set_coord(
                     payload.get("name"), payload.get("lat"), payload.get("lon")
@@ -275,7 +290,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/curate/lineNames":
             items = [{"name": l["name"], "n": l.get("n"), "totalKm": l.get("totalKm"),
-                      "kmComplete": l.get("kmComplete")}
+                      "kmComplete": l.get("kmComplete"), "kmManual": l.get("kmManual", False)}
                      for l in cnrail.search_line("", 10000)]
             # 干线在前（站数多的排前面），下拉里默认先看到主要线路
             items.sort(key=lambda x: (-(x.get("n") or 0), x["name"]))

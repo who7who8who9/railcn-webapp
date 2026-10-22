@@ -28,6 +28,7 @@ _STATIONS: Optional[Dict[str, dict]] = None
 _LINES: Optional[List[dict]] = None
 _BY_LINE: Optional[Dict[str, dict]] = None
 _POS: Optional[Dict[str, List[Tuple[int, int, float]]]] = None   # 站名 -> [(线路序号, 站位, 里程)]
+_POSALL: Optional[Dict[str, List[Tuple[int, int]]]] = None       # 站名 -> [(线路序号, 站位)]，不限里程可信
 _LOADED = False
 
 
@@ -56,7 +57,7 @@ def _key(name: str) -> str:
 
 
 def load(force: bool = False) -> bool:
-    global _STATIONS, _LINES, _BY_LINE, _POS, _LOADED
+    global _STATIONS, _LINES, _BY_LINE, _POS, _POSALL, _LOADED
     if _LOADED and not force:
         return bool(_STATIONS)
 
@@ -74,14 +75,17 @@ def load(force: bool = False) -> bool:
 
     # 反向索引：站名 -> [(线路序号, 站位, 里程)]
     pos: Dict[str, List[Tuple[int, int, float]]] = {}
+    posall: Dict[str, List[Tuple[int, int]]] = {}
     for li, ln in enumerate(_LINES):
-        if not ln.get("kmReliable", ln.get("kmComplete")):
-            continue                      # 里程不可信的线路不参与里程推算
-        for pi, p in enumerate(ln["stations"]):
-            k = _key(p["name"])
-            if k and p["km"] is not None:
+        reliable = bool(ln.get("kmReliable", ln.get("kmComplete")))
+        for pi, p in enumerate(ln.get("stations") or []):
+            k = _key(p.get("name", ""))
+            if k:
+                posall.setdefault(k, []).append((li, pi))
+            if reliable and p.get("km") is not None and k:
                 pos.setdefault(k, []).append((li, pi, p["km"]))
     _POS = pos
+    _POSALL = posall
     _LOADED = True
     return True
 
@@ -159,6 +163,133 @@ def line_detail(name: str) -> Optional[dict]:
                     "lat": c[0] if c else None, "lon": c[1] if c else None})
     return {**ln, "stations": pts,
             "coordCoverage": round(sum(1 for p in pts if p["lat"] is not None) / max(len(pts), 1) * 100, 1)}
+
+
+# --------------------------------------------------------------------------
+# 经由推断（这趟车走了哪几条线路）
+# --------------------------------------------------------------------------
+
+_LINE_TAIL = re.compile(r"(高速线|客运专线|高速铁路|城际铁路|普速线|铁路|线)$")
+
+
+def _family(name: str) -> str:
+    """线路族：京广高速线 / 京广线 归为同族，用于跨段连续性判断"""
+    n = _norm(name)
+    return _LINE_TAIL.sub("", n) or n
+
+
+def _cand_lines(a: str, b: str) -> List[Tuple[str, str]]:
+    """
+    a→b 区间可能经由的线路，按可信度排序，返回 [(线路名, 依据)]
+
+    依据三档，从强到弱：
+      km    线路里程表能算出该段里程（最可靠，说明两站确在同一条线上且顺序正确）
+      pos   两站都出现在该线的站序里，且 a 在 b 之前
+      lines 两站的车站档案都标注了这条线（交集，最弱，只作兜底）
+    """
+    _ensure()
+    ka, kb = _key(a), _key(b)
+    out: List[Tuple[str, str]] = []
+    seen = set()
+
+    _, lname = _pair_km_raw(a, b)
+    if lname:
+        out.append((lname, "km"))
+        seen.add(lname)
+
+    pa_list = (_POSALL or {}).get(ka) or []
+    pb_list = (_POSALL or {}).get(kb) or []
+    for li, pa in pa_list:
+        for li2, pb in pb_list:
+            if li != li2 or pb <= pa:
+                continue
+            nm = _LINES[li]["name"]
+            if nm not in seen:
+                seen.add(nm)
+                out.append((nm, "pos"))
+
+    la = set((station(a) or {}).get("lines") or [])
+    lb = set((station(b) or {}).get("lines") or [])
+    for nm in sorted(la & lb):
+        ln = line(nm)
+        name = ln["name"] if ln else _norm(nm)
+        if name not in seen:
+            seen.add(name)
+            out.append((name, "lines"))
+    return out
+
+
+def infer_via(stops: Sequence[dict]) -> dict:
+    """
+    推断一列车经由哪些线路，输出**结构化区间**，供界面展示与人工校对。
+
+    返回::
+
+        {
+          'segs':      [{'line': '峰福线', 'from': '福州', 'to': '武夷山', 'src': 'lines'}],
+          'unknown':   [{'from': '武夷山', 'to': '鹰潭'}],   # 识别不出的区间
+          'pairs': 20, 'resolved': 18, 'coverage': 90.0, 'sources': ['lines'],
+        }
+
+    区间按运行顺序首尾相接；中间有识别不出的区间时**不合并**，
+    否则会把两段不同线路连成一条，看不出缺在哪儿。
+    """
+    _ensure()
+    names = [_key(s["name"]) for s in stops]
+    pairs = list(zip(names, names[1:]))
+    if not pairs:
+        return {"segs": [], "unknown": [], "pairs": 0, "resolved": 0,
+                "coverage": 0.0, "sources": []}
+
+    chosen: List[Optional[Tuple[str, str]]] = []
+    prev: Optional[str] = None
+    for a, b in pairs:
+        cands = _cand_lines(a, b)
+        if not cands:
+            chosen.append(None)
+            prev = None                      # 断链后不再要求与前面连续
+            continue
+        # 先取可信度最高的一档，再在这一档里挑与上一段同线/同族的
+        tier = [c for c in cands if c[1] == cands[0][1]]
+        same = [c for c in tier if prev and (c[0] == prev or _family(c[0]) == _family(prev))]
+        pick = (same or tier)[0]
+        chosen.append(pick)
+        prev = pick[0]
+
+    segs: List[dict] = []
+    for i, c in enumerate(chosen):
+        a, b = pairs[i]
+        if not c:
+            continue
+        nm, src = c
+        if segs and segs[-1]["line"] == nm and segs[-1]["to"] == a:
+            segs[-1]["to"] = b
+        else:
+            segs.append({"line": nm, "from": a, "to": b, "src": src, "i0": i})
+
+    unknown: List[dict] = []
+    for i, c in enumerate(chosen):
+        if c:
+            continue
+        a, b = pairs[i]
+        if unknown and unknown[-1]["to"] == a:
+            unknown[-1]["to"] = b
+        else:
+            unknown.append({"from": a, "to": b, "i0": i})
+
+    resolved = sum(1 for c in chosen if c)
+    sources: List[str] = []
+    for c in chosen:
+        if c and c[1] not in sources:
+            sources.append(c[1])
+    return {
+        "segs": segs,
+        "unknown": unknown,
+        "pairs": len(pairs),
+        "resolved": resolved,
+        "coverage": round(resolved / len(pairs) * 100, 1),
+        "sources": sources,
+    }
 
 
 # --------------------------------------------------------------------------

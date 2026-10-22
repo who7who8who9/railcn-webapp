@@ -40,6 +40,7 @@
         <button class="tab" data-tab="net">车站/线路</button>
         <button class="tab" data-tab="dl">数据下载</button>
         <button class="tab" data-tab="hist">历史数据</button>
+        <button class="tab" data-tab="curate">数据校对</button>
       </div>
 
       <!-- 车次 -->
@@ -121,6 +122,25 @@
         <div id="histList" class="list"></div>
         <div id="histFoot" class="hist-foot"></div>
       </div>
+
+      <!-- 数据校对 -->
+      <div id="paneCurate" class="pane hidden">
+        <div class="cu-head">
+          <div class="cu-h1">数据校对 · 补全经由 / 里程 / 坐标</div>
+          <div id="cuStats" class="cu-stats"></div>
+          <div class="cu-ctrl">
+            <button id="cuScan" class="btn sm">重新扫描</button>
+            <span id="cuProg" class="cu-prog"></span>
+          </div>
+        </div>
+        <div id="cuFilters" class="cu-filters"></div>
+        <div class="cu-search">
+          <input id="cuQ" placeholder="车次 / 始发 / 终到 / 线路" autocomplete="off">
+          <button id="cuGo" class="btn sm primary">检索</button>
+        </div>
+        <div id="cuList" class="list"></div>
+        <div id="cuFoot" class="hist-foot"></div>
+      </div>
     </aside>
 
     <section class="stage">
@@ -161,6 +181,14 @@
           <button class="btn speed" data-speed="300">300×</button>
           <button id="btnNow" class="btn ghost">此刻</button>
         </div>
+      </div>
+    </section>
+
+    <!-- 校对编辑器（占满右侧地图区域，仅在「数据校对」页签显示） -->
+    <section id="curateStage" class="curate-stage hidden">
+      <div id="cuEditor" class="cu-editor">
+        <div class="cu-empty">从左侧挑一趟车开始校对<br>
+          <span style="font-size:12px">改完点「保存校正」，车次详情、地图、时间轴都会用新的经由与里程</span></div>
       </div>
     </section>
   </main>

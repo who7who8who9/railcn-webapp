@@ -1,0 +1,405 @@
+# -*- coding: utf-8 -*-
+"""
+curate.py — 数据校对（补全经由 / 里程 / 坐标）
+
+扫一遍库里所有车次，把这三类问题标出来存进 `curate` 表：
+
+  via    经由识别不全（有区间认不出线路，或整趟都认不出）
+  km     里程只能按直线距离估算（没有线路里程可依）
+  coord  有经停站缺坐标（地图上会画成折线跳点）
+
+页面按问题类型筛选，逐条打开人工补全；补完的会从清单里消失。
+扫描是后台任务，仿 collector 的 start/status/stop 三件套。
+"""
+from __future__ import annotations
+
+import json
+import threading
+import time
+from typing import Dict, List, Optional
+
+import railcore
+
+_lock = threading.Lock()
+_thread: Optional[threading.Thread] = None
+
+_state: Dict[str, object] = {
+    "running": False,
+    "done": 0,
+    "total": 0,
+    "message": "",
+    "error": None,
+    "started": 0.0,
+    "finished": 0.0,
+    "stopped": False,
+}
+
+FILTERS = {
+    "todo": "issues <> ''",
+    "all": "1=1",
+    "via": "issues LIKE '%via%'",
+    "km": "issues LIKE '%km%'",
+    "coord": "issues LIKE '%coord%'",
+    "manual": "(via_source='manual' OR km_mode='manual')",
+    "clean": "issues = ''",
+}
+
+ISSUE_LABELS = {
+    "via": "经由待补",
+    "km": "里程估算",
+    "coord": "缺坐标",
+}
+
+
+# ---------------------------------------------------------------------------
+# 单趟车次摘要
+# ---------------------------------------------------------------------------
+
+def summarize(code: str, date: str) -> Optional[dict]:
+    """算一趟车的校对摘要；算不出来返回 None"""
+    try:
+        d = railcore.build_route_payload(code, date, cache_only=True, with_path=False)
+    except Exception:                                # noqa: BLE001
+        return None
+    if not d.get("stops"):
+        return None
+
+    segs = d.get("viaSegs") or []
+    unknown = d.get("viaUnknown") or []
+    via_text = " / ".join(d.get("viaLines") or [])
+
+    issues: List[str] = []
+    if d.get("viaSource") == "none" or not segs:
+        issues.append("via")
+    elif unknown:
+        issues.append("via")
+    if d.get("kmMode") == "estimate":
+        issues.append("km")
+    missing = d.get("missingCoords") or []
+    if missing:
+        issues.append("coord")
+
+    return {
+        "code": d.get("code") or code,
+        "date": date,
+        "from_sta": d.get("from"),
+        "to_sta": d.get("to"),
+        "stops": len(d["stops"]),
+        "via_text": via_text,
+        "via_json": json.dumps(segs, ensure_ascii=False),
+        "via_unknown": json.dumps(unknown, ensure_ascii=False),
+        "via_source": d.get("viaSource") or "none",
+        "via_cov": float(d.get("viaCoverage") or 0),
+        "km_mode": d.get("kmMode") or "estimate",
+        "km_matched": d.get("kmMatched") or "0/0",
+        "total_km": d.get("totalKm") or 0.0,
+        "missing": len(missing),
+        "missing_json": json.dumps(missing, ensure_ascii=False),
+        "issues": ",".join(issues),
+        "scanned_at": time.time(),
+    }
+
+
+def _upsert(conn, r: dict) -> None:
+    conn.execute(
+        """INSERT INTO curate(code, date, from_sta, to_sta, stops, via_text, via_json,
+                              via_unknown, via_source, via_cov, km_mode, km_matched,
+                              total_km, missing, missing_json, issues, scanned_at)
+           VALUES(:code,:date,:from_sta,:to_sta,:stops,:via_text,:via_json,
+                  :via_unknown,:via_source,:via_cov,:km_mode,:km_matched,
+                  :total_km,:missing,:missing_json,:issues,:scanned_at)
+           ON CONFLICT(code) DO UPDATE SET
+             date=excluded.date, from_sta=excluded.from_sta, to_sta=excluded.to_sta,
+             stops=excluded.stops, via_text=excluded.via_text, via_json=excluded.via_json,
+             via_unknown=excluded.via_unknown, via_source=excluded.via_source,
+             via_cov=excluded.via_cov, km_mode=excluded.km_mode,
+             km_matched=excluded.km_matched, total_km=excluded.total_km,
+             missing=excluded.missing, missing_json=excluded.missing_json,
+             issues=excluded.issues, scanned_at=excluded.scanned_at""",
+        r,
+    )
+
+
+def refresh_one(code: str) -> Optional[dict]:
+    """人工保存后只重算当前车次，不惊动整张表"""
+    code = (code or "").strip().upper()
+    if not code:
+        return None
+    with railcore.db() as conn:
+        row = conn.execute(
+            "SELECT date FROM curate WHERE code=?", (code,)
+        ).fetchone()
+        if not row:
+            row = conn.execute(
+                "SELECT MAX(date) AS date FROM routes WHERE code=? AND raw IS NOT NULL",
+                (code,),
+            ).fetchone()
+        date = row["date"] if row else None
+        if not date:
+            return None
+        s = summarize(code, date)
+        if s:
+            _upsert(conn, s)
+            conn.commit()
+        return s
+
+
+def refresh_station(name: str) -> int:
+    """补录某站坐标后，把清单里提到该站的车次重算一遍"""
+    name = (name or "").strip()
+    if not name:
+        return 0
+    try:
+        with railcore.db() as conn:
+            rows = conn.execute(
+                "SELECT code, date FROM curate WHERE missing_json LIKE ?",
+                (f"%{name}%",),
+            ).fetchall()
+    except Exception:                                # noqa: BLE001
+        return 0
+    n = 0
+    for r in rows:
+        try:
+            with railcore.db() as conn:
+                s = summarize(r["code"], r["date"])
+                if s:
+                    _upsert(conn, s)
+                    conn.commit()
+                    n += 1
+        except Exception:                            # noqa: BLE001
+            continue
+    return n
+
+
+# ---------------------------------------------------------------------------
+# 全量扫描
+# ---------------------------------------------------------------------------
+
+def _scan() -> None:
+    """先算后写：算的时候不开写事务，攒 40 条再用一个短事务落盘。
+    否则一边算一边挂着写锁，用户在页面上点「保存校正」会被锁到超时。"""
+    read_conn = None
+    try:
+        read_conn = railcore.db()
+        rows = read_conn.execute(
+            "SELECT code, MAX(date) AS d FROM routes WHERE raw IS NOT NULL GROUP BY code"
+        ).fetchall()
+        total = len(rows)
+        read_conn.close()
+        read_conn = None
+        with _lock:
+            _state.update(total=total, done=0, running=True, message="扫描中",
+                          error=None, started=time.time(), finished=0.0, stopped=False)
+
+        done = 0
+        buf: List[dict] = []
+        for r in rows:
+            if _state.get("stopped"):
+                break
+            s = summarize(r["code"], r["d"])
+            if s:
+                buf.append(s)
+            done += 1
+            if len(buf) >= 40:
+                write_conn = railcore.db()
+                try:
+                    for item in buf:
+                        _upsert(write_conn, item)
+                    write_conn.commit()
+                finally:
+                    write_conn.close()
+                buf.clear()
+                with _lock:
+                    _state["done"] = done
+                    _state["message"] = f"扫描中 {done}/{total}"
+        if buf:
+            write_conn = railcore.db()
+            try:
+                for item in buf:
+                    _upsert(write_conn, item)
+                write_conn.commit()
+            finally:
+                write_conn.close()
+        with _lock:
+            _state["done"] = done
+            _state["message"] = f"已停止（{done}/{total}）" if _state.get("stopped") else "完成"
+    except Exception as exc:                          # noqa: BLE001
+        with _lock:
+            _state["error"] = f"{type(exc).__name__}: {exc}"
+            _state["message"] = "出错：" + _state["error"]  # type: ignore[operator]
+    finally:
+        if read_conn is not None:
+            try:
+                read_conn.close()
+            except Exception:                        # noqa: BLE001
+                pass
+        with _lock:
+            _state.update(running=False, finished=time.time())
+
+
+def start() -> dict:
+    global _thread
+    if _state.get("running"):
+        return {"ok": False, "message": "扫描已在运行", **status()}
+    with _lock:                       # 先置位，避免接口返回时还没起来看起来像没启动
+        _state.update(running=True, done=0, total=0, message="正在准备扫描",
+                      error=None, stopped=False, started=time.time(), finished=0.0)
+    _thread = threading.Thread(target=_scan, name="curate-scan", daemon=True)
+    _thread.start()
+    time.sleep(0.05)
+    return {"ok": True, **status()}
+
+
+def stop() -> dict:
+    with _lock:
+        _state["stopped"] = True
+        _state["message"] = "正在停止…"
+    return status()
+
+
+# ---------------------------------------------------------------------------
+# 查询
+# ---------------------------------------------------------------------------
+
+def counts() -> dict:
+    out = {"scanned": 0, "todo": 0, "via": 0, "km": 0, "coord": 0,
+           "manual": 0, "clean": 0, "lastScan": None}
+    try:
+        with railcore.db() as conn:
+            for key, sql in (
+                ("scanned", "SELECT COUNT(*) FROM curate"),
+                ("todo", "SELECT COUNT(*) FROM curate WHERE issues <> ''"),
+                ("via", "SELECT COUNT(*) FROM curate WHERE issues LIKE '%via%'"),
+                ("km", "SELECT COUNT(*) FROM curate WHERE issues LIKE '%km%'"),
+                ("coord", "SELECT COUNT(*) FROM curate WHERE issues LIKE '%coord%'"),
+                ("manual", "SELECT COUNT(*) FROM curate WHERE via_source='manual' OR km_mode='manual'"),
+                ("clean", "SELECT COUNT(*) FROM curate WHERE issues = ''"),
+                ("lastScan", "SELECT MAX(scanned_at) FROM curate"),
+            ):
+                v = conn.execute(sql).fetchone()[0]
+                out[key] = v
+    except Exception:                                # noqa: BLE001
+        pass
+    if not out["scanned"]:
+        out["lastScan"] = None
+    return out
+
+
+def status() -> dict:
+    with _lock:
+        s = dict(_state)
+    s["counts"] = counts()
+    return s
+
+
+def listing(mode: str = "todo", q: str = "", limit: int = 60, offset: int = 0) -> dict:
+    where = FILTERS.get(mode or "todo", FILTERS["todo"])
+    args: List[object] = []
+    if q:
+        like = f"%{q.strip()}%"
+        where += " AND (code LIKE ? OR from_sta LIKE ? OR to_sta LIKE ? OR via_text LIKE ?)"
+        args += [like, like, like, like]
+    try:
+        with railcore.db() as conn:
+            total = conn.execute(f"SELECT COUNT(*) FROM curate WHERE {where}", args).fetchone()[0]
+            rows = conn.execute(
+                f"""SELECT code, date, from_sta, to_sta, stops, via_text, via_source,
+                           via_cov, via_unknown, km_mode, km_matched, total_km, missing, issues
+                      FROM curate WHERE {where}
+                     ORDER BY (issues = '') ASC, (via_source = 'none') DESC,
+                              via_cov ASC, code ASC
+                     LIMIT ? OFFSET ?""",
+                args + [int(limit), int(offset)],
+            ).fetchall()
+    except Exception:                                # noqa: BLE001
+        return {"items": [], "total": 0, "mode": mode}
+    items = []
+    for r in rows:
+        issues = [x for x in (r["issues"] or "").split(",") if x]
+        try:
+            gaps = len(json.loads(r["via_unknown"] or "[]"))
+        except (TypeError, ValueError):
+            gaps = 0
+        items.append({
+            "code": r["code"], "date": r["date"],
+            "from": r["from_sta"], "to": r["to_sta"], "stops": r["stops"],
+            "via": r["via_text"], "viaSource": r["via_source"],
+            "viaCoverage": r["via_cov"], "gaps": gaps,
+            "kmMode": r["km_mode"],
+            "kmMatched": r["km_matched"], "totalKm": r["total_km"],
+            "missing": r["missing"],
+            "issues": issues,
+            "issueLabels": [ISSUE_LABELS.get(x, x) for x in issues],
+        })
+    return {"items": items, "total": total, "mode": mode}
+
+
+def detail(code: str) -> dict:
+    """
+    打开编辑器时用：**自动推断基线**（不含人工校正）+ 已有校正 + 该车经停站名。
+    基线故意绕开 override，这样改错了还能对照原本自动算出来的是什么。
+    """
+    code = (code or "").strip().upper()
+    out = {
+        "code": code, "date": None, "from": None, "to": None,
+        "auto": {
+            "viaText": "", "viaSegs": [], "viaUnknown": [], "viaSource": "none",
+            "viaCoverage": 0.0, "kmMode": "estimate", "kmMatched": "0/0", "totalKm": 0.0,
+        },
+        "override": railcore.get_override(code),
+        "stations": [],
+        "exists": False,
+        "error": None,
+    }
+
+    try:
+        with railcore.db() as conn:
+            row = conn.execute(
+                "SELECT date FROM curate WHERE code=?", (code,)
+            ).fetchone()
+            if row and row["date"]:
+                date = row["date"]
+            else:
+                r2 = conn.execute(
+                    "SELECT MAX(date) AS d FROM routes WHERE code=? AND raw IS NOT NULL",
+                    (code,),
+                ).fetchone()
+                date = r2["d"] if r2 else None
+    except Exception as exc:                          # noqa: BLE001
+        out["error"] = str(exc)
+        return out
+
+    if not date:
+        out["error"] = "本地库里没有这趟车的经停站数据，先下载该日数据"
+        return out
+
+    out["date"] = date
+    try:
+        d = railcore.build_route_payload(
+            code, date, cache_only=True, with_path=False, use_override=False
+        )
+    except Exception as exc:                          # noqa: BLE001
+        out["error"] = f"{type(exc).__name__}: {exc}"
+        return out
+
+    segs = d.get("viaSegs") or []
+    out["exists"] = True
+    out["from"] = d.get("from")
+    out["to"] = d.get("to")
+    out["auto"] = {
+        "viaText": " / ".join(d.get("viaLines") or []),
+        "viaSegs": segs,
+        "viaUnknown": d.get("viaUnknown") or [],
+        "viaSource": d.get("viaSource") or "none",
+        "viaCoverage": d.get("viaCoverage") or 0.0,
+        "kmMode": d.get("kmMode") or "estimate",
+        "kmMatched": d.get("kmMatched") or "0/0",
+        "totalKm": d.get("totalKm") or 0.0,
+    }
+    out["stations"] = [s["name"] for s in d.get("stops") or []]
+    out["stops"] = [
+        {"name": s["name"], "km": s["km"], "arr": s.get("arr"), "dep": s.get("dep")}
+        for s in d.get("stops") or []
+    ]
+    out["missingCoords"] = d.get("missingCoords") or []
+    return out

@@ -28,6 +28,7 @@ sys.path.insert(0, BASE_DIR)
 import railcore  # noqa: E402
 import cnrail   # noqa: E402
 import collector  # noqa: E402
+import curate   # noqa: E402
 
 mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("text/css", ".css")
@@ -104,6 +105,51 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
         self.end_headers()
+
+    def do_POST(self):
+        """人工校正类操作走 POST（JSON body）"""
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(n) if n else b"{}"
+            payload = json.loads(raw or b"{}")
+            if not isinstance(payload, dict):
+                raise ValueError("请求体必须是 JSON 对象")
+        except Exception:                     # noqa: BLE001
+            return self.err("请求体不是合法 JSON", 400)
+
+        try:
+            if path == "/api/override":
+                code = payload.get("code") or ""
+                res = railcore.save_override(
+                    code,
+                    payload.get("via") or [],
+                    payload.get("totalKm"),
+                    payload.get("note") or "",
+                )
+                curate.refresh_one(code)
+                return self.json({"ok": True, **res})
+
+            if path == "/api/coord":
+                res = railcore.set_coord(
+                    payload.get("name"), payload.get("lat"), payload.get("lon")
+                )
+                refreshed = curate.refresh_station(res["name"])
+                return self.json({"ok": True, "refreshed": refreshed, **res})
+
+            if path == "/api/curate/scan":
+                return self.json(curate.start())
+
+            if path == "/api/curate/stop":
+                return self.json(curate.stop())
+
+            return self.err("未知接口: " + path, 404)
+        except ValueError as exc:
+            return self.err(exc, 400)
+        except Exception as exc:              # noqa: BLE001
+            traceback.print_exc()
+            return self.err(f"{type(exc).__name__}: {exc}", 500)
 
     # ---------- API ----------
     def api(self, path: str, q: dict) -> None:
@@ -205,6 +251,35 @@ class Handler(BaseHTTPRequestHandler):
                     date, one("q"), int(one("limit", "40") or 40), int(one("offset", "0") or 0)
                 )
             )
+
+        # ---- 数据校对（补全经由 / 里程 / 坐标）----
+        if path == "/api/curate/stats":
+            return self.json(curate.status())
+
+        if path == "/api/curate/list":
+            return self.json(
+                curate.listing(
+                    one("filter", "todo"), one("q"),
+                    int(one("limit", "60") or 60), int(one("offset", "0") or 0),
+                )
+            )
+
+        if path == "/api/curate/detail":
+            return self.json(curate.detail(one("code")))
+
+        if path == "/api/curate/lineNames":
+            names = [l["name"] for l in cnrail.search_line("", 10000)]
+            return self.json({"items": names, "count": len(names)})
+
+        if path == "/api/curate/scan":
+            return self.json(curate.start())
+
+        if path == "/api/curate/stop":
+            return self.json(curate.stop())
+
+        if path == "/api/override":
+            return self.json({"code": one("code").upper(),
+                              "override": railcore.get_override(one("code"))})
 
         return self.err("未知接口: " + path, 404)
 

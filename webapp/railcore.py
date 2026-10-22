@@ -46,16 +46,22 @@ os.makedirs(DATA_DIR, exist_ok=True)
 _db_lock = threading.Lock()
 
 
+_wal_ready = False
+
+
 def db() -> sqlite3.Connection:
+    global _wal_ready
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
-    # WAL：读写不互相阻塞（后台批量下载时才不会拖慢查询）
     conn.execute("PRAGMA busy_timeout=30000")
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-    except sqlite3.DatabaseError:
-        pass
+    # 切 WAL 要拿独占锁，只在进程内第一次做；后台扫描在写库时重复设置会互相等锁
+    if not _wal_ready:
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            _wal_ready = True
+        except sqlite3.DatabaseError:
+            pass
     return conn
 
 
@@ -90,6 +96,37 @@ def init_db() -> None:
                 lat         REAL,
                 lon         REAL
             );
+
+            -- 人工校正：经由 / 总里程 / 备注（按车次，与日期无关）
+            CREATE TABLE IF NOT EXISTS train_override (
+                code        TEXT PRIMARY KEY,
+                via_json    TEXT,          -- [{"line":"陇海线","from":"郑州","to":"兰州"}]
+                total_km    REAL,          -- 手工总里程，各站按比例缩放
+                note        TEXT,
+                updated_at  REAL
+            );
+
+            -- 数据校对扫描结果（curate.py 生成）
+            CREATE TABLE IF NOT EXISTS curate (
+                code        TEXT PRIMARY KEY,
+                date        TEXT,
+                from_sta    TEXT,
+                to_sta      TEXT,
+                stops       INTEGER,
+                via_text    TEXT,
+                via_json    TEXT,
+                via_unknown TEXT,
+                via_source  TEXT,
+                via_cov     REAL,
+                km_mode     TEXT,
+                km_matched  TEXT,
+                total_km    REAL,
+                missing     INTEGER,
+                missing_json TEXT,
+                issues      TEXT,
+                scanned_at  REAL
+            );
+            CREATE INDEX IF NOT EXISTS idx_curate_issues ON curate(issues);
             """
         )
 
@@ -104,6 +141,152 @@ def _norm(name: str) -> str:
         return ""
     s = re.sub(r"\s+", "", str(name))
     return s
+
+
+# ---------------------------------------------------------------------------
+# 人工校正：经由 / 总里程 / 备注
+# ---------------------------------------------------------------------------
+
+def _clean_via(via) -> List[dict]:
+    """把前端传来的经由整理成 [{line, from, to}]，丢掉没有线路名的空行"""
+    out: List[dict] = []
+    for seg in via or []:
+        if isinstance(seg, str):
+            seg = {"line": seg}
+        if not isinstance(seg, dict):
+            continue
+        name = str(seg.get("line") or "").strip()
+        if not name:
+            continue
+        out.append({
+            "line": name,
+            "from": _norm(seg.get("from") or ""),
+            "to": _norm(seg.get("to") or ""),
+        })
+    return out
+
+
+def _via_line_names(segs: List[dict]) -> List[str]:
+    """区间列表 → 去连续重复的线路名列表（给「经由 京沪高速线」这类展示用）"""
+    out: List[str] = []
+    for s in segs or []:
+        ln = (s or {}).get("line")
+        if ln and (not out or out[-1] != ln):
+            out.append(ln)
+    return out
+
+
+def get_override(code: str) -> Optional[dict]:
+    code = (code or "").strip().upper()
+    if not code:
+        return None
+    ov_map = _override_map()
+    ov = ov_map.get(code)
+    if not ov:
+        return None
+    return {"code": code, **ov}
+
+
+_override_cache: Optional[Dict[str, dict]] = None
+
+
+def _override_map() -> Dict[str, dict]:
+    """整表缓存：批量扫描时每趟车都查一次库太慢（一万多次建连），这里只读一次"""
+    global _override_cache
+    if _override_cache is None:
+        _override_cache = list_overrides()
+    return _override_cache
+
+
+def _drop_override_cache() -> None:
+    global _override_cache
+    _override_cache = None
+
+
+def save_override(code: str, via, total_km=None, note: str = "") -> dict:
+    """
+    保存人工校正。via / total_km 都为空时视作撤销（删除记录）。
+    """
+    code = (code or "").strip().upper()
+    if not code:
+        raise ValueError("缺少车次号")
+    clean = _clean_via(via)
+    try:
+        km = float(total_km) if total_km not in (None, "", 0) else None
+    except (TypeError, ValueError):
+        raise ValueError("总里程必须是数字")
+    if km is not None and not (1 <= km <= 20000):
+        raise ValueError("总里程超出合理范围（1~20000 km）")
+
+    note = (note or "").strip()
+    if not clean and km is None and not note:
+        clear_override(code)
+        return {"code": code, "cleared": True}
+
+    with _db_lock, db() as conn:
+        conn.execute(
+            """INSERT INTO train_override(code, via_json, total_km, note, updated_at)
+               VALUES(?,?,?,?,?)
+               ON CONFLICT(code) DO UPDATE SET
+                 via_json=excluded.via_json, total_km=excluded.total_km,
+                 note=excluded.note, updated_at=excluded.updated_at""",
+            (code, json.dumps(clean, ensure_ascii=False), km, note, time.time()),
+        )
+    _drop_override_cache()
+    return {"code": code, "via": clean, "totalKm": km, "note": note}
+
+
+def clear_override(code: str) -> bool:
+    code = (code or "").strip().upper()
+    with _db_lock, db() as conn:
+        cur = conn.execute("DELETE FROM train_override WHERE code=?", (code,))
+        hit = cur.rowcount > 0
+    _drop_override_cache()
+    return hit
+
+
+def list_overrides() -> Dict[str, dict]:
+    try:
+        with db() as conn:
+            rows = conn.execute(
+                "SELECT code, via_json, total_km, note, updated_at FROM train_override"
+            ).fetchall()
+    except sqlite3.Error:
+        return {}
+    out: Dict[str, dict] = {}
+    for row in rows:
+        try:
+            via = _clean_via(json.loads(row["via_json"] or "[]"))
+        except (TypeError, ValueError):
+            via = []
+        out[row["code"]] = {
+            "via": via, "totalKm": row["total_km"],
+            "note": row["note"], "updatedAt": row["updated_at"],
+        }
+    return out
+
+
+def set_coord(name: str, lat: float, lon: float) -> dict:
+    """人工补录车站坐标（写 coord_override，并让坐标缓存失效重载）"""
+    name = _norm(name)
+    if not name:
+        raise ValueError("缺少站名")
+    try:
+        lat, lon = float(lat), float(lon)
+    except (TypeError, ValueError):
+        raise ValueError("经纬度必须是数字")
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        raise ValueError("经纬度超出范围")
+    if lat == 0 and lon == 0:
+        raise ValueError("(0,0) 多半是填错了")
+    with _db_lock, db() as conn:
+        conn.execute(
+            """INSERT INTO coord_override(name, lat, lon) VALUES(?,?,?)
+               ON CONFLICT(name) DO UPDATE SET lat=excluded.lat, lon=excluded.lon""",
+            (name, lat, lon),
+        )
+    stations.reload_coords()
+    return {"name": name, "lat": lat, "lon": lon}
 
 
 class StationRegistry:
@@ -165,6 +348,12 @@ class StationRegistry:
             if cand and cand in self.coords:
                 return self.coords[cand]
         return None
+
+    def reload_coords(self) -> None:
+        """人工补录坐标后重建缓存（车站字典不动，只重算坐标）"""
+        self.coords = {}
+        self.loaded = False
+        self.ensure()
 
     def meta(self, name: str) -> Optional[dict]:
         """cnrail_data_v2 的车站档案：路局 / 电报码 / 连接线路 / 服务类型"""
@@ -426,7 +615,8 @@ def fetch_route(code: str, date: str, force: bool = False,
 # ---------------------------------------------------------------------------
 
 def build_route_payload(code: str, date: str, force: bool = False,
-                        cache_only: bool = False) -> dict:
+                        cache_only: bool = False, with_path: bool = True,
+                        use_override: bool = True) -> dict:
     raw, info, from_cache = fetch_route(code, date, force=force, cache_only=cache_only)
     stations.ensure()
 
@@ -527,6 +717,37 @@ def build_route_payload(code: str, date: str, force: bool = False,
             for s, v in zip(stops, km_info["km"]):
                 s["km"] = v
 
+    # ---- 经由：里程配对 → 线路站序 → 车站连接线路交集 ----
+    via = {"segs": [], "unknown": [], "pairs": 0, "resolved": 0,
+           "coverage": 0.0, "sources": []}
+    if len(stops) > 1:
+        try:
+            via = cnrail.infer_via(stops)
+        except Exception:                            # noqa: BLE001
+            pass
+
+    # ---- 人工校正覆盖（优先于自动结果）----
+    km_mode = km_info.get("mode", "estimate")
+    manual = {"via": False, "km": False, "note": None, "updatedAt": None}
+    ov = get_override(code) if use_override else None
+    if ov:
+        manual["note"] = ov.get("note")
+        manual["updatedAt"] = ov.get("updatedAt")
+        if ov.get("via"):
+            via = {"segs": [dict(s, src="manual") for s in ov["via"]],
+                   "unknown": [], "pairs": via.get("pairs", 0),
+                   "resolved": via.get("pairs", 0), "coverage": 100.0,
+                   "sources": ["manual"]}
+            manual["via"] = True
+        if ov.get("totalKm"):
+            base_km = stops[-1]["km"] if stops else 0.0
+            if base_km and base_km > 0:
+                ratio = float(ov["totalKm"]) / base_km
+                for s in stops:
+                    s["km"] = round(s["km"] * ratio, 1)
+                km_mode = "manual"
+                manual["km"] = True
+
     # ---- 车站档案（路局 / 电报码 / 连接线路）----
     for s in stops:
         m = stations.meta(s["name"])
@@ -539,10 +760,11 @@ def build_route_payload(code: str, date: str, force: bool = False,
 
     # ---- 展开成沿线折线（把线路中间站补进路径，地图不再是一根直线）----
     path: List[dict] = []
-    try:
-        path = cnrail.expand_path(stops)
-    except Exception:                             # noqa: BLE001
-        path = []
+    if with_path:
+        try:
+            path = cnrail.expand_path(stops)
+        except Exception:                             # noqa: BLE001
+            path = []
 
     total_km = stops[-1]["km"] if stops else 0.0
 
@@ -584,10 +806,16 @@ def build_route_payload(code: str, date: str, force: bool = False,
         "durationMin": duration,
         "totalKm": round(total_km, 1),
         "straightKm": round(straight_km[-1], 1) if straight_km else 0.0,
-        "kmReal": km_info.get("mode") in ("real", "hybrid"),
-        "kmMode": km_info.get("mode", "estimate"),
+        "kmReal": km_mode in ("real", "hybrid", "manual"),
+        "kmMode": km_mode,
         "kmFactor": km_info.get("factor", 1.0),
-        "viaLines": km_info.get("viaLines") or [],
+        "viaLines": _via_line_names(via.get("segs") or []),
+        "viaSegs": via.get("segs") or [],
+        "viaUnknown": via.get("unknown") or [],
+        "viaSource": ("manual" if manual["via"]
+                      else ("auto" if via.get("segs") else "none")),
+        "viaCoverage": via.get("coverage", 0.0),
+        "manual": manual,
         "kmMatched": f"{km_info.get('matched', 0)}/{km_info.get('segments', 0)}",
         "stops": stops,
         "path": path,

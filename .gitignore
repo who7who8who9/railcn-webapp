@@ -38,3 +38,7 @@ desktop.ini
 
 # ---------- 本地工具目录 ----------
 .workbuddy/
+
+# 本地调试截图
+webapp/shots/
+shots/

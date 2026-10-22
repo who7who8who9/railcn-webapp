@@ -1,10 +1,10 @@
 # railcn webapp — 12306 车次查询 + 地图行程
 
-把 `D:\railcn` 里那套采集脚本整合成一个本地网页：输入车次就能看经停站、时刻表、线路走向，
+把仓库根目录那套采集脚本整合成一个本地网页：输入车次就能看经停站、时刻表、线路走向，
 并按时刻表推算列车此刻在地图上的位置。零第三方 Web 框架，只复用原有的 `trainclaw.py`。
 
 ```
-D:\railcn\
+railcn/
 ├─ config.py                  ← 原样复用（API 常量 / 字段索引 / 座位映射）
 ├─ trainclaw.py               ← 原样复用（TrainAPI 客户端 + 解析函数）
 ├─ collect_trains_p2.py       ← 原样复用（批量采集车次清单）
@@ -45,7 +45,7 @@ D:\railcn\
 start.bat
 
 :: 方式二：命令行
-cd /d D:\railcn\webapp
+cd webapp
 python server.py --port 8686 --open
 ```
 
@@ -84,7 +84,7 @@ python server.py --port 8686 --open
 `cnrail_data_v2.xlsx` 补齐了 12306 完全不给的三样东西：车站档案、线路站序、**真实里程**。
 
 ```bat
-python tools\xlsx_to_json.py        :: Excel → D:\railcn\data\*.json
+python tools\xlsx_to_json.py        :: Excel → data\*.json（仓库根目录下）
 ```
 
 | JSON | 内容 |

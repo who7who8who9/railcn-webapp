@@ -1664,7 +1664,7 @@ async function boot() {
    ========================================================================== */
 const ISSUE_CN = { via: '经由待补', km: '里程估算', coord: '缺坐标' };
 const CU_FILTERS = [
-  ['todo', '待补全'], ['via', '经由待补'], ['km', '里程估算'],
+  ['todo', '待补全'], ['via0', '经由全无'], ['via', '经由缺口'], ['km', '里程估算'],
   ['coord', '缺坐标'], ['manual', '已校正'], ['clean', '无问题'], ['all', '全部'],
 ];
 const CU = {
@@ -1724,8 +1724,9 @@ async function cuLoad() {
 function cuRenderStats(st) {
   const c = st.counts || {};
   $('#cuStats').innerHTML = [
-    ['待补全', c.todo, 'warn'], ['经由', c.via, ''], ['里程', c.km, ''],
-    ['缺坐标', c.coord, ''], ['已校正', c.manual, 'ok'], ['已扫描', c.scanned, ''],
+    ['待补全', c.todo, 'warn'], ['经由全无', c.via0, 'warn'], ['经由缺口', c.via, ''],
+    ['里程', c.km, ''], ['缺坐标', c.coord, ''], ['已校正', c.manual, 'ok'],
+    ['已扫描', c.scanned, ''],
   ].map(([k, v, cls]) => `<span class="cu-stat ${cls}">${k}<b>${nfmt(v || 0)}</b></span>`).join('');
 
   const p = $('#cuProg');
@@ -1775,7 +1776,10 @@ function cuRenderList() {
     return;
   }
   box.innerHTML = CU.items.map(it => {
-    const flags = (it.issues || []).map(x => `<span class="cu-flag ${x}">${ISSUE_CN[x] || x}</span>`).join('');
+    const flags = (it.issues || []).map(x => {
+      const label = (x === 'via' && it.viaCoverage < 1) ? '经由全无' : (ISSUE_CN[x] || x);
+      return `<span class="cu-flag ${x}">${label}</span>`;
+    }).join('');
     const manual = (it.viaSource === 'manual' || it.kmMode === 'manual')
       ? '<span class="cu-flag manual">已校正</span>' : '';
     const via = it.via ? esc(it.via) : '<span class="warn">经由未识别</span>';

@@ -38,6 +38,7 @@ FILTERS = {
     "todo": "issues <> ''",
     "all": "1=1",
     "via": "issues LIKE '%via%'",
+    "via0": "issues LIKE '%via%' AND via_cov < 1",   # 整趟都没认出线路
     "km": "issues LIKE '%km%'",
     "coord": "issues LIKE '%coord%'",
     "manual": "(via_source='manual' OR km_mode='manual')",
@@ -262,7 +263,7 @@ def stop() -> dict:
 # ---------------------------------------------------------------------------
 
 def counts() -> dict:
-    out = {"scanned": 0, "todo": 0, "via": 0, "km": 0, "coord": 0,
+    out = {"scanned": 0, "todo": 0, "via": 0, "via0": 0, "km": 0, "coord": 0,
            "manual": 0, "clean": 0, "lastScan": None}
     try:
         with railcore.db() as conn:
@@ -270,6 +271,7 @@ def counts() -> dict:
                 ("scanned", "SELECT COUNT(*) FROM curate"),
                 ("todo", "SELECT COUNT(*) FROM curate WHERE issues <> ''"),
                 ("via", "SELECT COUNT(*) FROM curate WHERE issues LIKE '%via%'"),
+                ("via0", "SELECT COUNT(*) FROM curate WHERE issues LIKE '%via%' AND via_cov < 1"),
                 ("km", "SELECT COUNT(*) FROM curate WHERE issues LIKE '%km%'"),
                 ("coord", "SELECT COUNT(*) FROM curate WHERE issues LIKE '%coord%'"),
                 ("manual", "SELECT COUNT(*) FROM curate WHERE via_source='manual' OR km_mode='manual'"),

@@ -286,14 +286,30 @@ def set_coord(name: str, lat: float, lon: float) -> dict:
             (name, lat, lon),
         )
     stations.reload_coords()
-    return {"name": name, "lat": lat, "lon": lon}
+    return {"name": name, "lat": lat, "lon": lon, **stations.coord_info(name)}
+
+
+def clear_coord(name: str) -> dict:
+    """撤销某站的人工坐标，回到车站档案里的原值（原值也没有就是「缺失」）"""
+    name = _norm(name)
+    if not name:
+        raise ValueError("缺少站名")
+    with _db_lock, db() as conn:
+        removed = conn.execute(
+            "DELETE FROM coord_override WHERE name=?", (name,)
+        ).rowcount > 0
+    stations.reload_coords()
+    info = stations.coord_info(name)
+    return {"name": name, "removed": removed, **info}
 
 
 class StationRegistry:
     def __init__(self) -> None:
         self.by_code: Dict[str, dict] = {}
         self.by_name: Dict[str, str] = {}          # name -> telecode
-        self.coords: Dict[str, Tuple[float, float]] = {}   # name -> (lat, lon)
+        self.coords: Dict[str, Tuple[float, float]] = {}   # name -> (lat, lon)，已含人工值
+        self.base_coords: Dict[str, Tuple[float, float]] = {}   # 仅档案/OSM 的原值
+        self.overrides: Dict[str, Tuple[float, float]] = {}     # 人工改过的站
         self.loaded = False
 
     def ensure(self) -> None:
@@ -314,10 +330,11 @@ class StationRegistry:
                 self.by_name.setdefault(name, code)
 
         # 2) cnrail_data_v2 车站库（含路局/电报码/连接线路，坐标优先用它）
+        base: Dict[str, Tuple[float, float]] = {}
         cnrail.load()
         for name, st in (cnrail._STATIONS or {}).items():
             if st.get("lat") is not None and st.get("lon") is not None:
-                self.coords[_norm(name)] = (float(st["lat"]), float(st["lon"]))
+                base[_norm(name)] = (float(st["lat"]), float(st["lon"]))
 
         # 3) OSM 派生坐标（补足 cnrail 没有的站）
         if os.path.exists(COORDS_PATH):
@@ -326,16 +343,21 @@ class StationRegistry:
             for name, latlon in raw.items():
                 if not latlon:
                     continue
-                n = _norm(name)
-                self.coords.setdefault(n, (float(latlon[0]), float(latlon[1])))
+                base.setdefault(_norm(name), (float(latlon[0]), float(latlon[1])))
 
-        # 4) 人工修正覆盖
+        # 4) 人工修正覆盖：单独存一份，编辑器要区分「档案原值」和「人工改过的值」
+        overrides: Dict[str, Tuple[float, float]] = {}
         try:
             with db() as conn:
                 for row in conn.execute("SELECT name, lat, lon FROM coord_override"):
-                    self.coords[_norm(row["name"])] = (row["lat"], row["lon"])
+                    overrides[_norm(row["name"])] = (row["lat"], row["lon"])
         except sqlite3.Error:
             pass
+
+        self.base_coords = base
+        self.overrides = overrides
+        self.coords = dict(base)
+        self.coords.update(overrides)
 
         self.loaded = True
 
@@ -352,8 +374,36 @@ class StationRegistry:
     def reload_coords(self) -> None:
         """人工补录坐标后重建缓存（车站字典不动，只重算坐标）"""
         self.coords = {}
+        self.base_coords = {}
+        self.overrides = {}
         self.loaded = False
         self.ensure()
+
+    def _coord_key(self, name: str) -> str:
+        """站名归一化，并兼容「XX」↔「XX站」两种写法"""
+        n = _norm(name)
+        if n in self.coords:
+            return n
+        for cand in (n[:-1] if n.endswith("站") else None, n + "站"):
+            if cand and cand in self.coords:
+                return cand
+        return n
+
+    def coord_info(self, name: str) -> dict:
+        """单站坐标详情：当前值 / 来源（manual|base|none）/ 档案原值"""
+        self.ensure()
+        key = self._coord_key(name)
+        cur = self.coords.get(key)
+        base = self.base_coords.get(key)
+        manual = key in self.overrides
+        return {
+            "name": name,
+            "lat": cur[0] if cur else None,
+            "lon": cur[1] if cur else None,
+            "source": "manual" if manual else ("base" if cur else "none"),
+            "baseLat": base[0] if base else None,
+            "baseLon": base[1] if base else None,
+        }
 
     def meta(self, name: str) -> Optional[dict]:
         """cnrail_data_v2 的车站档案：路局 / 电报码 / 连接线路 / 服务类型"""

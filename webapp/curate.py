@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import railcore
 
@@ -146,23 +146,38 @@ def refresh_one(code: str) -> Optional[dict]:
 
 
 def refresh_station(name: str) -> int:
-    """补录某站坐标后，把清单里提到该站的车次重算一遍"""
+    """补录或撤销某站坐标后，把清单里涉及该站的车次重算一遍"""
     name = (name or "").strip()
     if not name:
         return 0
+
+    targets: List[Tuple[str, str]] = []
     try:
         with railcore.db() as conn:
             rows = conn.execute(
                 "SELECT code, date FROM curate WHERE missing_json LIKE ?",
                 (f"%{name}%",),
             ).fetchall()
+            targets = [(r["code"], r["date"]) for r in rows]
+            if not targets:
+                # 缺失清单里已经没有这个站了（比如刚撤销了坐标），
+                # 就从原始经停数据反查：全表 LIKE 约 0.3s，撤销是低频操作，可以接受
+                rows2 = conn.execute(
+                    "SELECT code, MAX(date) AS date FROM routes "
+                    "WHERE raw LIKE ? GROUP BY code",
+                    (f'%"station_name": "{name}"%',),
+                ).fetchall()
+                targets = [(r["code"], r["date"]) for r in rows2]
     except Exception:                                # noqa: BLE001
         return 0
+
     n = 0
-    for r in rows:
+    for code, date in targets:
+        if not date:
+            continue
         try:
             with railcore.db() as conn:
-                s = summarize(r["code"], r["date"])
+                s = summarize(code, date)
                 if s:
                     _upsert(conn, s)
                     conn.commit()
@@ -399,9 +414,19 @@ def detail(code: str) -> dict:
         "totalKm": d.get("totalKm") or 0.0,
     }
     out["stations"] = [s["name"] for s in d.get("stops") or []]
-    out["stops"] = [
-        {"name": s["name"], "km": s["km"], "arr": s.get("arr"), "dep": s.get("dep")}
-        for s in d.get("stops") or []
-    ]
+    stop_rows: List[dict] = []
+    for s in d.get("stops") or []:
+        ci = railcore.stations.coord_info(s["name"])
+        stop_rows.append({
+            "name": s["name"], "km": s["km"], "arr": s.get("arr"), "dep": s.get("dep"),
+            "lat": ci["lat"], "lon": ci["lon"], "coordSource": ci["source"],
+            "baseLat": ci["baseLat"], "baseLon": ci["baseLon"],
+        })
+    out["stops"] = stop_rows
     out["missingCoords"] = d.get("missingCoords") or []
+    out["coordSummary"] = {
+        "total": len(stop_rows),
+        "missing": sum(1 for s in stop_rows if s["lat"] is None),
+        "manual": sum(1 for s in stop_rows if s["coordSource"] == "manual"),
+    }
     return out

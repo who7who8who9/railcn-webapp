@@ -138,6 +138,11 @@ class Handler(BaseHTTPRequestHandler):
                 refreshed = curate.refresh_station(res["name"])
                 return self.json({"ok": True, "refreshed": refreshed, **res})
 
+            if path == "/api/coord/clear":
+                res = railcore.clear_coord(payload.get("name"))
+                refreshed = curate.refresh_station(res["name"])
+                return self.json({"ok": True, "refreshed": refreshed, **res})
+
             if path == "/api/curate/scan":
                 return self.json(curate.start())
 

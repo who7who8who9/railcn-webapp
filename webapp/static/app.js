@@ -111,6 +111,7 @@ const S = {
   followNow: true,
   lastTick: 0,
   nowStopIdx: -1,
+  staleCode: null,      // 校对页改了坐标，切回车次详情时需要重新拉一次
 };
 
 const mapKey = () => localStorage.getItem('railcn.mapkey') || '';
@@ -1008,6 +1009,7 @@ setInterval(() => { if (S.followNow) { /* 位置每秒刷新，与时刻表对�
  * ============================================================ */
 async function openTrain(code, date, opts = {}) {
   if (!code) return;
+  S.staleCode = null;               // 这次就是要重新拉，别再触发一遍
   const useDate = date || S.date;
   const cacheOnly = !!opts.cacheOnly;
   const tip = cacheOnly
@@ -1139,6 +1141,12 @@ function switchTab(name) {
     cuLoad();
     const qc = (new URLSearchParams(location.search).get('code') || '').trim().toUpperCase();
     if (qc && qc !== CU.sel) cuOpen(qc);
+  }
+  // 校对页改过坐标/经由，切回详情时静默重拉一次（此时地图是可见的，重绘才正常）
+  if (name === 'train' && S.staleCode && (!S.route || S.route.code === S.staleCode)) {
+    const code = S.staleCode;
+    S.staleCode = null;
+    openTrain(code);
   }
   mapResize();
 }
@@ -1670,6 +1678,7 @@ const CU_FILTERS = [
 const CU = {
   filter: 'todo', q: '', items: [], total: 0, limit: 60,
   sel: null, detail: null, via: [], lines: null, poll: null,
+  coordQ: '', coordOnlyMiss: false,
 };
 
 const esc = s => String(s == null ? '' : s)
@@ -1891,15 +1900,13 @@ function cuRenderEditor() {
   const covText = a.viaSource === 'none' || !(a.viaSegs || []).length
     ? '整趟都没认出线路'
     : `覆盖 ${a.viaCoverage}%（${(a.viaUnknown || []).length ? (a.viaUnknown || []).length + ' 段未识别' : '全部识别'}）`;
-  const miss = d.missingCoords || [];
-
-  const coordRows = miss.map(n => `
-    <div class="coord-row" data-nm="${esc(n)}">
-      <span class="nm" title="${esc(n)}">${esc(n)}</span>
-      <input class="lat" placeholder="纬度 34.7479">
-      <input class="lon" placeholder="经度 113.6524">
-      <button class="btn sm coord-save">保存</button>
-    </div>`).join('');
+  const stops = d.stops || [];
+  const coord = d.coordSummary || {
+    total: stops.length,
+    missing: stops.filter(s => s.lat == null).length,
+    manual: stops.filter(s => s.coordSource === 'manual').length,
+  };
+  const coordSum = `共 ${coord.total} 站 · 缺坐标 ${coord.missing} · 已人工修正 ${coord.manual}`;
 
   $('#cuEditor').innerHTML = `
     <div class="ce-head">
@@ -1954,17 +1961,24 @@ function cuRenderEditor() {
       <div class="ve-note">填了总里程，各站里程会按比例缩放，车次详情、地图、时间轴同步生效。</div>
     </div>
 
-    ${miss.length ? `<div class="ce-card">
-      <h4>缺失坐标的站点 <span class="hint">填纬度经度后立即生效，地图不再跳点</span></h4>
-      <div id="ceCoords">${coordRows}</div>
-    </div>` : ''}
+    <div class="ce-card">
+      <h4>车站坐标 <span class="hint" id="cuCoordSum">${coordSum}</span>
+        <span class="right">
+          <input id="cuCoordQ" class="cu-q" placeholder="筛选站名" value="${esc(CU.coordQ)}">
+          <label class="cu-mini"><input type="checkbox" id="cuCoordOnlyMiss"${CU.coordOnlyMiss ? ' checked' : ''}> 只看缺坐标</label>
+        </span>
+      </h4>
+      <div class="cu-coord-list" id="cuCoordList">${cuCoordRowsHtml()}</div>
+      <div class="ve-note">经纬度按 <b>WGS-84</b>（与 OSM 一致）填写，页面会自行换算成腾讯地图坐标系。
+        保存后地图定位、线路走向、里程插值立即重算；「还原」回到车站档案里的原值。</div>
+    </div>
 
     <details class="ce-card st-card">
-      <summary>经停站与里程（${(d.stops || []).length} 站）</summary>
-      <div class="st-list">${(d.stops || []).map((s, i) => `
-        <div class="st-line${miss.includes(s.name) ? ' miss' : ''}">
+      <summary>经停站与里程（${stops.length} 站）</summary>
+      <div class="st-list" id="cuStList">${stops.map((s, i) => `
+        <div class="st-line${s.lat == null ? ' miss' : ''}">
           <span class="i">${i + 1}</span><span>${esc(s.name)}</span>
-          <span class="k">${s.km} km</span></div>`).join('')}</div>
+          <span class="k">${s.km} km${s.lat == null ? ' · 缺坐标' : ''}</span></div>`).join('')}</div>
     </details>`;
 
 
@@ -1974,6 +1988,7 @@ function cuRenderEditor() {
   $('#ceGoTrain').addEventListener('click', () => {
     S.date = d.date || S.date;
     const di = $('#date'); if (di && d.date) di.value = d.date;
+    S.staleCode = null;             // 下面自己会重拉，别让 switchTab 再触发一次
     switchTab('train');
     openTrain(d.code, d.date, { cacheOnly: true });
   });
@@ -1991,10 +2006,107 @@ function cuRenderEditor() {
   $('#ceSave').addEventListener('click', cuSave);
   $('#ceReset').addEventListener('click', cuReset);
 
-  $$('#ceCoords .coord-save').forEach(b => b.addEventListener('click', () => {
+  $('#cuCoordQ').addEventListener('input', e => {
+    CU.coordQ = e.target.value;
+    $('#cuCoordList').innerHTML = cuCoordRowsHtml();
+    cuBindCoordRows();
+  });
+  $('#cuCoordOnlyMiss').addEventListener('change', e => {
+    CU.coordOnlyMiss = e.target.checked;
+    $('#cuCoordList').innerHTML = cuCoordRowsHtml();
+    cuBindCoordRows();
+  });
+  cuBindCoordRows();
+}
+
+/* ---------- 车站坐标编辑 ---------- */
+function cuCoordRowHtml(s, i) {
+  const src = s.coordSource === 'manual' ? 'manual' : (s.lat == null ? 'none' : 'base');
+  const srcCn = { manual: '人工', base: '档案', none: '缺失' }[src];
+  const lat = s.lat == null ? '' : Number(s.lat).toFixed(5);
+  const lon = s.lon == null ? '' : Number(s.lon).toFixed(5);
+  const tip = s.lat == null
+    ? '档案里没有这个站的坐标'
+    : `档案原值 ${Number(s.baseLat).toFixed(5)}, ${Number(s.baseLon).toFixed(5)}`;
+  return `<div class="coord-row ${src}" data-nm="${esc(s.name)}" data-i="${i}">
+    <span class="nm" title="${esc(s.name)}"><i>${i + 1}</i>${esc(s.name)}</span>
+    <input class="lat" value="${lat}" placeholder="纬度" title="纬度 -90 ~ 90">
+    <input class="lon" value="${lon}" placeholder="经度" title="经度 -180 ~ 180">
+    <span class="src ${src}" title="${esc(tip)}">${srcCn}</span>
+    <button class="btn sm coord-save">保存</button>
+    <button class="btn sm ghost coord-clear"${s.coordSource === 'manual' ? '' : ' disabled'}>还原</button>
+  </div>`;
+}
+
+function cuCoordRowsHtml() {
+  const d = CU.detail;
+  if (!d) return '';
+  const q = (CU.coordQ || '').trim();
+  let list = (d.stops || []).map((s, i) => ({ s, i }));
+  if (CU.coordOnlyMiss) list = list.filter(x => x.s.lat == null);
+  if (q) list = list.filter(x => x.s.name.includes(q));
+  if (!list.length) {
+    return `<div class="ve-note">${CU.coordOnlyMiss ? '这趟车所有车站都有坐标了。' : '没有匹配的车站。'}</div>`;
+  }
+  return list.map(x => cuCoordRowHtml(x.s, x.i)).join('');
+}
+
+function cuBindCoordRows() {
+  $$('#cuCoordList .coord-save').forEach(b => b.addEventListener('click', () => {
     const row = b.closest('.coord-row');
-    cuSaveCoord(row.dataset.nm, row.querySelector('.lat').value, row.querySelector('.lon').value, b);
+    cuSaveCoord(row.dataset.nm, row.querySelector('.lat').value,
+      row.querySelector('.lon').value, b);
   }));
+  $$('#cuCoordList .coord-clear').forEach(b => b.addEventListener('click', () => {
+    cuClearCoord(b.closest('.coord-row').dataset.nm);
+  }));
+  // 输完直接回车保存
+  $$('#cuCoordList .coord-row input').forEach(inp => inp.addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    e.target.closest('.coord-row').querySelector('.coord-save').click();
+  }));
+}
+
+/** 把一次坐标变动同步到编辑器各处（列表徽标 / 汇总 / 经停站表 / 左侧清单） */
+function cuApplyCoord(name, r) {
+  const d = CU.detail;
+  if (!d) return;
+  const st = (d.stops || []).find(s => s.name === name);
+  if (st) {
+    st.lat = r.lat;
+    st.lon = r.lon;
+    st.baseLat = r.baseLat;
+    st.baseLon = r.baseLon;
+    st.coordSource = r.source || (r.lat == null ? 'none' : 'manual');
+  }
+  const stops = d.stops || [];
+  d.missingCoords = stops.filter(s => s.lat == null).map(s => s.name);
+  d.coordSummary = {
+    total: stops.length,
+    missing: d.missingCoords.length,
+    manual: stops.filter(s => s.coordSource === 'manual').length,
+  };
+  const sumEl = $('#cuCoordSum');
+  if (sumEl) {
+    sumEl.textContent = `共 ${d.coordSummary.total} 站 · 缺坐标 ${d.coordSummary.missing} · 已人工修正 ${d.coordSummary.manual}`;
+  }
+  const list = $('#cuCoordList');
+  if (list) {
+    // 只重画这一行，别把其它行里正在输入的内容冲掉
+    const old = list.querySelector(`.coord-row[data-nm="${CSS.escape(name)}"]`);
+    if (old && st) old.outerHTML = cuCoordRowHtml(st, Number(old.dataset.i));
+    cuBindCoordRows();
+  }
+  const stList = $('#cuStList');
+  if (stList) {
+    stList.innerHTML = stops.map((s, i) => `
+      <div class="st-line${s.lat == null ? ' miss' : ''}">
+        <span class="i">${i + 1}</span><span>${esc(s.name)}</span>
+        <span class="k">${s.km} km${s.lat == null ? ' · 缺坐标' : ''}</span></div>`).join('');
+  }
+  S.staleCode = d.code || null;     // 切回车次详情时重新拉一次，地图才会用新坐标
+  cuLoad();
 }
 
 function cuRenderViaRows() {
@@ -2123,22 +2235,47 @@ async function cuReset() {
 
 async function cuSaveCoord(name, latv, lonv, btn) {
   const lat = Number(latv), lon = Number(lonv);
-  if (!latv || !lonv || !Number.isFinite(lat) || !Number.isFinite(lon)) {
-    btn.textContent = '填经纬度';
-    setTimeout(() => { btn.textContent = '保存'; }, 1500);
+  if (String(latv).trim() === '' || String(lonv).trim() === ''
+      || !Number.isFinite(lat) || !Number.isFinite(lon)) {
+    cuMsg('bad', `${name}：纬度和经度都要填数字`);
+    btn.classList.add('shake');
+    setTimeout(() => btn.classList.remove('shake'), 400);
+    return;
+  }
+  if (Math.abs(lat) > 90 || Math.abs(lon) > 180) {
+    cuMsg('bad', `${name}：纬度要在 -90 ~ 90、经度要在 -180 ~ 180 之间`);
+    return;
+  }
+  if (lat === 0 && lon === 0) {
+    cuMsg('bad', `${name}：(0, 0) 多半是填错了，请核对`);
     return;
   }
   btn.disabled = true;
   btn.textContent = '…';
   try {
-    await cuPost('/api/coord', { name, lat, lon });
-    await cuOpen(CU.detail.code);
-    cuMsg('ok', `${name} 坐标已补录`);
-    cuLoad();
+    const r = await cuPost('/api/coord', { name, lat, lon });
+    cuApplyCoord(name, r);
+    cuMsg('ok', `${name} 坐标已保存为 ${Number(r.lat).toFixed(5)}, ${Number(r.lon).toFixed(5)}${r.refreshed ? `（重算 ${r.refreshed} 趟车）` : ''}`);
   } catch (e) {
     btn.disabled = false;
-    btn.textContent = '失败';
+    btn.textContent = '保存';
     cuMsg('bad', '坐标保存失败：' + e.message);
+  }
+}
+
+async function cuClearCoord(name) {
+  if (!confirm(`把「${name}」的坐标还原成车站档案里的原值？`)) return;
+  const btn = document.querySelector(`#cuCoordList .coord-row[data-nm="${CSS.escape(name)}"] .coord-clear`);
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  try {
+    const r = await cuPost('/api/coord/clear', { name });
+    cuApplyCoord(name, r);
+    cuMsg('ok', r.source === 'none'
+      ? `${name} 已还原（车站档案里也没有这个站的坐标）`
+      : `${name} 已还原为档案值 ${Number(r.lat).toFixed(5)}, ${Number(r.lon).toFixed(5)}`);
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = '还原'; }
+    cuMsg('bad', '还原失败：' + e.message);
   }
 }
 

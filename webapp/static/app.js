@@ -233,8 +233,8 @@ const TMapView = {
         l: new TMap.LabelStyle({
           color: '#1a2b45', size: 11, offset: { x: 0, y: -14 },
           alignment: 'center', verticalAlignment: 'bottom',
-          backgroundColor: 'rgba(255,255,255,.88)', backgroundPadding: 2,
-          borderColor: 'rgba(31,111,235,.28)', borderRadius: 3,
+          backgroundColor: 'rgba(240,244,249,.95)', backgroundPadding: 3,
+          borderColor: 'rgba(140,158,180,.55)', borderRadius: 3,
         }),
       },
       geometries: labeled.map(o => ({
@@ -475,10 +475,20 @@ const SvgView = {
       if (stop) {
         const last = (s.i || 0) >= nStop;
         const t = last ? (s.arr || s.dep) : (s.dep || s.arr);
-        this.mk('text', {
+        const label = this.mk('text', {
           x: p[0] + 7, y: p[1] - 6, 'font-size': 11, fill: '#1a2b45',
-          stroke: '#fff', 'stroke-width': 3, 'paint-order': 'stroke', 'pointer-events': 'none',
-        }).textContent = t ? `${s.name} ${t}${last ? '到' : '开'}` : s.name;
+          'pointer-events': 'none',
+        });
+        label.textContent = t ? `${s.name} ${t}${last ? '到' : '开'}` : s.name;
+        this.gRoot.appendChild(label);
+        // 灰色圆角底板垫在文字下面，压在线条和网格上也能看清
+        const w = label.getComputedTextLength();
+        const bg = this.mk('rect', {
+          x: p[0] + 3.5, y: p[1] - 16.5, width: w + 7, height: 15, rx: 3,
+          fill: 'rgba(240,244,249,.94)', stroke: '#cfd9e6', 'stroke-width': 1,
+          'pointer-events': 'none',
+        });
+        this.gRoot.insertBefore(bg, label);
       }
     });
 
@@ -1217,7 +1227,11 @@ let netTimer = 0;
 /* ---------- 新增线路 / 车站 ---------- */
 const NM = { kind: 'line', rows: [], busy: false, stations: null };
 
-function nmClose() { $('#newModal').classList.add('hidden'); }
+function nmClose() {
+  cbClose();
+  nmUnKick();
+  $('#newModal').classList.add('hidden');
+}
 
 function nmSetMsg(text, bad) {
   const el = $('#nmMsg');
@@ -1238,19 +1252,12 @@ function nmOpen(kind) {
   setTimeout(() => { const el = $('#nmName'); if (el) el.focus(); }, 40);
 }
 
-/** 站名 datalist（一次加载 7579 个站名，供新增线路时补全） */
+/** 站名库（一次加载 7579 个站名，供新增线路时自绘下拉联想） */
 async function nmLoadStations() {
   if (NM.stations) return;
   try {
     const d = await api('/api/stations/names');
     NM.stations = d.items || [];
-    let dl = $('#nmStaList');
-    if (!dl) {
-      dl = document.createElement('datalist');
-      dl.id = 'nmStaList';
-      document.body.appendChild(dl);
-    }
-    dl.innerHTML = NM.stations.map(n => `<option value="${esc(n)}">`).join('');
   } catch (e) { NM.stations = []; }
 }
 
@@ -1267,7 +1274,7 @@ function nmRender() {
       </div>
       <div class="nm-sec">
         <div class="nm-sec-h"><b>沿线车站</b>
-          <span class="nm-tip">按从上到下的顺序；里程填「自起点起算的累计公里数」，不详就留空</span>
+          <span class="nm-tip">按从上到下的顺序；站名可打字联想或点 ▾ 选择，回车跳下一格；里程填「自起点起算的累计公里数」，不详就留空</span>
           <button class="btn sm ghost" id="nmAddRow">+ 加一站</button>
         </div>
         <div class="nm-rows" id="nmRows"></div>
@@ -1325,7 +1332,12 @@ function nmRenderRows() {
   box.innerHTML = NM.rows.map((r, i) => `
     <div class="nm-row" data-i="${i}">
       <span class="i">${i + 1}</span>
-      <input class="st" list="nmStaList" value="${esc(r.name)}" placeholder="车站名" autocomplete="off">
+      <div class="combo">
+        <input class="line st" value="${esc(r.name)}" placeholder="车站名，可直接输入"
+               autocomplete="off" spellcheck="false">
+        <button type="button" class="cb-toggle" tabindex="-1" title="展开车站列表">▾</button>
+        <div class="cb-pop"></div>
+      </div>
       <input class="km" type="number" step="0.1" min="0" inputmode="decimal"
              value="${esc(r.km)}" placeholder="累计 km（可空）">
       <button class="del" title="删掉这一行">×</button>
@@ -1333,12 +1345,165 @@ function nmRenderRows() {
 
   $$('#nmRows .nm-row').forEach(row => {
     const i = Number(row.dataset.i);
-    row.querySelector('input.st').addEventListener('input', e => { NM.rows[i].name = e.target.value; });
+    nmStaBind(row.querySelector('.combo'), i);
     row.querySelector('input.km').addEventListener('input', e => { NM.rows[i].km = e.target.value; });
+    row.querySelector('input.km').addEventListener('keydown', e => {
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      nmStaNext(i);
+    });
     row.querySelector('.del').addEventListener('click', () => {
       NM.rows.splice(i, 1);
       nmRenderRows();
     });
+  });
+}
+
+/* ---------- 新增线路：站名自绘下拉（原生 datalist 会跟中文输入法打架，弃用） ---------- */
+let nmKick = null;
+
+function nmUnKick() {
+  if (nmKick) {
+    window.removeEventListener('scroll', nmKick, true);
+    window.removeEventListener('resize', nmKick);
+    nmKick = null;
+  }
+}
+
+function nmStaMatches(q) {
+  const all = NM.stations || [];
+  const v = (q || '').trim();
+  if (!v) return all.slice(0, 200);
+  const hits = all.filter(s => s.includes(v));
+  hits.sort((a, b) => (b.startsWith(v) - a.startsWith(v)) || a.length - b.length);
+  return hits.slice(0, 200);
+}
+
+function nmStaPaint(box, q) {
+  const pop = box.querySelector('.cb-pop');
+  if (!pop) return;
+  if (NM.stations == null) {                 // 站名库还没加载完
+    pop.innerHTML = '<div class="cb-empty">站名库加载中…</div>';
+    CB.items = [];
+    CB.idx = -1;
+    return;
+  }
+  const v = (q || '').trim();
+  const list = nmStaMatches(v);
+  const exact = v && list.includes(v);
+  const rows = list.map(n => ({ name: n }));
+  if (v && !exact) rows.push({ name: v, custom: true });   // 库外站名也能用
+  CB.items = rows;
+  const hit = rows.findIndex(r => !r.custom && r.name === v);
+  CB.idx = hit >= 0 ? hit : (rows.length ? 0 : -1);
+  pop.innerHTML = rows.length
+    ? rows.map((r, k) => `
+      <div class="cb-item${k === CB.idx ? ' active' : ''}${r.custom ? ' custom' : ''}" data-k="${k}">
+        <span class="nm">${esc(r.name)}</span>
+        <span class="mt">${r.custom ? '用这个名称' : ''}</span>
+      </div>`).join('')
+    : '<div class="cb-empty">直接用输入的名字即可</div>';
+}
+
+/** 弹窗里的滚动容器会裁剪 absolute 下拉，改为 fixed 贴屏幕坐标 */
+function nmStaOpen(box, all) {
+  if (CB.box && CB.box !== box) cbClose();
+  const inp = box.querySelector('input.line');
+  box.classList.add('open');
+  CB.box = box;
+  nmStaPaint(box, all ? '' : inp.value);
+  const pop = box.querySelector('.cb-pop');
+  const r = inp.getBoundingClientRect();
+  const need = Math.min(pop.scrollHeight || 240, 246);
+  pop.classList.toggle('up', r.bottom + need + 16 > window.innerHeight && r.top > need + 16);
+  pop.style.position = 'fixed';
+  pop.style.left = r.left + 'px';
+  pop.style.width = r.width + 'px';
+  if (pop.classList.contains('up')) {
+    pop.style.top = 'auto';
+    pop.style.bottom = (window.innerHeight - r.top + 4) + 'px';
+  } else {
+    pop.style.bottom = 'auto';
+    pop.style.top = (r.bottom + 4) + 'px';
+  }
+  nmUnKick();
+  nmKick = e => {
+    if (e && e.target && e.target.closest && e.target.closest('.cb-pop')) return;  // 滚列表自己不关
+    cbClose();
+    nmUnKick();
+  };
+  window.addEventListener('scroll', nmKick, true);
+  window.addEventListener('resize', nmKick);
+}
+
+/** 选定后回车跳下一格；最后一格则自动加一行，连续录入不停手 */
+function nmStaNext(i) {
+  const rows = $$('#nmRows .nm-row');
+  if (i === NM.rows.length - 1) {
+    NM.rows.push({ name: '', km: '' });
+    nmRenderRows();
+    const rs = $$('#nmRows .nm-row');
+    rs[rs.length - 1].querySelector('input.line').focus();
+  } else if (rows[i + 1]) {
+    rows[i + 1].querySelector('input.line').focus();
+  }
+}
+
+function nmStaPick(box, i, name) {
+  box.querySelector('input.line').value = name;
+  if (NM.rows[i]) NM.rows[i].name = name;
+  cbClose();
+  nmUnKick();
+  nmStaNext(i);
+}
+
+function nmStaBind(box, i) {
+  const inp = box.querySelector('input.line');
+  const pop = box.querySelector('.cb-pop');
+  inp.addEventListener('focus', () => {
+    inp.select();                              // 直接打字就是替换，不用先全删
+    nmStaOpen(box);
+  });
+  inp.addEventListener('click', () => { if (CB.box !== box) nmStaOpen(box); });
+  inp.addEventListener('input', () => {
+    if (NM.rows[i]) NM.rows[i].name = inp.value;
+    CB.box = box;
+    nmStaPaint(box, inp.value);
+    box.classList.add('open');
+  });
+  inp.addEventListener('keydown', e => {
+    if (e.isComposing || e.keyCode === 229) return;    // 输入法组合中的按键不拦截
+    const open = box.classList.contains('open');
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (!open) { nmStaOpen(box); return; }
+      const n = CB.items.length;
+      if (!n) return;
+      CB.idx = (CB.idx + (e.key === 'ArrowDown' ? 1 : -1) + n) % n;
+      cbHilite(box);
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (open && CB.items[CB.idx]) nmStaPick(box, i, CB.items[CB.idx].name);
+      else nmStaNext(i);                       // 没弹下拉时回车=跳下一格
+      return;
+    }
+    if (e.key === 'Escape') { if (open) { e.preventDefault(); cbClose(); } return; }
+    if (e.key === 'Tab') { cbClose(); nmUnKick(); }
+  });
+  box.querySelector('.cb-toggle').addEventListener('mousedown', e => {
+    e.preventDefault();                        // 别让输入框失焦
+    if (box.classList.contains('open')) { cbClose(); nmUnKick(); return; }
+    inp.focus();
+    nmStaOpen(box, true);                      // ▾ 展开全部站名
+  });
+  pop.addEventListener('click', e => {
+    const it = e.target.closest('.cb-item');
+    if (!it) return;
+    const r = CB.items[Number(it.dataset.k)];
+    if (r) nmStaPick(box, i, r.name);
   });
 }
 
@@ -2986,6 +3151,7 @@ function cuBindLineCombo(box, i) {
     cuCheck();
   });
   inp.addEventListener('keydown', e => {
+    if (e.isComposing || e.keyCode === 229) return;   // 输入法组合中的按键不拦截
     const open = box.classList.contains('open');
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault();

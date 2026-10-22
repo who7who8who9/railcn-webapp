@@ -94,9 +94,10 @@ def _rebuild_km(stations: List[dict], seg_km: Optional[dict] = None,
     由「站间里程」重建累计里程。返回 (累计, 区间)。
 
     区间：档案有前后两站里程时取差；人工填的段覆盖。
-    累计：某段不详则该段之后的里程都记为 None（不详就如实标不详，不外推）。
+    累计：不详的段本身不计（区间为 None），但下一站能用档案累计里程续上，
+          后面的段照常累加——「不详」不连累后面的车站。
     给了总里程时，只把**没手填**的段等比缩放到 total_km − 手填段之和。
-    seg_km 里值为 None 的段表示「明确不详」：即使档案里有值也作废，且不参与总里程缩放。
+    seg_km 里值为 None 的段表示「明确不详」：即使档案里有值也不当站间距用，且不参与总里程缩放。
     """
     n = len(stations)
     base = [p.get("km") for p in stations]
@@ -137,14 +138,20 @@ def _rebuild_km(stations: List[dict], seg_km: Optional[dict] = None,
                 if seg[i] is not None:
                     seg[i] = round(seg[i] * r, 1)
 
+    # 累计：某个区间不详只影响**这一段本身**（显示 None，不参与累加），
+    # 下一站若档案里有确定的累计里程，就以档案值为新锚点续上，后面的区间照常累加。
     cum: List[Optional[float]] = [None] * n
     if n:
         cum[0] = round(float(base[0]), 1) if base[0] is not None else 0.0
-    for i in range(n - 1):
-        if seg[i] is None or cum[i] is None:
-            cum[i + 1] = None
-        else:
-            cum[i + 1] = round(cum[i] + seg[i], 1)
+        cur = cum[0]
+        for i in range(n - 1):
+            val: Optional[float] = None
+            if cur is not None and seg[i] is not None:
+                val = round(cur + seg[i], 1)
+            elif base[i + 1] is not None:
+                val = round(float(base[i + 1]), 1)
+            cum[i + 1] = val
+            cur = val
     return cum, seg
 
 
@@ -168,7 +175,7 @@ def _line_with_override(raw: dict, ov: Optional[dict]) -> dict:
     ln["kmComplete"] = bool(seg) and all(s is not None for s in seg) and all(c is not None for c in cum)
     ln["kmReliable"] = True if ln["kmComplete"] else bool(raw.get("kmReliable"))
     ln["kmManual"] = True
-    ln["segKm"] = {str(i): v for i, v in enumerate(seg) if v is not None}
+    ln["segKm"] = list(seg)     # 按下标给，含 None（该段站间距明确不详）
     return ln
 
 
@@ -318,10 +325,13 @@ def line_detail(name: str) -> Optional[dict]:
                     "kmBase": p.get("kmBase", p["km"]),
                     "lat": c[0] if c else None, "lon": c[1] if c else None})
     n = len(pts)
-    seg = []
-    for i in range(n - 1):
-        a, b = pts[i]["km"], pts[i + 1]["km"]
-        seg.append(round(float(b) - float(a), 1) if (a is not None and b is not None) else None)
+    seg = ln.get("segKm")
+    if not isinstance(seg, list) or len(seg) != max(n - 1, 0):
+        # 没人工改过：直接由档案累计里程取差
+        seg = []
+        for i in range(n - 1):
+            a, b = pts[i]["km"], pts[i + 1]["km"]
+            seg.append(round(float(b) - float(a), 1) if (a is not None and b is not None) else None)
     ov = _LINE_OVR.get(ln["name"]) or {}
     return {**ln, "stations": pts, "segKm": seg,
             "override": {"segKm": ov.get("segKm") or {}, "totalKm": ov.get("totalKm"),

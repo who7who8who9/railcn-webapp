@@ -1670,14 +1670,8 @@ function lnSegBase(d) {
 
 /** 档案累计里程（只看档案值，不受手填影响），不详为 null */
 function lnCumBase() {
-  const seg = lnSegBase(LN.data);
   const st = (LN.data && LN.data.stations) || [];
-  const cum = [st.length && st[0].kmBase != null ? st[0].kmBase : 0];
-  for (let i = 0; i < seg.length; i++) {
-    cum[i + 1] = (cum[i] == null || seg[i] == null)
-      ? null : Math.round((cum[i] + seg[i]) * 10) / 10;
-  }
-  return cum;
+  return st.map(p => (p.kmBase == null ? null : p.kmBase));
 }
 
 /** 与后端 cnrail._rebuild_km 同规则，算出「当前输入下」的区间与累计里程 */
@@ -1704,12 +1698,15 @@ function lnEffective() {
   }
   const st = (d && d.stations) || [];
   const cum = [];
-  if (st.length) {
-    const first = st[0].kmBase;
-    cum[0] = first == null ? 0 : first;
-  }
+  if (st.length) cum[0] = st[0].kmBase == null ? 0 : st[0].kmBase;
+  let cur = cum[0];
   for (let i = 0; i < seg.length; i++) {
-    cum[i + 1] = (cum[i] == null || seg[i] == null) ? null : Math.round((cum[i] + seg[i]) * 10) / 10;
+    let v = null;
+    if (cur != null && seg[i] != null) v = Math.round((cur + seg[i]) * 10) / 10;
+    // 这一段不详：不影响后面的车站，下一站直接用档案里的累计里程续上
+    else if (st[i + 1] && st[i + 1].kmBase != null) v = st[i + 1].kmBase;
+    cum[i + 1] = v;
+    cur = v;
   }
   return { seg, cum };
 }
@@ -1750,7 +1747,7 @@ function lnRenderSegs() {
       <span class="od" title="${esc(p.name)} → ${esc(st[i + 1].name)}">${esc(p.name)}<em>→</em>${esc(st[i + 1].name)}</span>
       <input class="km" type="text" inputmode="decimal" autocomplete="off"
              value="${unk ? '-' : (has ? v : '')}" placeholder="${a == null ? '-' : a.toFixed(1)}"
-             title="留空沿用档案值${a == null ? '（档案也是不详）' : ' ' + a.toFixed(1) + ' km'}；填「-」表示这一段明确不详">
+             title="留空沿用档案值${a == null ? '（档案也是不详）' : ' ' + a.toFixed(1) + ' km'}；填「-」表示这一段站间距不详（后面的车站照常计算）">
       <span class="u">km</span>
       <button class="seg-clr" title="恢复这一段的档案值"${has || unk ? '' : ' disabled'}>↺</button>
       <span class="auto">${dtxt}</span>
@@ -1844,7 +1841,7 @@ function lnRenderCum() {
       <input class="km" type="text" inputmode="decimal" autocomplete="off"
              value="${unk ? '-' : (has && cur != null ? cur : '')}" placeholder="${cur == null ? '-' : cur.toFixed(1)}"
              ${locked ? 'disabled' : ''}
-             title="${locked ? '前面有里程不详的区间，先切到「按段距」补齐' : `留空沿用当前累计 ${cur == null ? '-' : cur.toFixed(1)} km；填「-」表示这一站起累计不详`}">
+             title="${locked ? '前面有里程不详的区间，先切到「按段距」补齐' : `留空沿用当前累计 ${cur == null ? '-' : cur.toFixed(1)} km；填「-」表示这一段站间距不详（后面的车站照常按档案里程计算）`}">
       <span class="u">km</span>
       <button class="seg-clr" title="恢复档案值"${has || unk ? '' : ' disabled'}>↺</button>
       <span class="auto">${dtxt}</span>
@@ -2069,8 +2066,8 @@ function lnRenderEditor() {
         <button data-mode="cum" class="${LN.mode === 'cum' ? 'on' : ''}" title="填自起点站算起的累计公里数">按累计</button>
       </div>
       <span class="lnkm-hint">${LN.mode === 'seg'
-        ? '灰字是档案值，留空沿用；填数字锁住这一段；填「-」表示这一段里程不详'
-        : '填「从起点站到这一站」的累计公里数；填「-」表示这一站起不详'}</span>
+        ? '灰字是档案值，留空沿用；填数字锁住这一段；填「-」表示这一段站间距不详（不计入累加，后面的车站照常算）'
+        : '填「从起点站到这一站」的累计公里数；填「-」表示这一段站间距不详（后面的车站仍按档案里程计算）'}</span>
       <div class="lnkm-btns">
         <button class="btn sm primary" id="lnSave">保存</button>
         <button class="btn sm" id="lnResetAll">全部恢复档案</button>
@@ -2089,7 +2086,7 @@ function lnRenderEditor() {
       <span class="lnkm-warn" id="lnWarn"></span>
       <span class="lnkm-seg" id="lnMsg"></span>
     </div>
-    <div class="ve-note">档案里 ${segs.length} 段，其中 ${known} 段有里程（其余不详）。填「-」= 这一段里程明确不详，它之后的累计不再外推；填总里程时只有没手填、也没标不详的段会等比缩放。保存后车次详情、地图、时间轴全部同步。</div>`;
+    <div class="ve-note">档案里 ${segs.length} 段，其中 ${known} 段有里程（其余不详）。填「-」= 这一段站间距明确不详，不参与累加，后面的车站仍按档案里程计算；填总里程时只有没手填、也没标不详的段会等比缩放。保存后车次详情、地图、时间轴全部同步。</div>`;
 
   $$('#lnMode button').forEach(b => b.addEventListener('click', () => {
     if (LN.mode === b.dataset.mode) return;

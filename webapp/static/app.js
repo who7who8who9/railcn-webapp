@@ -662,7 +662,11 @@ function posAt(route, t) {
 function kmBadge(route) {
   const m = route.kmMode || (route.kmReal ? 'real' : 'estimate');
   const tip = `按线路里程表匹配 ${route.kmMatched} 段；站点直线累计 ${route.straightKm} km；弯曲系数 ×${route.kmFactor}`;
-  if (m === 'manual') return `<i class="kmreal" title="人工填写的总里程，各站按比例缩放">人工里程</i>`;
+  if (m === 'manual') {
+    const seg = !!(route.manual && route.manual.segKm);
+    return `<i class="kmreal" title="${seg
+      ? '站间里程手工填写，各站按段累加' : '人工填写的总里程，各站按比例缩放'}">人工里程</i>`;
+  }
   if (m === 'real') return `<i class="kmreal" title="${tip}">实测里程</i>`;
   if (m === 'hybrid') return `<i class="kmhyb" title="${tip}">部分实测</i>`;
   return `<i class="kmest" title="${tip}">里程估算</i>`;
@@ -1677,7 +1681,7 @@ const CU_FILTERS = [
 ];
 const CU = {
   filter: 'todo', q: '', items: [], total: 0, limit: 60,
-  sel: null, detail: null, via: [], lines: null, poll: null,
+  sel: null, detail: null, via: [], segKm: {}, lines: null, poll: null,
   coordQ: '', coordOnlyMiss: false,
 };
 
@@ -1827,6 +1831,13 @@ async function cuOpen(code) {
     CU.via = d.override
       ? (d.override.via || []).map(x => ({ line: x.line || '', from: x.from || '', to: x.to || '' }))
       : cuRowsFromAuto(d.auto || {});
+    CU.segKm = {};
+    const ovSeg = (d.override && d.override.segKm) || {};
+    Object.keys(ovSeg).forEach(k => {
+      const i = Number(k);
+      const v = Number(ovSeg[k]);
+      if (Number.isFinite(i) && i >= 0 && Number.isFinite(v) && v > 0) CU.segKm[i] = v;
+    });
     cuRenderEditor();
   } catch (e) {
     $('#cuEditor').innerHTML = `<div class="cu-empty">载入失败：${esc(e.message)}</div>`;
@@ -1836,15 +1847,10 @@ async function cuOpen(code) {
 async function cuLoadLineNames() {
   try {
     const d = await api('/api/curate/lineNames');
-    CU.lines = d.items || [];
-    let dl = $('#cuLineList');
-    if (!dl) {
-      dl = document.createElement('datalist');
-      dl.id = 'cuLineList';
-      document.body.appendChild(dl);
-    }
-    dl.innerHTML = CU.lines.map(n => `<option value="${esc(n)}">`).join('');
-  } catch (e) { CU.lines = []; }
+    CU.lines = (d.items || []).map(x => (typeof x === 'string'
+      ? { name: x, n: null, totalKm: null } : x));
+    CU.lineMap = new Map(CU.lines.map(l => [l.name, l]));
+  } catch (e) { CU.lines = []; CU.lineMap = new Map(); }
 }
 
 /** 站点自动补全用的 datalist（每趟车单独一套站名） */
@@ -1895,7 +1901,8 @@ function cuRenderEditor() {
   const d = CU.detail;
   const a = d.auto || {};
   const ov = d.override;
-  const isManual = !!(ov && ((ov.via || []).length || ov.totalKm));
+  const isManual = !!(ov && ((ov.via || []).length || ov.totalKm
+    || Object.keys(ov.segKm || {}).length));
   const kmModeCn = { manual: '人工填写', real: '线路实测', hybrid: '部分实测', estimate: '直线估算' }[a.kmMode] || a.kmMode;
   const covText = a.viaSource === 'none' || !(a.viaSegs || []).length
     ? '整趟都没认出线路'
@@ -1946,10 +1953,21 @@ function cuRenderEditor() {
     </div>
 
     <div class="ce-card">
+      <h4>站间里程
+        <span class="hint">相邻两站之间的公里数；灰字是自动值，留空就沿用，右侧显示与自动值的差</span>
+        <span class="right">
+          <button id="ceSegClear" class="btn sm ghost">全部恢复自动</button>
+        </span>
+      </h4>
+      <div class="seg-list" id="ceSegList"></div>
+      <div class="ve-note seg-note" id="ceSegNote"></div>
+    </div>
+
+    <div class="ce-card">
       <h4>里程与备注</h4>
       <div class="ce-grid">
         <div class="ce-field">
-          <label>总里程 km（留空沿用自动值 ${a.totalKm}）</label>
+          <label>总里程 km（可留空，自动 ${a.totalKm} km）</label>
           <input id="ceKm" type="number" step="0.1" min="1" max="20000"
                  value="${ov && ov.totalKm ? ov.totalKm : ''}" placeholder="${a.totalKm}">
         </div>
@@ -1958,7 +1976,9 @@ function cuRenderEditor() {
           <input id="ceNote" value="${esc((ov && ov.note) || '')}" placeholder="比如：该段按 2026 年调图核对">
         </div>
       </div>
-      <div class="ve-note">填了总里程，各站里程会按比例缩放，车次详情、地图、时间轴同步生效。</div>
+      <div class="ve-note">填了站间里程：手填段按手填值，其余段沿用自动值，各站累计实时重算；
+        若同时又填了总里程，则只把「没手填的段」按比例缩放到 总里程 − 手填段之和。
+        保存后车次详情、地图、时间轴同步生效。</div>
     </div>
 
     <div class="ce-card">
@@ -1977,15 +1997,14 @@ function cuRenderEditor() {
 
     <details class="ce-card st-card">
       <summary>经停站与里程（${stops.length} 站）</summary>
-      <div class="st-list" id="cuStList">${stops.map((s, i) => `
-        <div class="st-line${s.lat == null ? ' miss' : ''}">
-          <span class="i">${i + 1}</span><span>${esc(s.name)}</span>
-          <span class="k">${s.km} km${s.lat == null ? ' · 缺坐标' : ''}</span></div>`).join('')}</div>
+      <div class="st-list" id="cuStList"></div>
     </details>`;
 
 
   cuBindStations(d.stations);
   cuRenderViaRows();
+  cuRenderSegKm();
+  cuRenderStops();
 
   $('#ceGoTrain').addEventListener('click', () => {
     S.date = d.date || S.date;
@@ -2004,7 +2023,18 @@ function cuRenderEditor() {
     CU.via = cuRowsFromAuto(a);
     cuRenderViaRows();
   });
-  $('#ceKm').addEventListener('input', cuCheck);
+  $('#ceKm').addEventListener('input', () => {
+    cuSegSummary();
+    cuRenderStops();
+    cuCheck();
+  });
+  $('#ceSegClear').addEventListener('click', () => {
+    CU.segKm = {};
+    cuRenderSegKm();
+    cuRenderStops();
+    cuCheck();
+    cuMsg('', '站间里程已全部恢复自动值');
+  });
   $('#ceSave').addEventListener('click', cuSave);
   $('#ceReset').addEventListener('click', cuReset);
 
@@ -2139,27 +2169,166 @@ function cuApplyCoord(name, r) {
     cuBindCoordRows();
   }
   const stList = $('#cuStList');
-  if (stList) {
-    stList.innerHTML = stops.map((s, i) => `
-      <div class="st-line${s.lat == null ? ' miss' : ''}">
-        <span class="i">${i + 1}</span><span>${esc(s.name)}</span>
-        <span class="k">${s.km} km${s.lat == null ? ' · 缺坐标' : ''}</span></div>`).join('');
-  }
+  if (stList) cuRenderStops();
   S.staleCode = d.code || null;     // 切回车次详情时重新拉一次，地图才会用新坐标
   cuLoad();
 }
+
+/* ---------- 线路下拉：可搜索、可键盘选，也允许填库外线路名 ---------- */
+const CB = { box: null, items: [], idx: -1 };
+
+function cbLineList(q) {
+  const all = CU.lines || [];
+  const v = (q || '').trim();
+  if (!v) return all.slice(0, 500);
+  const hits = all.filter(l => l.name.includes(v));
+  hits.sort((a, b) => {
+    const ap = a.name.startsWith(v) ? 0 : 1;
+    const bp = b.name.startsWith(v) ? 0 : 1;
+    return ap - bp || a.name.length - b.name.length;
+  });
+  return hits.slice(0, 200);
+}
+
+function cbClose() {
+  if (CB.box) CB.box.classList.remove('open');
+  CB.box = null;
+  CB.items = [];
+  CB.idx = -1;
+}
+
+function cbHilite(box) {
+  const pop = box.querySelector('.cb-pop');
+  if (!pop) return;
+  $$('.cb-item', pop).forEach((el, k) => el.classList.toggle('active', k === CB.idx));
+  const act = pop.querySelector('.cb-item.active');
+  if (!act) return;
+  // 只滚面板自己，别把整页带着动
+  const top = act.offsetTop - pop.offsetTop;
+  if (top < pop.scrollTop) pop.scrollTop = top - 4;
+  else if (top + act.offsetHeight > pop.scrollTop + pop.clientHeight) {
+    pop.scrollTop = top + act.offsetHeight - pop.clientHeight + 4;
+  }
+}
+
+/** 重建下拉内容：有匹配就先列匹配，非精确匹配时把「用当前输入」放在最后一项 */
+function cbPaintList(box, q) {
+  const pop = box.querySelector('.cb-pop');
+  if (!pop) return;
+  const v = (q || '').trim();
+  const list = cbLineList(v);
+  const exact = list.some(l => l.name === v);
+  const rows = list.slice();
+  if (v && !exact) rows.push({ name: v, custom: true });
+  CB.items = rows;
+  // 命中只认库里的线路名；自定义项跟输入值同名，不能算「命中」
+  const hit = list.findIndex(l => l.name === v);
+  CB.idx = hit >= 0 ? hit : (rows.length ? 0 : -1);
+  pop.innerHTML = rows.length
+    ? rows.map((r, k) => {
+      const mt = r.custom ? '用这个名称'
+        : [r.n ? `${r.n} 站` : '', r.totalKm ? `${Math.round(r.totalKm)} km` : '']
+          .filter(Boolean).join(' · ');
+      return `<div class="cb-item${k === CB.idx ? ' active' : ''}${r.custom ? ' custom' : ''}"
+        data-k="${k}"><span class="nm">${esc(r.name)}</span><span class="mt">${esc(mt)}</span></div>`;
+    }).join('')
+    : '<div class="cb-empty">线路库里没有匹配项 —— 直接输入的字就是自定义线路名</div>';
+}
+
+function cbOpen(box, i, all) {
+  if (CB.box && CB.box !== box) cbClose();
+  const inp = box.querySelector('input.line');
+  box.classList.add('open');
+  CB.box = box;
+  cbPaintList(box, all ? '' : inp.value);
+  if (all) {                                  // 看全部时仍把当前值标出来
+    const k = CB.items.findIndex(r => r.name === inp.value.trim());
+    if (k >= 0) { CB.idx = k; cbHilite(box); }
+  }
+  const pop = box.querySelector('.cb-pop');
+  // 下面空间不够就往上翻
+  const r = inp.getBoundingClientRect();
+  const need = Math.min(pop.scrollHeight || 240, 246);
+  pop.classList.toggle('up', r.bottom + need + 16 > window.innerHeight && r.top > need + 16);
+}
+
+function cbPick(box, i, name) {
+  const inp = box.querySelector('input.line');
+  inp.value = name;
+  if (i != null && CU.via[i]) CU.via[i].line = name;
+  cbClose();
+  cuCheck();
+}
+
+function cuBindLineCombo(box, i) {
+  const inp = box.querySelector('input.line');
+  const pop = box.querySelector('.cb-pop');
+  inp.addEventListener('focus', () => {
+    inp.select();                              // 直接打字就是替换，不用先全删
+    cbOpen(box, i);
+  });
+  inp.addEventListener('click', () => { if (CB.box !== box) cbOpen(box, i); });
+  inp.addEventListener('input', () => {
+    if (i != null && CU.via[i]) CU.via[i].line = inp.value;
+    CB.box = box;
+    cbPaintList(box, inp.value);
+    box.classList.add('open');
+    cuCheck();
+  });
+  inp.addEventListener('keydown', e => {
+    const open = box.classList.contains('open');
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (!open) { cbOpen(box, i); return; }
+      const n = CB.items.length;
+      if (!n) return;
+      CB.idx = (CB.idx + (e.key === 'ArrowDown' ? 1 : -1) + n) % n;
+      cbHilite(box);
+      return;
+    }
+    if (e.key === 'Enter') {
+      if (open && CB.items[CB.idx]) { e.preventDefault(); cbPick(box, i, CB.items[CB.idx].name); }
+      else cbClose();
+      return;
+    }
+    if (e.key === 'Escape') { if (open) { e.preventDefault(); cbClose(); } return; }
+    if (e.key === 'Tab') cbClose();
+  });
+  box.querySelector('.cb-toggle').addEventListener('mousedown', e => {
+    e.preventDefault();                       // 别让输入框失焦
+    if (box.classList.contains('open')) { cbClose(); return; }
+    inp.focus();
+    cbOpen(box, i, true);                     // ▾ 展开全部线路
+  });
+  pop.addEventListener('click', e => {
+    const it = e.target.closest('.cb-item');
+    if (!it) return;
+    const r = CB.items[Number(it.dataset.k)];
+    if (r) cbPick(box, i, r.name);
+  });
+}
+
+document.addEventListener('pointerdown', e => {
+  if (CB.box && !CB.box.contains(e.target)) cbClose();
+}, true);
 
 function cuRenderViaRows() {
   const box = $('#ceViaRows');
   if (!box) return;
   if (!CU.via.length) {
     box.innerHTML = '<div class="ve-note">还没有填写。点「+ 添加一段」，或「按自动结果填充」。</div>';
+    cbClose();
     cuCheck();
     return;
   }
   box.innerHTML = CU.via.map((r, i) => `
     <div class="ve-row" data-i="${i}">
-      <input class="line" list="cuLineList" value="${esc(r.line)}" placeholder="线路名，如 陇海线">
+      <div class="combo">
+        <input class="line" value="${esc(r.line)}" placeholder="点这里选线路，或直接输入"
+               autocomplete="off" spellcheck="false">
+        <button type="button" class="cb-toggle" tabindex="-1" title="展开线路列表">▾</button>
+        <div class="cb-pop"></div>
+      </div>
       <input class="from" list="cuStaList" value="${esc(r.from)}" placeholder="起始站">
       <input class="to" list="cuStaList" value="${esc(r.to)}" placeholder="终止站">
       <button class="del" title="删除这一段">×</button>
@@ -2167,8 +2336,7 @@ function cuRenderViaRows() {
 
   $$('#ceViaRows .ve-row').forEach(row => {
     const i = Number(row.dataset.i);
-    const li = row.querySelector('input.line');
-    li.addEventListener('input', () => { CU.via[i].line = li.value; cuCheck(); });
+    cuBindLineCombo(row.querySelector('.combo'), i);
     const fr = row.querySelector('input.from');
     fr.addEventListener('input', () => { CU.via[i].from = fr.value; cuCheck(); });
     const to = row.querySelector('input.to');
@@ -2178,7 +2346,156 @@ function cuRenderViaRows() {
       cuRenderViaRows();
     });
   });
+  cbClose();
   cuCheck();
+}
+
+/* ---------- 站间里程：手填段 + 自动段 → 各站累计（规则与后端一致） ---------- */
+/** 编辑器基线里的自动相邻段里程 */
+function cuAutoDiffs() {
+  const stops = (CU.detail && CU.detail.stops) || [];
+  const out = [];
+  for (let i = 0; i + 1 < stops.length; i++) {
+    out.push(Math.max(0, Number(stops[i + 1].km || 0) - Number(stops[i].km || 0)));
+  }
+  return out;
+}
+
+function cuEffectiveKm() {
+  const auto = cuAutoDiffs();
+  const diffs = auto.slice();
+  const fixed = {};
+  Object.keys(CU.segKm || {}).forEach(k => {
+    const i = Number(k), v = Number(CU.segKm[k]);
+    if (i >= 0 && i < diffs.length && v > 0) { fixed[i] = v; diffs[i] = v; }
+  });
+  const kmEl = $('#ceKm');
+  const totalRaw = kmEl && kmEl.value.trim() !== '' ? Number(kmEl.value) : null;
+  const free = diffs.map((_, i) => i).filter(i => !(i in fixed));
+  if (totalRaw && totalRaw > 0 && free.length) {
+    const base = free.reduce((s, i) => s + auto[i], 0);
+    const target = totalRaw - Object.keys(fixed).reduce((s, k) => s + fixed[k], 0);
+    if (base > 0 && target > 0) {
+      const ratio = target / base;
+      free.forEach(i => { diffs[i] *= ratio; });
+    }
+  }
+  const cum = [0];
+  for (let i = 0; i < diffs.length; i++) cum.push(cum[i] + diffs[i]);
+  return { diffs, cum, auto, fixed, total: cum[cum.length - 1] || 0 };
+}
+
+function cuRenderSegKm() {
+  const box = $('#ceSegList');
+  const d = CU.detail;
+  if (!box || !d) return;
+  const stops = d.stops || [];
+  const auto = cuAutoDiffs();
+  if (stops.length < 2) {
+    box.innerHTML = '<div class="ve-note">这趟车只有一站，没有站间里程可填。</div>';
+    cuSegSummary();
+    return;
+  }
+  box.innerHTML = stops.slice(0, -1).map((s, i) => {
+    const a = auto[i] || 0;
+    const v = CU.segKm[i];
+    const has = v != null;
+    const delta = has ? v - a : null;
+    const dtxt = delta == null ? '' : (Math.abs(delta) < 0.05 ? '=' : (delta > 0 ? '+' : '') + delta.toFixed(1));
+    return `<div class="seg-row${has ? ' manual' : ''}" data-i="${i}">
+      <span class="i">${i + 1}</span>
+      <span class="od" title="${esc(s.name)} → ${esc(stops[i + 1].name)}">${esc(s.name)}<em>→</em>${esc(stops[i + 1].name)}</span>
+      <input class="km" type="number" step="0.1" min="0" max="5000" inputmode="decimal"
+             value="${has ? v : ''}" placeholder="${a.toFixed(1)}"
+             title="留空沿用自动值 ${a.toFixed(1)} km">
+      <span class="u">km</span>
+      <button class="seg-clr" title="恢复这一段的自动值"${has ? '' : ' disabled'}>↺</button>
+      <span class="auto" title="与自动值的差">${dtxt}</span>
+    </div>`;
+  }).join('');
+
+  $$('#ceSegList .seg-row').forEach(row => {
+    const i = Number(row.dataset.i);
+    const inp = row.querySelector('input.km');
+    const clr = row.querySelector('.seg-clr');
+    const apply = () => {
+      const raw = inp.value.trim();
+      const n = Number(raw);
+      if (raw === '' || !Number.isFinite(n) || n <= 0) delete CU.segKm[i];
+      else CU.segKm[i] = n;
+      const on = Object.prototype.hasOwnProperty.call(CU.segKm, i);
+      row.classList.toggle('manual', on);
+      clr.disabled = !on;
+      // 最右列：与自动值的差（placeholder 就是自动值）
+      const dEl = row.querySelector('.auto');
+      if (dEl) {
+        const a = Number(inp.placeholder) || 0;
+        const dd = on ? CU.segKm[i] - a : null;
+        dEl.textContent = dd == null ? '' : (Math.abs(dd) < 0.05 ? '=' : (dd > 0 ? '+' : '') + dd.toFixed(1));
+      }
+      cuSegSummary();
+      cuRenderStops();
+      cuCheck();
+    };
+    inp.addEventListener('input', apply);
+    inp.addEventListener('keydown', e => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      const next = row.nextElementSibling;
+      if (next) next.querySelector('input.km').focus();
+      else inp.blur();
+    });
+    clr.addEventListener('click', () => {
+      inp.value = '';
+      row.classList.remove('manual');
+      delete CU.segKm[i];
+      clr.disabled = true;
+      const dEl = row.querySelector('.auto');
+      if (dEl) dEl.textContent = '';
+      cuSegSummary();
+      cuRenderStops();
+      cuCheck();
+    });
+  });
+  cuSegSummary();
+}
+
+function cuSegSummary() {
+  const el = $('#ceSegNote');
+  if (!el) return;
+  const d = CU.detail;
+  if (!d || (d.stops || []).length < 2) { el.textContent = ''; return; }
+  const eff = cuEffectiveKm();
+  const autoSum = eff.auto.reduce((a, b) => a + b, 0);
+  const keys = Object.keys(eff.fixed).map(Number).sort((a, b) => a - b);
+  const fixedSum = keys.reduce((s, k) => s + eff.fixed[k], 0);
+  const bits = [`合计 <b>${eff.total.toFixed(1)}</b> km`];
+  if (keys.length) {
+    bits.push(`手填 ${keys.length} 段 / ${fixedSum.toFixed(1)} km`);
+    const dc = eff.total - autoSum;
+    if (Math.abs(dc) > 0.5) bits.push(`比自动值 ${dc > 0 ? '+' : ''}${dc.toFixed(1)} km`);
+  } else {
+    bits.push('全部沿用自动值');
+  }
+  el.innerHTML = bits.join(' · ');
+}
+
+/** 经停站表：显示按当前填写算出来的累计里程 */
+function cuRenderStops() {
+  const box = $('#cuStList');
+  const d = CU.detail;
+  if (!box || !d) return;
+  const stops = d.stops || [];
+  const eff = cuEffectiveKm();
+  box.innerHTML = stops.map((s, i) => {
+    const km = i < eff.cum.length ? eff.cum[i] : Number(s.km || 0);
+    const base = Number(s.km || 0);
+    const changed = Math.abs(km - base) > 0.05;
+    return `<div class="st-line${s.lat == null ? ' miss' : ''}">
+      <span class="i">${i + 1}</span><span>${esc(s.name)}</span>
+      <span class="k">${km.toFixed(1)} km${changed
+        ? `<em class="chg" title="自动值 ${base.toFixed(1)} km">调整</em>` : ''}${s.lat == null ? ' · 缺坐标' : ''}</span></div>`;
+  }).join('');
 }
 
 function cuCheck() {
@@ -2216,6 +2533,16 @@ function cuCheck() {
     }
   }
 
+  // 手填站间里程：与自动段值差太远的，提醒核对（不影响保存）
+  const segAuto = cuAutoDiffs();
+  Object.keys(CU.segKm || {}).forEach(k => {
+    const i = Number(k), v = Number(CU.segKm[k]);
+    const a = segAuto[i] || 0;
+    if (a > 0 && v > 0 && (v > a * 3 || v < a / 3)) {
+      note.push(`第 ${i + 1} 段手填 ${v} km（自动 ${a.toFixed(1)} km），差得比较多，确认一下`);
+    }
+  });
+
   $$('#ceViaRows .ve-row').forEach((row, i) => {
     const r = rows[i];
     if (!r) return;
@@ -2245,10 +2572,15 @@ async function cuSave() {
     .filter(r => r.line);
   const kmRaw = ($('#ceKm').value || '').trim();
   const note = ($('#ceNote').value || '').trim();
+  const segKm = {};
+  Object.keys(CU.segKm || {}).forEach(k => {
+    const v = Number(CU.segKm[k]);
+    if (Number.isFinite(v) && v > 0) segKm[k] = v;
+  });
   cuMsg('', '保存中…');
   try {
     await cuPost('/api/override', {
-      code: d.code, via, totalKm: kmRaw ? Number(kmRaw) : null, note,
+      code: d.code, via, totalKm: kmRaw ? Number(kmRaw) : null, note, segKm,
     });
     await cuOpen(d.code);
     cuMsg('ok', '已保存 · 车次详情和地图立即生效');

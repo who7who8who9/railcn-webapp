@@ -127,6 +127,7 @@ class Handler(BaseHTTPRequestHandler):
                     payload.get("via") or [],
                     payload.get("totalKm"),
                     payload.get("note") or "",
+                    payload.get("segKm") or {},
                 )
                 curate.refresh_one(code)
                 return self.json({"ok": True, **res})
@@ -273,8 +274,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.json(curate.detail(one("code")))
 
         if path == "/api/curate/lineNames":
-            names = [l["name"] for l in cnrail.search_line("", 10000)]
-            return self.json({"items": names, "count": len(names)})
+            items = [{"name": l["name"], "n": l.get("n"), "totalKm": l.get("totalKm"),
+                      "kmComplete": l.get("kmComplete")}
+                     for l in cnrail.search_line("", 10000)]
+            # 干线在前（站数多的排前面），下拉里默认先看到主要线路
+            items.sort(key=lambda x: (-(x.get("n") or 0), x["name"]))
+            return self.json({"items": items, "count": len(items),
+                              "names": [x["name"] for x in items]})
 
         if path == "/api/curate/scan":
             return self.json(curate.start())

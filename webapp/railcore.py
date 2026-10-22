@@ -97,11 +97,12 @@ def init_db() -> None:
                 lon         REAL
             );
 
-            -- 人工校正：经由 / 总里程 / 备注（按车次，与日期无关）
+            -- 人工校正：经由 / 总里程 / 站间里程 / 备注（按车次，与日期无关）
             CREATE TABLE IF NOT EXISTS train_override (
                 code        TEXT PRIMARY KEY,
                 via_json    TEXT,          -- [{"line":"陇海线","from":"郑州","to":"兰州"}]
                 total_km    REAL,          -- 手工总里程，各站按比例缩放
+                seg_km_json TEXT,          -- {"0":203.4} 站间里程，键是区间序号（第 i 站 → 第 i+1 站）
                 note        TEXT,
                 updated_at  REAL
             );
@@ -129,6 +130,10 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_curate_issues ON curate(issues);
             """
         )
+        # 老库迁移：seg_km_json 是后加的列
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(train_override)")}
+        if "seg_km_json" not in cols:
+            conn.execute("ALTER TABLE train_override ADD COLUMN seg_km_json TEXT")
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +168,37 @@ def _clean_via(via) -> List[dict]:
             "from": _norm(seg.get("from") or ""),
             "to": _norm(seg.get("to") or ""),
         })
+    return out
+
+
+def _clean_seg_km(seg_km) -> Dict[str, float]:
+    """站间里程整理成 {"0": 203.4}：键是区间序号（第 i 站 → 第 i+1 站），值是公里数。
+
+    允许传 dict 或 list（list 的下标就是区间序号），非法项直接丢掉。
+    """
+    out: Dict[str, float] = {}
+    if not seg_km:
+        return out
+    if isinstance(seg_km, dict):
+        items = list(seg_km.items())
+    elif isinstance(seg_km, (list, tuple)):
+        items = list(enumerate(seg_km))
+    else:
+        return out
+    for k, v in items:
+        try:
+            idx = int(k)
+        except (TypeError, ValueError):
+            continue
+        if idx < 0:
+            continue
+        try:
+            km = float(v)
+        except (TypeError, ValueError):
+            continue
+        if not (0 < km <= 5000):
+            continue
+        out[str(idx)] = round(km, 1)
     return out
 
 
@@ -203,9 +239,11 @@ def _drop_override_cache() -> None:
     _override_cache = None
 
 
-def save_override(code: str, via, total_km=None, note: str = "") -> dict:
+def save_override(code: str, via, total_km=None, note: str = "",
+                  seg_km=None) -> dict:
     """
-    保存人工校正。via / total_km 都为空时视作撤销（删除记录）。
+    保存人工校正。via / total_km / seg_km / note 都为空时视作撤销（删除记录）。
+    seg_km: {"区间序号": 公里数}，区间序号 i 表示「第 i 站 → 第 i+1 站」。
     """
     code = (code or "").strip().upper()
     if not code:
@@ -218,22 +256,25 @@ def save_override(code: str, via, total_km=None, note: str = "") -> dict:
     if km is not None and not (1 <= km <= 20000):
         raise ValueError("总里程超出合理范围（1~20000 km）")
 
+    segs = _clean_seg_km(seg_km)
     note = (note or "").strip()
-    if not clean and km is None and not note:
+    if not clean and km is None and not segs and not note:
         clear_override(code)
         return {"code": code, "cleared": True}
 
     with _db_lock, db() as conn:
         conn.execute(
-            """INSERT INTO train_override(code, via_json, total_km, note, updated_at)
-               VALUES(?,?,?,?,?)
+            """INSERT INTO train_override(code, via_json, total_km, seg_km_json, note, updated_at)
+               VALUES(?,?,?,?,?,?)
                ON CONFLICT(code) DO UPDATE SET
                  via_json=excluded.via_json, total_km=excluded.total_km,
+                 seg_km_json=excluded.seg_km_json,
                  note=excluded.note, updated_at=excluded.updated_at""",
-            (code, json.dumps(clean, ensure_ascii=False), km, note, time.time()),
+            (code, json.dumps(clean, ensure_ascii=False), km,
+             json.dumps(segs, ensure_ascii=False), note, time.time()),
         )
     _drop_override_cache()
-    return {"code": code, "via": clean, "totalKm": km, "note": note}
+    return {"code": code, "via": clean, "totalKm": km, "segKm": segs, "note": note}
 
 
 def clear_override(code: str) -> bool:
@@ -249,7 +290,8 @@ def list_overrides() -> Dict[str, dict]:
     try:
         with db() as conn:
             rows = conn.execute(
-                "SELECT code, via_json, total_km, note, updated_at FROM train_override"
+                "SELECT code, via_json, total_km, seg_km_json, note, updated_at "
+                "FROM train_override"
             ).fetchall()
     except sqlite3.Error:
         return {}
@@ -259,8 +301,12 @@ def list_overrides() -> Dict[str, dict]:
             via = _clean_via(json.loads(row["via_json"] or "[]"))
         except (TypeError, ValueError):
             via = []
+        try:
+            seg = _clean_seg_km(json.loads(row["seg_km_json"] or "{}"))
+        except (TypeError, ValueError):
+            seg = {}
         out[row["code"]] = {
-            "via": via, "totalKm": row["total_km"],
+            "via": via, "totalKm": row["total_km"], "segKm": seg,
             "note": row["note"], "updatedAt": row["updated_at"],
         }
     return out
@@ -778,7 +824,7 @@ def build_route_payload(code: str, date: str, force: bool = False,
 
     # ---- 人工校正覆盖（优先于自动结果）----
     km_mode = km_info.get("mode", "estimate")
-    manual = {"via": False, "km": False, "note": None, "updatedAt": None}
+    manual = {"via": False, "km": False, "segKm": False, "note": None, "updatedAt": None}
     ov = get_override(code) if use_override else None
     if ov:
         manual["note"] = ov.get("note")
@@ -789,7 +835,48 @@ def build_route_payload(code: str, date: str, force: bool = False,
                    "resolved": via.get("pairs", 0), "coverage": 100.0,
                    "sources": ["manual"]}
             manual["via"] = True
-        if ov.get("totalKm"):
+
+        # ---- 站间里程：手填的段按手填值，其余段沿用自动值重新累计 ----
+        # 若同时还填了总里程，则让「没手填的段」按比例缩放到 总里程 - 手填段之和，
+        # 这样既能锁定已知的精确区间，又能保住全程总量。
+        seg_applied = False
+        seg_ov = ov.get("segKm") or {}
+        if seg_ov and len(stops) > 1:
+            auto_diffs = [max(0.0, stops[i + 1]["km"] - stops[i]["km"])
+                          for i in range(len(stops) - 1)]
+            fixed: Dict[int, float] = {}
+            for k, v in seg_ov.items():
+                try:
+                    idx = int(k)
+                    val = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= idx < len(auto_diffs) and val > 0:
+                    fixed[idx] = val
+            if fixed:
+                diffs = list(auto_diffs)
+                for idx, val in fixed.items():
+                    diffs[idx] = val
+                free = [i for i in range(len(diffs)) if i not in fixed]
+                total_ov = ov.get("totalKm")
+                if total_ov and free:
+                    base = sum(auto_diffs[i] for i in free)
+                    target = float(total_ov) - sum(fixed.values())
+                    if base > 0 and target > 0:
+                        ratio_free = target / base
+                        for i in free:
+                            diffs[i] *= ratio_free
+                acc = 0.0
+                stops[0]["km"] = 0.0
+                for i, dv in enumerate(diffs):
+                    acc += dv
+                    stops[i + 1]["km"] = round(acc, 1)
+                seg_applied = True
+                km_mode = "manual"
+                manual["km"] = True
+                manual["segKm"] = True
+
+        if not seg_applied and ov.get("totalKm"):
             base_km = stops[-1]["km"] if stops else 0.0
             if base_km and base_km > 0:
                 ratio = float(ov["totalKm"]) / base_km

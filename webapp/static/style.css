@@ -22,7 +22,7 @@ body{
 button{font-family:inherit}
 .hidden{display:none !important}
 
-#app{height:100%;display:flex;flex-direction:column}
+#app{height:100%;display:flex;flex-direction:column;position:relative;z-index:0}
 
 /* ---------- topbar ---------- */
 .topbar{
@@ -64,7 +64,7 @@ main{flex:1;display:flex;min-height:0}
   width:390px;flex:0 0 390px;background:var(--panel);border-right:1px solid var(--line);
   display:flex;flex-direction:column;min-height:0;
 }
-.stage{flex:1;position:relative;min-width:0;background:#dde5ee}
+.stage{flex:1;position:relative;min-width:0;background:#dde5ee;z-index:0;isolation:isolate}
 #map{position:absolute;inset:0}
 #fallback{position:absolute;inset:0;width:100%;height:100%;background:
   radial-gradient(circle at 30% 20%,#f7fafd,#e6edf5 70%)}
@@ -382,8 +382,14 @@ code.inline{background:#eef2f8;padding:1px 5px;border-radius:4px;font-size:10.5p
   box-shadow:var(--shadow);
 }
 .map-hint a{color:#a86b00}
-.modal{position:fixed;inset:0;background:rgba(15,23,42,.42);display:flex;align-items:center;justify-content:center;z-index:100}
-.modal-card{width:460px;background:#fff;border-radius:16px;padding:20px 22px;box-shadow:0 20px 60px rgba(0,0,0,.25)}
+/* 弹窗层级拉满：地图 SDK 内部会给自己的面板塞很高的 z-index，
+   只写 100 会被越级盖住（看着在上面，点击却落到地图上） */
+.modal{position:fixed;inset:0;background:rgba(15,23,42,.42);display:flex;align-items:center;justify-content:center;
+  z-index:2147483000;pointer-events:auto}
+.modal-card{width:460px;background:#fff;border-radius:16px;padding:20px 22px;box-shadow:0 20px 60px rgba(0,0,0,.25);
+  pointer-events:auto}
+/* 弹窗打开时，底下的地图区不接受任何指针事件，彻底避免"点穿" */
+body.modal-open .stage,body.modal-open #curateStage{pointer-events:none}
 .modal-card h3{margin:0 0 8px;font-size:15px}
 .modal-card p{font-size:12px;line-height:1.75;margin:0 0 12px}
 .modal-card input{width:100%;height:36px;border:1px solid var(--line);border-radius:9px;padding:0 10px;font-size:12.5px;outline:none}

@@ -1231,6 +1231,7 @@ function nmClose() {
   cbClose();
   nmUnKick();
   $('#newModal').classList.add('hidden');
+  document.body.classList.remove('modal-open');
 }
 
 function nmSetMsg(text, bad) {
@@ -1248,6 +1249,7 @@ function nmOpen(kind) {
   nmSetMsg('');
   nmRender();
   $('#newModal').classList.remove('hidden');
+  document.body.classList.add('modal-open');   // 弹窗期间地图区不接指针事件，避免点穿
   if (kind === 'line') nmLoadStations();
   setTimeout(() => { const el = $('#nmName'); if (el) el.focus(); }, 40);
 }
@@ -2479,8 +2481,12 @@ async function boot() {
   $('#btnKey').addEventListener('click', () => {
     $('#keyInput').value = mapKey();
     $('#keyModal').classList.remove('hidden');
+    document.body.classList.add('modal-open');
   });
-  $('#keyCancel').addEventListener('click', () => $('#keyModal').classList.add('hidden'));
+  $('#keyCancel').addEventListener('click', () => {
+    $('#keyModal').classList.add('hidden');
+    document.body.classList.remove('modal-open');
+  });
   $('#keySave').addEventListener('click', () => {
     const v = $('#keyInput').value.trim();
     if (v) localStorage.setItem('railcn.mapkey', v); else localStorage.removeItem('railcn.mapkey');

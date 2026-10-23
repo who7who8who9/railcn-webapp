@@ -321,7 +321,11 @@ def save_override(code: str, via, total_km=None, note: str = "",
              json.dumps(segs, ensure_ascii=False), note, time.time()),
         )
     _drop_override_cache()
-    return {"code": code, "via": clean, "totalKm": km, "segKm": segs, "note": note}
+    # 线路库里没有的线名，展开中间站时用不上，回给界面提个醒
+    outside = sorted({(s.get("line") or "").strip() for s in clean
+                      if (s.get("line") or "").strip() and not cnrail.line(s.get("line"))})
+    return {"code": code, "via": clean, "totalKm": km, "segKm": segs, "note": note,
+            "outsideLines": outside}
 
 
 def clear_override(code: str) -> bool:
@@ -1252,7 +1256,9 @@ def build_route_payload(code: str, date: str, force: bool = False,
     if with_path:
         try:
             detail = cnrail.path_stations(
-                stops, prefer=[s.get("line") for s in (via.get("segs") or []) if s.get("line")])
+                stops,
+                prefer=[s.get("line") for s in (via.get("segs") or []) if s.get("line")],
+                via=via.get("segs") or [],)
         except Exception:                             # noqa: BLE001
             detail = []
         path = [{"lat": p["lat"], "lon": p["lon"], "km": p["km"]} for p in detail]

@@ -3930,13 +3930,18 @@ async function cuSave() {
   });
   cuMsg('', '保存中…');
   try {
-    await postJSON('/api/override', {
+    const r = await postJSON('/api/override', {
       code: d.code, via, totalKm: kmRaw ? Number(kmRaw) : null, note, segKm,
     });
     await cuOpen(d.code);
     const parts = [via.length ? `${via.length} 段人工经由已存为正式经由` : '没有人工段，未写入经由'];
     if (autoCount) parts.push(`${autoCount} 段自动推断仅作参考，未保存`);
     cuMsg('ok', '已保存 · ' + parts.join('；'));
+    const outside = (r && r.outsideLines) || [];
+    if (outside.length) {
+      cuMsg('bad', `已保存，但线路库里没有「${outside.join('」「')}」，`
+        + '这几段的中间站没法在地图上展开（其它段不受影响）');
+    }
     cuLoad();
   } catch (e) {
     cuMsg('bad', '保存失败：' + e.message);

@@ -592,13 +592,111 @@ def _pick_segment(ka_: str, kb_: str, ka: float, kb: float):
     return best
 
 
+def _via_hits(ka_: str, kb_: str, ka: float, kb: float, prefs) -> List[tuple]:
+    """
+    人工 / 自动推断已经指明了经由线路时，只在这些线的站序里找区间。
+
+    与 _pick_segment 的两点不同：
+      - 不看线路里程是否可信。京沪线 150 站里 92 站没有里程（kmReliable=False），
+        于是整条线进不了 _POS，人工写「京沪线」也匹配不上，中间站全丢；
+        但它的**站序**是准的，只要知道 a、b 在这条线上就能把中间站补出来。
+      - 里程口径对不上（ratio 超出 0.7~1.4）时不丢弃，而是把 ratio 置 None，
+        让调用方退回「按站序均分」来估每站的公里数。
+    """
+    if not prefs:
+        return []
+    hits = []
+    for li, pa in (_POSALL or {}).get(ka_, ()):
+        if _norm(_LINES[li]["name"]) not in prefs:
+            continue
+        lks = _LINES[li]["stations"]
+        for lj, pb in (_POSALL or {}).get(kb_, ()):
+            if lj != li or pb <= pa:
+                continue
+            lka, lkb = lks[pa].get("km"), lks[pb].get("km")
+            span, ratio = None, None
+            if lka is not None and lkb is not None and lkb - lka >= 1:
+                span = lkb - lka
+                r = (kb - ka) / span
+                if 0.7 <= r <= 1.4:
+                    ratio = r
+            hits.append((li, pa, pb, lka, span, ratio))
+    # 里程能对上的优先，其次取最直接的一段（避免把环线绕一圈的站序塞进来）
+    hits.sort(key=lambda c: (0 if c[5] else 1, c[2] - c[1]))
+    return hits
+
+
+def _via_chain(segs: Optional[Sequence[dict]]) -> List[tuple]:
+    """
+    把经由此番的线段解析成 [(线路序号, 起点下标, 终点下标)]，方向即运行方向。
+
+    线路库里没有的线名直接跳过（不影响其它段）；端站点在线路站序里找不到时也跳过。
+    """
+    chain: List[tuple] = []
+    idx = {ln["name"]: i for i, ln in enumerate(_LINES or [])}
+    for s in segs or []:
+        name = (s or {}).get("line") or ""
+        L = line(name)
+        if not L or L["name"] not in idx:
+            continue
+        st = L["stations"]
+        kf, kt = _key(s.get("from") or ""), _key(s.get("to") or "")
+        if not kf or not kt:
+            continue
+        pf = pt = None
+        for p, x in enumerate(st):
+            kx = _key(x.get("name") or "")
+            if pf is None and kx == kf:
+                pf = p
+            if pt is None and kx == kt:
+                pt = p
+        if pf is None or pt is None or pf == pt:
+            continue
+        chain.append((idx[L["name"]], pf, pt))
+    return chain
+
+
+def _chain_mids(chain: List[tuple], ka_: str, kb_: str) -> Optional[List[str]]:
+    """
+    a 到 b 跨越多条经由线段时（例如 通化 —梅集线→ 鸭园 —鸭大线→ 白山市，
+    而鸭园不是本趟车的经停站），把沿途中间站按运行顺序串出来。
+
+    找不到「a 起、b 止」的完整链路时返回 None，交给原来的单线展开逻辑。
+    """
+    for k, (li, pf, pt) in enumerate(chain):
+        lks = _LINES[li]["stations"]
+        stp = 1 if pt >= pf else -1
+        pa = next((p for p in range(pf, pt + stp, stp)
+                   if _key(lks[p].get("name") or "") == ka_), None)
+        if pa is None:
+            continue
+        mids: List[str] = []
+        for p in range(pa + stp, pt + stp, stp):
+            if _key(lks[p].get("name") or "") == kb_:
+                return mids
+            mids.append(lks[p].get("name"))
+        for li2, pf2, pt2 in chain[k + 1:]:
+            lks2 = _LINES[li2]["stations"]
+            st2 = 1 if pt2 >= pf2 else -1
+            for p in range(pf2, pt2 + st2, st2):
+                if _key(lks2[p].get("name") or "") == kb_:
+                    return mids
+                mids.append(lks2[p].get("name"))
+        return None
+    return None
+
+
 def path_stations(stops: Sequence[dict], max_points: int = 2000,
-                  prefer: Optional[Sequence[str]] = None) -> List[dict]:
+                  prefer: Optional[Sequence[str]] = None,
+                  via: Optional[Sequence[dict]] = None) -> List[dict]:
     """
     把「经停站序列」展开成「经由铁路线上的全部车站」：
     相邻两站若在同一条线路上，就把该线中间的站补进来，按里程比例映射到本趟车的里程坐标。
 
     prefer 是优先采用的线路名（人工 / 自动推断出来的经由），命中时优先按它展开。
+    via 是完整的经由区间 [{'line','from','to'}]，用于：
+      - 人工指定了线路但该线档案里程不可信时也能按站序展开；
+      - 相邻两站不在同一条线上时，按经由链路跨线串出中间站。
 
     返回 [{name, lat, lon, km, stop, idx}]：
       stop=True  本趟车停车（含始发、终到），idx 为在 stops 里的下标
@@ -608,6 +706,7 @@ def path_stations(stops: Sequence[dict], max_points: int = 2000,
     pts: List[dict] = []
     n = len(stops)
     prefs = [_norm(x) for x in (prefer or []) if x]
+    chain = _via_chain(via)
 
     def push(name, lat, lon, km, stop=False, idx=None):
         if lat is None or lon is None:
@@ -617,6 +716,8 @@ def path_stations(stops: Sequence[dict], max_points: int = 2000,
             nk = _norm(name)
             if nk.endswith("线路所") or nk.endswith("所") or nk.endswith("中继站") or "线路所" in nk:
                 return
+            # 线路库里常写成「董家庄站」，与 12306 车次站名对齐成「董家庄」
+            name = _key(name) or name
         if pts and _key(pts[-1]["name"]) == _key(name):
             pts[-1]["km"] = round(km, 1)
             if stop:
@@ -633,44 +734,53 @@ def path_stations(stops: Sequence[dict], max_points: int = 2000,
             break
         a, b = s, stops[i + 1]
         ka, kb = float(a.get("km") or 0.0), float(b.get("km") or 0.0)
-        best = _pick_segment(_key(a["name"]), _key(b["name"]), ka, kb)
-        if prefs and best is not None:
-            # 有经由记录时，优先用经由里点到的那条线
-            hits = []
-            for li, pa, lka in _POS.get(_key(a["name"]), ()):
-                for lj, pb, lkb in _POS.get(_key(b["name"]), ()):
-                    if li != lj or lka is None or lkb is None or pb <= pa:
-                        continue
-                    if _norm(_LINES[li]["name"]) not in prefs:
-                        continue
-                    span = lkb - lka
-                    if span < 1:
-                        continue
-                    ratio = (kb - ka) / span
-                    if 0.7 <= ratio <= 1.4:
-                        hits.append((li, pa, pb, lka, span, ratio))
-            if hits:
-                hits.sort(key=lambda c: c[2] - c[1])     # 同一对站取最直接的那一段
-                best = hits[0]
+        ka_, kb_ = _key(a["name"]), _key(b["name"])
+
+        # 1) 人工/自动推断点过名的线路，优先于按里程相似度猜出来的线
+        vh = _via_hits(ka_, kb_, ka, kb, prefs)
+        if not vh and chain:
+            # 2) 跨线：a、b 不同线，但经由里给了 a→…→b 的链路（中间还夹着非经停站）
+            names = _chain_mids(chain, ka_, kb_)
+            if names:
+                step = (kb - ka) / (len(names) + 1)
+                for k, nm in enumerate(names, start=1):
+                    c = coord(nm)
+                    if c:
+                        push(nm, c[0], c[1], ka + step * k)
+                if len(pts) > max_points:
+                    return pts
+                continue
+        best = vh[0] if vh else _pick_segment(ka_, kb_, ka, kb)
         if not best:
             continue
         li, pa, pb, lka, span, ratio = best
         line_pts = _LINES[li]["stations"]
-        for mid in line_pts[pa + 1:pb]:
-            c = coord(mid["name"])
-            if not c or mid["km"] is None:
-                continue
-            push(mid["name"], c[0], c[1], ka + (mid["km"] - lka) * ratio)
-            if len(pts) > max_points:
-                return pts
+        mids = line_pts[pa + 1:pb]
+        if ratio is None:
+            # 这条线的档案里程不全或口径不同：只能按站序均分，首尾仍钉在真实里程上
+            step = (kb - ka) / max(1, pb - pa)
+            for k, mid in enumerate(mids, start=1):
+                c = coord(mid["name"])
+                if not c:
+                    continue
+                push(mid["name"], c[0], c[1], ka + step * k)
+        else:
+            for mid in mids:
+                c = coord(mid["name"])
+                if not c or mid["km"] is None:
+                    continue
+                push(mid["name"], c[0], c[1], ka + (mid["km"] - lka) * ratio)
+        if len(pts) > max_points:
+            return pts
     return pts
 
 
 def expand_path(stops: Sequence[dict], max_points: int = 1500,
-                prefer: Optional[Sequence[str]] = None) -> List[dict]:
+                prefer: Optional[Sequence[str]] = None,
+                via: Optional[Sequence[dict]] = None) -> List[dict]:
     """同 path_stations，但只取画线需要的 {lat, lon, km}（km 单调递增）"""
     return [{"lat": p["lat"], "lon": p["lon"], "km": p["km"]}
-            for p in path_stations(stops, max_points, prefer)]
+            for p in path_stations(stops, max_points, prefer, via)]
 
 
 def stats() -> dict:

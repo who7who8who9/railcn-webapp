@@ -1643,11 +1643,11 @@ async function showStation(q) {
 }
 
 /* ---------- 线路里程：人工校正 ---------- */
-const LN = { data: null, segKm: {}, totalKm: '', editing: false, busy: false, mode: 'seg' };
+const LN = { data: null, segKm: {}, staKm: {}, totalKm: '', editing: false, busy: false, mode: 'seg', bad: {} };
 
 const lnKmText = v => (v == null ? '-' : `${v} km`);
 
-/** 「不详」记号：填这些等于把这一段里程标成明确不详（存 null，跟"没填"不一样） */
+/** 「不详」记号：填这些等于把这一段（或这一站）标成明确不详（存 null，跟"没填"不一样） */
 const LN_NA_RE = /^(?:-+|—+|–+|~+|～+|\?+|？+|不详|未知|没有|无|unknown|n\/?a)$/i;
 const lnIsNA = s => LN_NA_RE.test(String(s == null ? '' : s).trim());
 
@@ -1656,6 +1656,12 @@ const lnSegUnk = i => Object.prototype.hasOwnProperty.call(LN.segKm, i) && LN.se
 
 /** 这一段有没有人工输入（数值或"不详"） */
 const lnSegSet = i => Object.prototype.hasOwnProperty.call(LN.segKm, i);
+
+/** 这一站的累计里程是人工标的「不详」吗 */
+const lnStaUnk = i => Object.prototype.hasOwnProperty.call(LN.staKm, i) && LN.staKm[i] === null;
+
+/** 这一站的累计里程有没有人工输入（数值或"不详"） */
+const lnStaSet = i => Object.prototype.hasOwnProperty.call(LN.staKm, i);
 
 /** 档案区间里程（相邻两站相减），不详为 null */
 function lnSegBase(d) {
@@ -1682,7 +1688,7 @@ function lnEffective() {
     const i = Number(k);
     if (!(i >= 0 && i < seg.length)) return;
     const v = LN.segKm[k];
-    if (v === null) { seg[i] = null; manual.push(String(i)); }   // 明确不详
+    if (v === null) { seg[i] = null; manual.push(String(i)); }   // 这一段明确不明
     else if (typeof v === 'number' && Number.isFinite(v) && v > 0) { seg[i] = v; manual.push(String(i)); }
   });
   const total = Number(LN.totalKm);
@@ -1698,15 +1704,27 @@ function lnEffective() {
   }
   const st = (d && d.stations) || [];
   const cum = [];
-  if (st.length) cum[0] = st[0].kmBase == null ? 0 : st[0].kmBase;
-  let cur = cum[0];
+  if (st.length) {
+    if (lnStaSet(0)) cum[0] = LN.staKm[0];
+    else cum[0] = st[0].kmBase == null ? 0 : st[0].kmBase;
+  }
   for (let i = 0; i < seg.length; i++) {
     let v = null;
-    if (cur != null && seg[i] != null) v = Math.round((cur + seg[i]) * 10) / 10;
-    // 这一段不详：不影响后面的车站，下一站直接用档案里的累计里程续上
+    // 人工指定了这一站的累计里程：直接采用（null = 这一站明确不详）
+    if (lnStaSet(i + 1)) v = LN.staKm[i + 1];
+    else if (cum[i] != null && seg[i] != null) v = Math.round((cum[i] + seg[i]) * 10) / 10;
+    // 前一段不明：不影响后面的车站，这一站直接用档案里的累计里程续上
     else if (st[i + 1] && st[i + 1].kmBase != null) v = st[i + 1].kmBase;
     cum[i + 1] = v;
-    cur = v;
+  }
+  // 累计定下来后，区间按累计差回填（与后端一致）
+  for (let i = 0; i < seg.length; i++) {
+    if (lnSegUnk(i)) seg[i] = null;                       // 人工标了「这一段不明」
+    else if (cum[i] != null && cum[i + 1] != null && cum[i + 1] >= cum[i]) {
+      seg[i] = Math.round((cum[i + 1] - cum[i]) * 10) / 10;
+    } else if (lnStaSet(i) || lnStaSet(i + 1)) {
+      seg[i] = null;                                      // 站累计改过，段距以累计为准
+    }
   }
   return { seg, cum };
 }
@@ -1742,6 +1760,8 @@ function lnRenderSegs() {
     const v = has ? LN.segKm[i] : null;
     const delta = has && a != null ? Math.round((v - a) * 10) / 10 : null;
     const dtxt = delta == null ? '' : (Math.abs(delta) < 0.05 ? '=' : (delta > 0 ? '+' : '') + delta.toFixed(1));
+    const est = unk ? lnGeoKm(i, i + 1) : null;     // 标了不详：用两站坐标估个值
+    const estTitle = est == null ? '' : `按两站经纬度估算：直线 ${lnGeoDist(i, i + 1)} km × ${LN_GEO_K} ≈ ${est} km（点一下填入）`;
     return `<div class="seg-row${has ? ' manual' : ''}${unk ? ' unk' : ''}" data-i="${i}">
       <span class="i">${i + 1}</span>
       <span class="od" title="${esc(p.name)} → ${esc(st[i + 1].name)}">${esc(p.name)}<em>→</em>${esc(st[i + 1].name)}</span>
@@ -1750,7 +1770,7 @@ function lnRenderSegs() {
              title="留空沿用档案值${a == null ? '（档案也是不详）' : ' ' + a.toFixed(1) + ' km'}；填「-」表示这一段站间距不详（后面的车站照常计算）">
       <span class="u">km</span>
       <button class="seg-clr" title="恢复这一段的档案值"${has || unk ? '' : ' disabled'}>↺</button>
-      <span class="auto">${dtxt}</span>
+      <span class="auto${est != null ? ' est' : ''}"${estTitle ? ` title="${estTitle}"` : ''}>${est != null ? '≈' + est.toFixed(1) : dtxt}</span>
     </div>`;
   }).join('');
 
@@ -1768,10 +1788,15 @@ function lnRenderSegs() {
       const aEl = row.querySelector('.auto');
       if (aEl) {
         const dd = has && base != null ? Math.round((LN.segKm[i] - base) * 10) / 10 : null;
-        aEl.textContent = dd == null ? '' : (Math.abs(dd) < 0.05 ? '=' : (dd > 0 ? '+' : '') + dd.toFixed(1));
+        const est = unk ? lnGeoKm(i, i + 1) : null;
+        aEl.classList.toggle('est', est != null);
+        aEl.title = est != null
+          ? `按两站经纬度估算：直线 ${lnGeoDist(i, i + 1)} km × ${LN_GEO_K} ≈ ${est} km（点一下填入）` : '';
+        aEl.textContent = est != null ? '≈' + est.toFixed(1)
+          : (dd == null ? '' : (Math.abs(dd) < 0.05 ? '=' : (dd > 0 ? '+' : '') + dd.toFixed(1)));
       }
     };
-    const apply = () => {
+    const apply = (silent) => {
       const raw = inp.value.trim();
       if (raw === '') {
         delete LN.segKm[i];                       // 空 = 沿用档案值
@@ -1783,7 +1808,8 @@ function lnRenderSegs() {
         const n = Number(raw.replace(/[^0-9.]/g, ''));
         if (!Number.isFinite(n) || n <= 0 || n > 5000) {
           row.classList.add('bad');
-          lnSetDirty(`第 ${i + 1} 段要填正数（km），或填「-」表示不详`, true);
+          if (!silent) lnSetDirty(`第 ${i + 1} 段要填正数（km），或填「-」表示不详`, true);
+          lnMarkSave();
           return;
         }
         LN.segKm[i] = Math.round(n * 10) / 10;
@@ -1791,9 +1817,10 @@ function lnRenderSegs() {
       }
       repaint();
       lnRefreshPreview();
+      lnMarkSave();
       lnSetDirty('有未保存的修改');
     };
-    inp.addEventListener('input', apply);
+    inp.addEventListener('input', () => apply(true));   // 输入过程中别刷红字
     inp.addEventListener('blur', () => {
       if (lnSegUnk(i)) inp.value = '-';           // 统一显示成半角 -
       apply();
@@ -1812,7 +1839,17 @@ function lnRenderSegs() {
       const aEl = row.querySelector('.auto');
       if (aEl) aEl.textContent = '';
       lnRefreshPreview();
+      lnMarkSave();
       lnSetDirty('有未保存的修改');
+    });
+    // 「≈62.1」：按两站经纬度估个里程，点一下填进输入框
+    const aEl = row.querySelector('.auto');
+    if (aEl) aEl.addEventListener('click', () => {
+      const g = lnGeoKm(i, i + 1);
+      if (g == null) { lnSetDirty('两站缺坐标，估不出来', true); return; }
+      inp.value = String(g);
+      apply();
+      lnSetDirty(`已按坐标估成 ${g} km（直线 ${lnGeoDist(i, i + 1)} × ${LN_GEO_K}），可再手改`);
     });
   });
 }
@@ -1829,22 +1866,22 @@ function lnRenderCum() {
   const first = st[0].name;
   boxEl.innerHTML = st.slice(1).map((p, k) => {
     const i = k + 1;
-    const unk = lnSegUnk(i - 1);
-    const has = lnSegSet(i - 1) && !unk;
-    const prev = eff.cum[i - 1], cur = eff.cum[i], base = baseCum[i];
-    const locked = prev == null && !unk;
+    const unk = lnStaUnk(i);                        // 这一站的累计人工标了「不详」
+    const has = lnStaSet(i) && !unk;                // 这一站人工填了数字
+    const cur = eff.cum[i], base = baseCum[i];
     const dd = (cur != null && base != null) ? Math.round((cur - base) * 10) / 10 : null;
     const dtxt = dd == null ? '' : (Math.abs(dd) < 0.05 ? '=' : (dd > 0 ? '+' : '') + dd.toFixed(1));
-    return `<div class="seg-row cum${has ? ' manual' : ''}${unk ? ' unk' : ''}${locked ? ' lock' : ''}" data-i="${i}">
+    const est = unk ? lnGeoKm(i - 1, i) : null;     // 这一站不详：到上一站的坐标估算
+    const estTitle = est == null ? '' : `按两站经纬度估算：直线 ${lnGeoDist(i - 1, i)} km × ${LN_GEO_K} ≈ ${est} km（点一下按"上一站累计 + 它"填入）`;
+    return `<div class="seg-row cum${has ? ' manual' : ''}${unk ? ' unk' : ''}" data-i="${i}">
       <span class="i">${i + 1}</span>
       <span class="od" title="自 ${esc(first)} 起算">${esc(p.name)}</span>
       <input class="km" type="text" inputmode="decimal" autocomplete="off"
              value="${unk ? '-' : (has && cur != null ? cur : '')}" placeholder="${cur == null ? '-' : cur.toFixed(1)}"
-             ${locked ? 'disabled' : ''}
-             title="${locked ? '前面有里程不详的区间，先切到「按段距」补齐' : `留空沿用当前累计 ${cur == null ? '-' : cur.toFixed(1)} km；填「-」表示这一段站间距不详（后面的车站照常按档案里程计算）`}">
+             title="留空沿用当前累计 ${cur == null ? '-' : cur.toFixed(1)} km；填「-」表示这一站里程不详（不影响后面的车站）">
       <span class="u">km</span>
       <button class="seg-clr" title="恢复档案值"${has || unk ? '' : ' disabled'}>↺</button>
-      <span class="auto">${dtxt}</span>
+      <span class="auto${est != null ? ' est' : ''}"${estTitle ? ` title="${estTitle}"` : ''}>${est != null ? '≈' + est.toFixed(1) : dtxt}</span>
     </div>`;
   }).join('');
 
@@ -1852,39 +1889,47 @@ function lnRenderCum() {
     const i = Number(row.dataset.i);
     const inp = row.querySelector('input.km');
     const clr = row.querySelector('.seg-clr');
-    const apply = () => {
+    const apply = (silent) => {
       const raw = inp.value.trim();
       if (raw === '') {
-        delete LN.segKm[i - 1];
+        delete LN.staKm[i];                        // 空 = 沿用档案 / 累加值
         row.classList.remove('manual', 'bad', 'unk');
         clr.disabled = true;
       } else if (lnIsNA(raw)) {
-        LN.segKm[i - 1] = null;                     // - = 这一站起累计不详
-        row.classList.remove('bad');
+        LN.staKm[i] = null;                        // - = 这一站的累计里程不详
+        row.classList.remove('bad', 'manual');
         row.classList.add('unk');
         clr.disabled = false;
       } else {
-        const c = Number(raw.replace(/[^0-9.]/g, ''));
-        const prev = lnEffective().cum[i - 1];
-        const dv = (prev == null || !Number.isFinite(c)) ? null : Math.round((c - prev) * 10) / 10;
-        if (dv == null || dv <= 0) {
+        const c = Math.round(Number(raw.replace(/[^0-9.]/g, '')) * 10) / 10;
+        // 前面最近一个「已知」的累计里程：不能比它还小
+        const cumNow = lnEffective().cum;
+        let prev = null, prevName = '';
+        for (let j = i - 1; j >= 0; j--) {
+          if (lnStaSet(j) && LN.staKm[j] === null) continue;   // 人工标了不详，跳过
+          if (cumNow[j] != null) { prev = cumNow[j]; prevName = st[j].name; break; }
+        }
+        if (!Number.isFinite(c) || c < 0 || (prev != null && c <= prev)) {
           row.classList.add('bad');
-          lnSetDirty(prev == null
-            ? '前面有里程不详的区间，先切到「按段距」补齐'
-            : `第 ${i + 1} 站的累计要大于前一站的 ${prev.toFixed(1)} km`, true);
+          const nm = st[i] ? st[i].name : `第 ${i + 1} 站`;
+          if (!silent) lnSetDirty(prev != null
+            ? `${nm} 的累计要大于前面 ${prevName} 的 ${prev.toFixed(1)} km`
+            : `${nm} 的累计要填正数`, true);
+          lnMarkSave();
           return;
         }
         row.classList.remove('bad', 'unk');
         row.classList.add('manual');
         clr.disabled = false;
-        LN.segKm[i - 1] = dv;
+        LN.staKm[i] = c;                           // 直接指定这一站的累计里程
       }
       lnRefreshCumRows();
       lnRefreshPreview();
+      lnMarkSave();
       lnSetDirty('有未保存的修改');
     };
-    inp.addEventListener('input', apply);
-    inp.addEventListener('blur', () => { if (lnSegUnk(i - 1)) inp.value = '-'; });
+    inp.addEventListener('input', () => apply(true));
+    inp.addEventListener('blur', () => { if (lnStaUnk(i)) inp.value = '-'; apply(); });
     inp.addEventListener('keydown', e => {
       if (e.key !== 'Enter') return;
       e.preventDefault();
@@ -1892,10 +1937,23 @@ function lnRenderCum() {
       if (next) next.querySelector('input.km').focus(); else inp.blur();
     });
     clr.addEventListener('click', () => {
-      delete LN.segKm[i - 1];
+      delete LN.staKm[i];
       lnRenderSegs();
       lnRefreshPreview();
+      lnMarkSave();
       lnSetDirty('有未保存的修改');
+    });
+    // 「≈62.1」：上一站累计 + 两站坐标估算的段距
+    const aEl = row.querySelector('.auto');
+    if (aEl) aEl.addEventListener('click', () => {
+      const segEst = lnGeoKm(i - 1, i);
+      if (segEst == null) { lnSetDirty('两站缺坐标，估不出来', true); return; }
+      const prevCum = lnEffective().cum[i - 1];
+      if (prevCum == null) { lnSetDirty('上一站里程也不详，先给上一站一个值', true); return; }
+      const v = Math.round((prevCum + segEst) * 10) / 10;
+      inp.value = String(v);
+      apply();
+      lnSetDirty(`已按坐标估成 ${v} km（上一站 ${prevCum} + 直线 ${lnGeoDist(i - 1, i)} × ${LN_GEO_K}），可再手改`);
     });
   });
 }
@@ -1906,8 +1964,8 @@ function lnRefreshCumRows() {
   $$('#lnSegs .seg-row.cum').forEach(row => {
     const i = Number(row.dataset.i);
     const inp = row.querySelector('input.km');
-    const unk = lnSegUnk(i - 1);
-    const has = lnSegSet(i - 1) && !unk;
+    const unk = lnStaUnk(i);
+    const has = lnStaSet(i) && !unk;
     if (document.activeElement !== inp) {
       inp.value = unk ? '-' : (has && eff.cum[i] != null ? eff.cum[i] : '');
       inp.placeholder = eff.cum[i] == null ? '-' : eff.cum[i].toFixed(1);
@@ -1916,9 +1974,34 @@ function lnRefreshCumRows() {
     const dd = (has && eff.cum[i] != null && baseCum[i] != null)
       ? Math.round((eff.cum[i] - baseCum[i]) * 10) / 10 : null;
     const el = row.querySelector('.auto');
-    if (el) el.textContent = dd == null ? '' : (Math.abs(dd) < 0.05 ? '=' : (dd > 0 ? '+' : '') + dd.toFixed(1));
+    if (el) {
+      const est = unk ? lnGeoKm(i - 1, i) : null;
+      el.classList.toggle('est', est != null);
+      el.title = est != null
+        ? `按两站经纬度估算：直线 ${lnGeoDist(i - 1, i)} km × ${LN_GEO_K} ≈ ${est} km（点一下按"上一站累计 + 它"填入）` : '';
+      el.textContent = est != null ? '≈' + est.toFixed(1)
+        : (dd == null ? '' : (Math.abs(dd) < 0.05 ? '=' : (dd > 0 ? '+' : '') + dd.toFixed(1)));
+    }
   });
 }
+
+/** 两站之间的直线距离（haversine，km），坐标不全返回 null */
+function lnGeoDist(i, j) {
+  const st = (LN.data && LN.data.stations) || [];
+  const a = st[i], b = st[j];
+  if (!a || !b || a.lat == null || a.lon == null || b.lat == null || b.lon == null) return null;
+  const rad = x => x * Math.PI / 180;
+  const dLat = rad(b.lat - a.lat), dLon = rad(b.lon - a.lon);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLon / 2) ** 2;
+  return Math.round(2 * 6371 * Math.asin(Math.sqrt(Math.min(1, h))) * 10) / 10;
+}
+
+/** 直线距离 → 铁路里程的经验折算（线路不会笔直，普速线普遍 1.2~1.3 倍） */
+const LN_GEO_K = 1.25;
+const lnGeoKm = (i, j) => {
+  const d = lnGeoDist(i, j);
+  return d == null ? null : Math.round(d * LN_GEO_K * 10) / 10;
+};
 
 /** 只重画里程数字：合计 + 各站累计（不碰输入框，避免丢焦点） */
 function lnRefreshPreview() {
@@ -1942,8 +2025,10 @@ function lnRefreshPreview() {
       if (k) k.textContent = lnKmText(cum[i]);
     });
   }
-  const nManual = Object.keys(LN.segKm).filter(k => LN.segKm[k] != null).length;
-  const nUnk = Object.keys(LN.segKm).filter(k => LN.segKm[k] === null).length;
+  const nManual = Object.keys(LN.segKm).filter(k => LN.segKm[k] != null).length
+    + Object.keys(LN.staKm).filter(k => LN.staKm[k] != null).length;
+  const nUnk = Object.keys(LN.segKm).filter(k => LN.segKm[k] === null).length
+    + Object.keys(LN.staKm).filter(k => LN.staKm[k] === null).length;
   const warn = $('#lnWarn');
   if (warn) {
     const decl = hasTyped ? typed : (LN.data && LN.data.totalKm);
@@ -1954,28 +2039,46 @@ function lnRefreshPreview() {
   if (tag) {
     tag.textContent = [
       `${st.length} 站`,
-      nManual ? `手填 ${nManual} 段` : '',
-      nUnk ? `不详 ${nUnk} 段` : '',
+      nManual ? `手填 ${nManual} 处` : '',
+      nUnk ? `不详 ${nUnk} 处` : '',
       LN.totalKm !== '' ? `总里程 ${LN.totalKm} km` : '',
     ].filter(Boolean).join(' · ');
   }
 }
 
+/** 有非法输入时把保存按钮标出来，避免"以为存上了其实没存" */
+function lnMarkSave() {
+  const btn = $('#lnSave');
+  if (!btn) return;
+  const n = $$('#lnSegs .seg-row.bad').length;
+  btn.classList.toggle('bad', n > 0);
+  btn.title = n ? `有 ${n} 处输入不合法，先修正再保存` : '保存到线路库';
+}
+
 async function lnSave() {
   if (LN.busy || !LN.data) return;
+  const nbad = $$('#lnSegs .seg-row.bad').length;
+  if (nbad) {                       // 有非法输入就不要假装保存成功
+    lnSetDirty(`有 ${nbad} 处输入不合法，先修正再保存`, true);
+    lnMarkSave();
+    return;
+  }
   LN.busy = true;
   lnSetDirty('保存中…');
   try {
     const r = await postJSON('/api/line/km', {
       name: LN.data.name,
       segKm: LN.segKm,
+      staKm: LN.staKm,
       totalKm: LN.totalKm === '' ? null : Number(LN.totalKm),
     });
     LN.data = r.line;
     LN.segKm = { ...((r.line.override && r.line.override.segKm) || {}) };
+    LN.staKm = { ...((r.line.override && r.line.override.staKm) || {}) };
     LN.totalKm = r.line.override && r.line.override.totalKm != null ? String(r.line.override.totalKm) : '';
     lnRenderHead();
     lnRenderEditor();
+    lnMarkSave();
     lnSetDirty('已保存');
   } catch (e) {
     lnSetDirty('保存失败：' + e.message);
@@ -1992,6 +2095,7 @@ async function lnResetAll() {
     const r = await postJSON('/api/line/km/clear', { name: LN.data.name });
     LN.data = r.line;
     LN.segKm = {};
+    LN.staKm = {};
     LN.totalKm = '';
     lnRenderHead();
     lnRenderEditor();
@@ -2037,7 +2141,7 @@ function lnRenderHead() {
       }
       try {
         await postJSON('/api/line/delete', { name: d.name });
-        LN.data = null; LN.segKm = {}; LN.totalKm = ''; LN.editing = false;
+        LN.data = null; LN.segKm = {}; LN.staKm = {}; LN.totalKm = ''; LN.editing = false;
         lnWide(false);
         $('#netDetail').classList.remove('show');
         $('#paneNet').classList.remove('line-only');
@@ -2067,7 +2171,7 @@ function lnRenderEditor() {
       </div>
       <span class="lnkm-hint">${LN.mode === 'seg'
         ? '灰字是档案值，留空沿用；填数字锁住这一段；填「-」表示这一段站间距不详（不计入累加，后面的车站照常算）'
-        : '填「从起点站到这一站」的累计公里数；填「-」表示这一段站间距不详（后面的车站仍按档案里程计算）'}</span>
+        : '填「从起点站到这一站」的累计公里数；填「-」表示这一站的里程不详（不影响后面的车站）'}</span>
       <div class="lnkm-btns">
         <button class="btn sm primary" id="lnSave">保存</button>
         <button class="btn sm" id="lnResetAll">全部恢复档案</button>
@@ -2086,7 +2190,9 @@ function lnRenderEditor() {
       <span class="lnkm-warn" id="lnWarn"></span>
       <span class="lnkm-seg" id="lnMsg"></span>
     </div>
-    <div class="ve-note">档案里 ${segs.length} 段，其中 ${known} 段有里程（其余不详）。填「-」= 这一段站间距明确不详，不参与累加，后面的车站仍按档案里程计算；填总里程时只有没手填、也没标不详的段会等比缩放。保存后车次详情、地图、时间轴全部同步。</div>`;
+    <div class="ve-note">${LN.mode === 'seg'
+      ? `档案里 ${segs.length} 段，其中 ${known} 段有里程（其余不详）。填「-」= 这一段站间距明确不详，不参与累加，后面的车站仍按档案里程计算；标了「-」的行尾会出现「≈」，那是用两站经纬度算的直线距离 × ${LN_GEO_K}，点一下就能填进去当参考。填总里程时只有没手填、也没标不详的段会等比缩放。`
+      : `按累计填写时，填了数字的站就以你填的为准（后面没填的站按档案段距顺延），留空沿用档案值。填「-」= 这一站的里程不详，不影响后面的车站；标了「-」的行尾会出现「≈」，那是「上一站的累计 + 两站经纬度估算的段距」，点一下就能填进来。`}保存后车次详情、地图、时间轴全部同步。</div>`;
 
   $$('#lnMode button').forEach(b => b.addEventListener('click', () => {
     if (LN.mode === b.dataset.mode) return;
@@ -2096,11 +2202,13 @@ function lnRenderEditor() {
   }));
 
   lnRenderSegs();
+  lnMarkSave();
   $('#lnSave').addEventListener('click', lnSave);
   $('#lnResetAll').addEventListener('click', lnResetAll);
   $('#lnCancel').addEventListener('click', () => {
     LN.editing = false;
     LN.segKm = { ...((LN.data.override && LN.data.override.segKm) || {}) };
+    LN.staKm = { ...((LN.data.override && LN.data.override.staKm) || {}) };
     LN.totalKm = LN.data.override && LN.data.override.totalKm != null ? String(LN.data.override.totalKm) : '';
     lnWide(false);
     lnRenderHead();
@@ -2142,6 +2250,7 @@ async function showLine(q) {
     LN.editing = false;
     lnWide(false);
     LN.segKm = { ...((d.override && d.override.segKm) || {}) };
+    LN.staKm = { ...((d.override && d.override.staKm) || {}) };
     LN.totalKm = d.override && d.override.totalKm != null ? String(d.override.totalKm) : '';
     det.innerHTML = `
       <div class="dhead" id="lnHead"></div>

@@ -659,6 +659,11 @@ a{color:var(--accent)}
 .seg-row.unk{background:#fffaf0}
 .seg-row.unk input.km{border-color:#f0d9a8;color:#a8741a;font-weight:600;text-align:center}
 .seg-row.unk .auto{color:#b98a2c}
+/* 标了「不详」的行尾给一个按经纬度估出来的参考值，点一下填入 */
+.seg-row .auto.est{cursor:pointer;color:#7c8aa0;border-bottom:1px dashed #c3cddd}
+.seg-row .auto.est:hover{color:var(--accent);border-bottom-color:var(--accent)}
+.btn#lnSave.bad{background:#fdeceb;border-color:#f0c0bb;color:#b42318}
+.btn#lnSave.bad:hover{background:#fbd8d5}
 .seg-row.bad input.km{border-color:#e8a39c;box-shadow:0 0 0 2px rgba(217,45,32,.10)}
 .seg-note b{color:#33415c}
 .st-line .k .chg{font-style:normal;font-size:9.5px;color:#0f7a45;background:#e8f6ee;

@@ -107,10 +107,11 @@ def init_db() -> None:
                 updated_at  REAL
             );
 
-            -- 人工校正：线路里程（按线路，站间 / 总里程）
+            -- 人工校正：线路里程（按线路，站间 / 总里程 / 站累计）
             CREATE TABLE IF NOT EXISTS line_override (
                 name        TEXT PRIMARY KEY,
                 seg_km_json TEXT,          -- {"0":12.3} 站间里程，键是区间序号
+                sta_km_json TEXT,          -- {"15":163.0} 站累计里程，键是车站序号；null = 这一站明确不详
                 total_km    REAL,          -- 手工线路总里程，未手填段按比例缩放
                 note        TEXT,
                 updated_at  REAL
@@ -164,6 +165,10 @@ def init_db() -> None:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(train_override)")}
         if "seg_km_json" not in cols:
             conn.execute("ALTER TABLE train_override ADD COLUMN seg_km_json TEXT")
+        # 老库迁移：线路里程的「站累计」也是后加的列
+        lcols = {r[1] for r in conn.execute("PRAGMA table_info(line_override)")}
+        if "sta_km_json" not in lcols:
+            conn.execute("ALTER TABLE line_override ADD COLUMN sta_km_json TEXT")
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +250,43 @@ def _clean_seg_km(seg_km) -> Dict[str, Optional[float]]:
         except (TypeError, ValueError):
             continue
         if not (0 < km <= 5000):
+            continue
+        out[str(idx)] = round(km, 1)
+    return out
+
+
+def _clean_sta_km(sta_km) -> Dict[str, Optional[float]]:
+    """站累计里程整理成 {"15": 163.0}：键是车站序号，值是「自起点站算起的公里数」。
+
+    None 或 "-" 表示**这一站**的累计里程明确不详（与「没填」不同：没填会沿用档案值）。
+    """
+    out: Dict[str, Optional[float]] = {}
+    if not sta_km:
+        return out
+    if isinstance(sta_km, dict):
+        items = list(sta_km.items())
+    elif isinstance(sta_km, (list, tuple)):
+        items = list(enumerate(sta_km))
+    else:
+        return out
+    for k, v in items:
+        try:
+            idx = int(k)
+        except (TypeError, ValueError):
+            continue
+        if idx < 0:
+            continue
+        if v is None:
+            out[str(idx)] = None
+            continue
+        if isinstance(v, str) and v.strip().lower() in _NA_TOKENS:
+            out[str(idx)] = None
+            continue
+        try:
+            km = float(v)
+        except (TypeError, ValueError):
+            continue
+        if not (0 <= km <= 20000):
             continue
         out[str(idx)] = round(km, 1)
     return out
@@ -375,7 +417,7 @@ def list_line_overrides() -> Dict[str, dict]:
     try:
         with db() as conn:
             rows = conn.execute(
-                "SELECT name, seg_km_json, total_km, note, updated_at FROM line_override"
+                "SELECT name, seg_km_json, sta_km_json, total_km, note, updated_at FROM line_override"
             ).fetchall()
     except sqlite3.Error:
         return {}
@@ -385,8 +427,12 @@ def list_line_overrides() -> Dict[str, dict]:
             seg = _clean_seg_km(json.loads(row["seg_km_json"] or "{}"))
         except (TypeError, ValueError):
             seg = {}
+        try:
+            sta = _clean_sta_km(json.loads(row["sta_km_json"] or "{}"))
+        except (TypeError, ValueError):
+            sta = {}
         out[row["name"]] = {
-            "segKm": seg, "totalKm": row["total_km"],
+            "segKm": seg, "staKm": sta, "totalKm": row["total_km"],
             "note": row["note"], "updatedAt": row["updated_at"],
         }
     return out
@@ -402,7 +448,8 @@ def line_override_map() -> Dict[str, dict]:
 def _apply_line_overrides() -> None:
     """把库里的人工线路里程灌进 cnrail，并重建「站名→线路里程」索引"""
     cnrail.set_line_overrides({
-        name: {"segKm": ov.get("segKm") or {}, "totalKm": ov.get("totalKm")}
+        name: {"segKm": ov.get("segKm") or {}, "staKm": ov.get("staKm") or {},
+               "totalKm": ov.get("totalKm")}
         for name, ov in line_override_map().items()
     })
 
@@ -616,17 +663,20 @@ def get_line_override(name: str) -> Optional[dict]:
     return {"name": ln["name"], **ov} if ov else None
 
 
-def save_line_override(name: str, seg_km=None, total_km=None, note: str = "") -> dict:
+def save_line_override(name: str, seg_km=None, total_km=None, note: str = "",
+                       sta_km=None) -> dict:
     """
-    保存线路里程人工校正：seg_km 键为区间序号（第 i 站 → 第 i+1 站）。
-    全部为空即撤销，回到档案值。站间里程与总里程可同时给：
-    给了总里程时只把「没手填」的段等比缩放到 totalKm − 手填段之和。
+    保存线路里程人工校正：
+      seg_km 键为区间序号（第 i 站 → 第 i+1 站），值是这一段站间距；
+      sta_km 键为车站序号，值是「自起点站算起的累计里程」，None = 这一站明确不详。
+    全部为空即撤销，回到档案值。给了总里程时只把「没手填」的段等比缩放到 totalKm − 手填段之和。
     """
     ln = cnrail.line(name)
     if not ln:
         raise ValueError("线路库里没有这条线：" + str(name or ""))
     lname = ln["name"]
     segs = _clean_seg_km(seg_km)
+    stas = _clean_sta_km(sta_km)
     try:
         km = float(total_km) if total_km not in (None, "", 0) else None
     except (TypeError, ValueError):
@@ -634,29 +684,35 @@ def save_line_override(name: str, seg_km=None, total_km=None, note: str = "") ->
     if km is not None and not (1 <= km <= 20000):
         raise ValueError("线路总里程超出合理范围（1~20000 km）")
 
-    nseg = max(len(ln.get("stations") or []) - 1, 0)
+    nst = len(ln.get("stations") or [])
+    nseg = max(nst - 1, 0)
     bad = [k for k in segs if int(k) >= nseg]
     if bad:
         raise ValueError(f"区间序号超出范围（这条线共 {nseg} 段）")
+    bad = [k for k in stas if int(k) >= nst]
+    if bad:
+        raise ValueError(f"车站序号超出范围（这条线共 {nst} 站）")
 
     note = (note or "").strip()
-    if not segs and km is None and not note:
+    if not segs and not stas and km is None and not note:
         clear_line_override(lname)
         return {"name": lname, "cleared": True}
 
     with _db_lock, db() as conn:
         conn.execute(
-            """INSERT INTO line_override(name, seg_km_json, total_km, note, updated_at)
-               VALUES(?,?,?,?,?)
+            """INSERT INTO line_override(name, seg_km_json, sta_km_json, total_km, note, updated_at)
+               VALUES(?,?,?,?,?,?)
                ON CONFLICT(name) DO UPDATE SET
-                 seg_km_json=excluded.seg_km_json, total_km=excluded.total_km,
+                 seg_km_json=excluded.seg_km_json, sta_km_json=excluded.sta_km_json,
+                 total_km=excluded.total_km,
                  note=excluded.note, updated_at=excluded.updated_at""",
-            (lname, json.dumps(segs, ensure_ascii=False), km, note, time.time()),
+            (lname, json.dumps(segs, ensure_ascii=False),
+             json.dumps(stas, ensure_ascii=False), km, note, time.time()),
         )
     global _line_ovr_cache
     _line_ovr_cache = None
     _apply_line_overrides()
-    return {"name": lname, "segKm": segs, "totalKm": km, "note": note}
+    return {"name": lname, "segKm": segs, "staKm": stas, "totalKm": km, "note": note}
 
 
 def clear_line_override(name: str) -> bool:

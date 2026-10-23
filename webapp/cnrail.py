@@ -120,16 +120,25 @@ def load(force: bool = False) -> bool:
     return True
 
 
+_NA_SEG = ("-", "--", "—", "——", "–", "~", "～", "?", "？", "不详", "未知", "无", "n/a", "na", "unknown")
+
+
+def _is_na(v) -> bool:
+    return v is None or (isinstance(v, str) and v.strip().lower() in _NA_SEG)
+
+
 def _rebuild_km(stations: List[dict], seg_km: Optional[dict] = None,
-                total_km: Optional[float] = None) -> Tuple[List[Optional[float]], List[Optional[float]]]:
+                total_km: Optional[float] = None,
+                sta_km: Optional[dict] = None) -> Tuple[List[Optional[float]], List[Optional[float]]]:
     """
-    由「站间里程」重建累计里程。返回 (累计, 区间)。
+    由「站间里程 / 站累计里程」重建累计里程。返回 (累计, 区间)。
 
     区间：档案有前后两站里程时取差；人工填的段覆盖。
-    累计：不详的段本身不计（区间为 None），但下一站能用档案累计里程续上，
-          后面的段照常累加——「不详」不连累后面的车站。
+    累计：站点被人工指定了累计里程就直接采用（None = 这一站明确不详）；
+          否则按上一站累加，累加不出来（前一段不详）时用档案累计里程续上，
+          后面的段照常累加——一站不详不连累后面的车站。
     给了总里程时，只把**没手填**的段等比缩放到 total_km − 手填段之和。
-    seg_km 里值为 None 的段表示「明确不详」：即使档案里有值也不当站间距用，且不参与总里程缩放。
+    seg_km 里值为 None 的段表示「这一段区间不明」：即使档案里有值也不当站间距用，不参与缩放。
     """
     n = len(stations)
     base = [p.get("km") for p in stations]
@@ -148,7 +157,7 @@ def _rebuild_km(stations: List[dict], seg_km: Optional[dict] = None,
             continue
         if not (0 <= i < n - 1):
             continue
-        if v is None or (isinstance(v, str) and v.strip() in ("-", "—", "不详", "未知", "?")):
+        if _is_na(v):
             seg[i] = None
             unknown.add(i)
             continue
@@ -170,20 +179,53 @@ def _rebuild_km(stations: List[dict], seg_km: Optional[dict] = None,
                 if seg[i] is not None:
                     seg[i] = round(seg[i] * r, 1)
 
-    # 累计：某个区间不详只影响**这一段本身**（显示 None，不参与累加），
-    # 下一站若档案里有确定的累计里程，就以档案值为新锚点续上，后面的区间照常累加。
+    # 人工指定的「站累计里程」：这一站就是这么多（None = 这一站里程明确不详）
+    sta: Dict[int, Optional[float]] = {}
+    for k, v in (sta_km or {}).items():
+        try:
+            i = int(k)
+        except (TypeError, ValueError):
+            continue
+        if not (0 <= i < n):
+            continue
+        if _is_na(v):
+            sta[i] = None
+            continue
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= f <= 20000:
+            sta[i] = round(f, 1)
+
+    # 累计：先看有没有人工指定这一站，其次按上一站累加，累加不出来再退回档案累计里程。
     cum: List[Optional[float]] = [None] * n
     if n:
-        cum[0] = round(float(base[0]), 1) if base[0] is not None else 0.0
-        cur = cum[0]
+        if 0 in sta:
+            cum[0] = sta[0]
+        elif base[0] is not None:
+            cum[0] = round(float(base[0]), 1)
+        else:
+            cum[0] = 0.0
         for i in range(n - 1):
-            val: Optional[float] = None
-            if cur is not None and seg[i] is not None:
-                val = round(cur + seg[i], 1)
+            if (i + 1) in sta:
+                val: Optional[float] = sta[i + 1]
+            elif cum[i] is not None and seg[i] is not None:
+                val = round(cum[i] + seg[i], 1)
             elif base[i + 1] is not None:
                 val = round(float(base[i + 1]), 1)
+            else:
+                val = None
             cum[i + 1] = val
-            cur = val
+    # 最终累计定下来后，区间按累计差回填（两端都确定且不倒挂时）。
+    # 人工标过「这一段不明」的保持不明；站累计被人工改过的段，以累计为准。
+    for i in range(n - 1):
+        if i in unknown:
+            seg[i] = None
+        elif cum[i] is not None and cum[i + 1] is not None and cum[i + 1] >= cum[i]:
+            seg[i] = round(cum[i + 1] - cum[i], 1)
+        elif i in sta or (i + 1) in sta:
+            seg[i] = None
     return cum, seg
 
 
@@ -197,7 +239,7 @@ def _line_with_override(raw: dict, ov: Optional[dict]) -> dict:
     if not ov:
         return ln
 
-    cum, seg = _rebuild_km(stations, ov.get("segKm"), ov.get("totalKm"))
+    cum, seg = _rebuild_km(stations, ov.get("segKm"), ov.get("totalKm"), ov.get("staKm"))
     for p, c in zip(stations, cum):
         p["kmBase"] = p.get("km")
         p["km"] = c
@@ -380,7 +422,8 @@ def line_detail(name: str) -> Optional[dict]:
             seg.append(round(float(b) - float(a), 1) if (a is not None and b is not None) else None)
     ov = _LINE_OVR.get(ln["name"]) or {}
     return {**ln, "stations": pts, "segKm": seg,
-            "override": {"segKm": ov.get("segKm") or {}, "totalKm": ov.get("totalKm"),
+            "override": {"segKm": ov.get("segKm") or {}, "staKm": ov.get("staKm") or {},
+                         "totalKm": ov.get("totalKm"),
                          "note": ov.get("note") or ""} if ov else None,
             "coordCoverage": round(sum(1 for p in pts if p["lat"] is not None) / max(n, 1) * 100, 1)}
 

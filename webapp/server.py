@@ -138,6 +138,7 @@ class Handler(BaseHTTPRequestHandler):
                     payload.get("segKm") or {},
                     payload.get("totalKm"),
                     payload.get("note") or "",
+                    payload.get("staKm") or {},
                 )
                 return self.json({"ok": True, **res,
                                   "line": cnrail.line_detail(res["name"])})

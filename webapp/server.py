@@ -143,6 +143,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json({"ok": True, **res,
                                   "line": cnrail.line_detail(res["name"])})
 
+            if path == "/api/line/km/rebase":
+                res = railcore.rebase_km_from_catalog(payload.get("name"),
+                                                      bool(payload.get("save", True)))
+                return self.json({"ok": True, **res,
+                                  "line": cnrail.line_detail(res["name"])})
+
             if path == "/api/line/km/clear":
                 res = railcore.clear_line_override(payload.get("name"))
                 return self.json({"ok": True, "cleared": res,
@@ -161,6 +167,10 @@ class Handler(BaseHTTPRequestHandler):
                     payload.get("name"), payload.get("stations") or [],
                     payload.get("note") or "",
                 )
+                return self.json({"ok": True, "line": ln})
+
+            if path == "/api/line/catalog/add":
+                ln = railcore.add_catalog_line(payload.get("id"))
                 return self.json({"ok": True, "line": ln})
 
             if path == "/api/line/delete":
@@ -250,9 +260,27 @@ class Handler(BaseHTTPRequestHandler):
                               "items": items or [], "count": len(items or [])})
 
         if path == "/api/line":
-            d = cnrail.line_detail(one("q"))
+            q = one("q")
+            d = cnrail.line_detail(q)
             if not d:
-                return self.err("未找到线路: " + one("q"), 404)
+                # 资料库里另有叫法（京沪高铁 → 京沪高速线），指到库里对应的那条
+                alt = railcore.catalog_detail(q) or {}
+                target = alt.get("line_name")
+                if target:
+                    d = cnrail.line_detail(target)
+                    if d:
+                        return self.json({**d, "aliasOf": q})
+                return self.err("未找到线路: " + q, 404)
+            return self.json(d)
+
+        if path == "/api/line/catalog":
+            items = railcore.catalog_search(one("q"), int(one("limit", "20")))
+            return self.json({"items": items, "count": len(items)})
+
+        if path == "/api/line/catalog/detail":
+            d = railcore.catalog_detail(one("id") or one("q"))
+            if not d:
+                return self.err("资料库里没有这条线路", 404)
             return self.json(d)
 
         # ---- 按日期批量下载 ----

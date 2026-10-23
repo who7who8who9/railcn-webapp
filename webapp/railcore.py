@@ -514,7 +514,8 @@ def list_custom_lines() -> List[dict]:
     try:
         with db() as conn:
             rows = conn.execute(
-                "SELECT name, stations_json, note, updated_at FROM line_custom ORDER BY name"
+                "SELECT name, stations_json, note, updated_at, "
+                "COALESCE(source,'manual') AS source FROM line_custom ORDER BY name"
             ).fetchall()
     except sqlite3.Error:
         return []
@@ -525,7 +526,8 @@ def list_custom_lines() -> List[dict]:
         except (TypeError, ValueError):
             sts = []
         out.append({"name": row["name"], "stations": sts, "n": len(sts),
-                    "note": row["note"], "updatedAt": row["updated_at"]})
+                    "note": row["note"], "updatedAt": row["updated_at"],
+                    "source": row["source"] or "manual"})
     return out
 
 
@@ -536,10 +538,10 @@ def save_custom_line(name: str, stations, note: str = "") -> dict:
     now = time.time()
     with _db_lock, db() as conn:
         conn.execute(
-            """INSERT INTO line_custom(name, stations_json, note, created_at, updated_at)
-               VALUES(?,?,?,?,?)
+            """INSERT INTO line_custom(name, stations_json, note, created_at, updated_at, source)
+               VALUES(?,?,?,?,?,'manual')
                ON CONFLICT(name) DO UPDATE SET stations_json=excluded.stations_json,
-                 note=excluded.note, updated_at=excluded.updated_at""",
+                 note=excluded.note, updated_at=excluded.updated_at, source='manual'""",
             (ln["name"], json.dumps(ln["stations"], ensure_ascii=False), ln["note"], now, now),
         )
     _apply_custom()
@@ -553,6 +555,12 @@ def delete_custom_line(name: str) -> bool:
         hit = conn.execute("DELETE FROM line_custom WHERE name=?", (nm,)).rowcount > 0
         # 顺手清掉这条线的里程校正，免得下次新建同名线路时套用旧值
         conn.execute("DELETE FROM line_override WHERE name=?", (nm,))
+        # 资料库里指向它的挂靠也解开，否则搜索还会指到不存在的线路
+        try:
+            conn.execute("UPDATE line_catalog SET line_name=NULL, match_how=NULL "
+                         "WHERE line_name=?", (nm,))
+        except sqlite3.Error:
+            pass
     if hit:
         _line_ovr_cache = None
         _apply_custom()
@@ -635,6 +643,89 @@ def delete_custom_station(name: str) -> bool:
     return hit
 
 
+def _catalog_rows() -> List[dict]:
+    """线路资料库（外部整理的线路参数 / 介绍 / 站表），整表读出"""
+    try:
+        with db() as conn:
+            rows = conn.execute(
+                """SELECT id, name, title, line_name, match_how, type, level, service,
+                          alias, foreign_name, design_speed, run_speed, length_km,
+                          open_date, from_sta, to_sta, intro, url
+                   FROM line_catalog ORDER BY id""").fetchall()
+            stops: Dict[str, List[dict]] = {}
+            for r in conn.execute(
+                    "SELECT lid, seq, name, km FROM line_catalog_stop ORDER BY lid, seq"):
+                stops.setdefault(r["lid"], []).append(
+                    {"seq": r["seq"], "name": r["name"], "km": r["km"]})
+    except sqlite3.Error:
+        return []
+    out = []
+    for row in rows:
+        d = dict(row)
+        d["foreign"] = d.pop("foreign_name", None)
+        d["line_name"] = d.get("line_name")
+        d["stops"] = stops.get(d["id"], [])
+        out.append(d)
+    return out
+
+
+def _apply_catalog() -> None:
+    """把线路资料库交给 cnrail：挂靠到线路详情，口径一致时补空白站里程"""
+    cnrail.set_catalog(_catalog_rows())
+
+
+def catalog_search(q: str, limit: int = 20) -> List[dict]:
+    return cnrail.catalog_search(q, limit)
+
+
+def catalog_detail(lid: str) -> Optional[dict]:
+    rec = cnrail.catalog_get(lid)
+    if not rec:
+        return None
+    stops = []
+    for s in rec.get("stops") or []:
+        c = cnrail.coord(s.get("name") or "")
+        stops.append({**s, "lat": c[0] if c else None, "lon": c[1] if c else None})
+    return {**rec, "stops": stops,
+            "coordDone": sum(1 for s in stops if s["lat"] is not None)}
+
+
+def add_catalog_line(lid: str) -> dict:
+    """把资料库里的一条线路（线路库还没有的）加成正式线路，站表与里程照抄资料"""
+    rec = cnrail.catalog_get(lid)
+    if not rec:
+        raise ValueError("资料库里没有这条线路")
+    name = cnrail.station_name(rec.get("name") or "")
+    if not name:
+        raise ValueError("线路名不可用")
+    if cnrail.line(name):
+        raise ValueError(f"线路库里已经有「{name}」了")
+    stations, seen = [], set()
+    for s in rec.get("stops") or []:
+        nm = cnrail.station_name(s.get("name") or "")
+        if not nm or nm in seen:
+            continue
+        seen.add(nm)
+        stations.append({"name": nm, "km": s.get("km")})
+    if len(stations) < 2:
+        raise ValueError("这条线路可用站点不足两个")
+    ln = _build_custom_line(name, stations, f"来自线路资料库（{rec.get('type') or '线路'}）")
+    now = time.time()
+    with _db_lock, db() as conn:
+        conn.execute(
+            """INSERT INTO line_custom(name, stations_json, note, created_at, updated_at, source)
+               VALUES(?,?,?,?,?,'huirui')
+               ON CONFLICT(name) DO UPDATE SET stations_json=excluded.stations_json,
+                 note=excluded.note, updated_at=excluded.updated_at, source='huirui'""",
+            (ln["name"], json.dumps(ln["stations"], ensure_ascii=False), ln["note"], now, now),
+        )
+        conn.execute("UPDATE line_catalog SET line_name=?, match_how='added' WHERE id=?",
+                     (ln["name"], str(rec.get("id"))))
+    _apply_catalog()
+    _apply_custom()
+    return cnrail.line_detail(ln["name"]) or ln
+
+
 def _apply_custom() -> None:
     """把库里新增的线路 / 车站合并进 cnrail"""
     lines: Dict[str, dict] = {}
@@ -643,6 +734,9 @@ def _apply_custom() -> None:
             ln = _build_custom_line(it["name"], it["stations"], it.get("note") or "")
         except ValueError:
             continue
+        src = it.get("source") or "manual"
+        ln["source"] = src
+        ln["custom"] = src == "manual"        # 资料库带进来的不算「自建」
         lines[ln["name"]] = ln
     sts: Dict[str, dict] = {}
     for it in list_custom_stations():
@@ -661,6 +755,106 @@ def get_line_override(name: str) -> Optional[dict]:
         return None
     ov = line_override_map().get(ln["name"])
     return {"name": ln["name"], **ov} if ov else None
+
+
+def rebase_km_from_catalog(name: str, save: bool = True) -> dict:
+    """
+    用线路资料库里的里程锚点重算整条线的累计里程。
+
+    档案里有些线路的里程是「按站数摊」出来的（京沪线泰山 1463 km，实际 555.8），
+    资料库的里程来自铁路里程表，锚点可信。做法：
+      · 资料库里给了里程的站 → 直接当锚点
+      · 锚点之间的站 → 按站间直线距离在锚点里程区间内插值（火车不会飞直线，
+        但同一区间内线性映射，比例误差很小）
+      · 首锚点之前 / 末锚点之后 → 借相邻区间的「每公里直线距离对应的里程」外推
+      · 没有坐标的站 → 退回按站序均分
+    结果写成人工校正（staKm），随时可以「恢复档案值」撤回。
+    """
+    ln = cnrail.line(name)
+    if not ln:
+        raise ValueError("线路库里没有这条线：" + str(name or ""))
+    rec = cnrail.catalog_of(ln["name"])
+    if not rec:
+        raise ValueError(f"线路资料库里没有「{ln['name']}」的里程数据")
+
+    stations = ln.get("stations") or []
+    hint: Dict[str, float] = {}
+    for s in rec.get("stops") or []:
+        k = cnrail._key(s.get("name") or "")
+        if k and s.get("km") is not None and k not in hint:
+            hint[k] = float(s["km"])
+    anchors = [(i, hint[cnrail._key(p.get("name") or "")])
+               for i, p in enumerate(stations)
+               if cnrail._key(p.get("name") or "") in hint]
+    if len(anchors) < 2:
+        raise ValueError(f"资料库里这条线只有 {len(anchors)} 个带里程的站，不够重算")
+
+    pts = []
+    for p in stations:
+        c = cnrail.coord(p.get("name") or "")
+        pts.append(c)
+
+    def d(a: int, b: int) -> Optional[float]:
+        if pts[a] and pts[b]:
+            return haversine(pts[a][0], pts[a][1], pts[b][0], pts[b][1])
+        return None
+
+    def spread(a: int, b: int, ka: float, kb: float) -> Dict[int, float]:
+        """a、b 是两个锚点（含端点），中间的站按直线距离比例摊开"""
+        out: Dict[int, float] = {}
+        if b <= a:
+            return out
+        legs = [d(j, j + 1) for j in range(a, b)]
+        if any(x is None for x in legs) or sum(legs) <= 0:
+            step = (kb - ka) / (b - a)                 # 缺坐标：按站序均分
+            return {j: ka + step * (j - a) for j in range(a + 1, b)}
+        cum = 0.0
+        total = sum(legs)
+        for j in range(a + 1, b):
+            cum += legs[j - 1 - a]
+            out[j] = ka + (cum / total) * (kb - ka)
+        return out
+
+    kms: Dict[int, float] = {anchors[0][0]: anchors[0][1], anchors[-1][0]: anchors[-1][1]}
+    for (a, ka), (b, kb) in zip(anchors, anchors[1:]):
+        kms[a], kms[b] = ka, kb
+        kms.update(spread(a, b, ka, kb))
+
+    # 首尾外推
+    (a1, k1), (a2, k2) = anchors[0], anchors[1]
+    if a1 > 0:
+        base = d(a1, a2)
+        ratio = ((k2 - k1) / base) if (base and k2 > k1) else None
+        for j in range(a1 - 1, -1, -1):
+            dd = d(j, j + 1)
+            if ratio and dd:
+                kms[j] = kms[j + 1] - dd * ratio
+            else:
+                kms[j] = kms[j + 1] - (k2 - k1) / max(a2 - a1, 1)
+    (b1, m1), (b2, m2) = anchors[-2], anchors[-1]
+    if b2 < len(stations) - 1:
+        base = d(b1, b2)
+        ratio = ((m2 - m1) / base) if (base and m2 > m1) else None
+        for j in range(b2 + 1, len(stations)):
+            dd = d(j - 1, j)
+            if ratio and dd:
+                kms[j] = kms[j - 1] + dd * ratio
+            else:
+                kms[j] = kms[j - 1] + (m2 - m1) / max(b2 - b1, 1)
+
+    ordered = [round(kms.get(i, 0.0), 1) for i in range(len(stations))]
+    ordered[0] = round(anchors[0][1], 1)
+    bad = [i for i in range(1, len(ordered)) if ordered[i] <= ordered[i - 1]]
+    if bad:
+        raise ValueError(f"重算后有 {len(bad)} 处里程倒挂（第 {bad[0] + 1} 站起），"
+                         "资料库站序与库内线路可能不一致，未写入")
+    sta = {str(i): v for i, v in enumerate(ordered)}
+    note = (get_line_override(ln["name"]) or {}).get("note") or ""
+    note = (note + " · 按线路资料库里程重算").strip(" ·")
+    if save:
+        save_line_override(ln["name"], seg_km={}, total_km=None, note=note, sta_km=sta)
+    return {"name": ln["name"], "stations": len(ordered), "anchors": len(anchors),
+            "totalKm": ordered[-1], "staKm": sta, "saved": bool(save)}
 
 
 def save_line_override(name: str, seg_km=None, total_km=None, note: str = "",
@@ -1548,6 +1742,10 @@ def station_detail(q: str) -> dict:
 
 
 init_db()
+try:
+    _apply_catalog()                 # 线路资料库（参数 / 介绍 / 里程锚点）
+except Exception:                    # 库坏了也不能让服务起不来
+    pass
 try:
     _apply_custom()                  # 用户新增的线路 / 车站先合进 cnrail
 except Exception:                    # 库坏了也不能让服务起不来

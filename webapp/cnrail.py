@@ -31,6 +31,8 @@ _LINES_RAW: Optional[List[dict]] = None                          # 档案原值�
 _BY_LINE: Optional[Dict[str, dict]] = None
 _POS: Optional[Dict[str, List[Tuple[int, int, float]]]] = None   # 站名 -> [(线路序号, 站位, 里程)]
 _POSALL: Optional[Dict[str, List[Tuple[int, int]]]] = None       # 站名 -> [(线路序号, 站位)]，不限里程可信
+_CATALOG: Dict[str, dict] = {}                                   # 线路名 -> 线路资料（含站表）
+_CATALOG_ALL: Dict[str, dict] = {}                               # 资料 id -> 线路资料（含未收录线路）
 _NAMES: Optional[set] = None                                     # 线路库里出现过的站名（原样），station_name 用
 _LOADED = False
 
@@ -259,6 +261,7 @@ def rebuild_lines() -> None:
     custom = _CUSTOM_LINES or {}
     raw_lines = list(custom.values())
     raw_lines += [r for r in (_LINES_RAW or []) if r.get("name") not in custom]
+    _fill_km_from_catalog(raw_lines)             # 口径一致的线路上，用资料库补空白站里程
     _LINES = [_line_with_override(r, _LINE_OVR.get(r.get("name"))) for r in raw_lines]
     _BY_LINE = {ln["name"]: ln for ln in _LINES}
 
@@ -323,6 +326,154 @@ def set_custom(lines: Optional[Dict[str, dict]] = None,
     if _LOADED:
         rebuild_lines()
 
+
+
+def set_catalog(entries: Optional[Sequence[dict]] = None) -> None:
+    """
+    载入「线路资料库」（外部整理来的线路参数 / 介绍 / 逐站里程）。
+
+    entries: [{id, name, title, line_name, type, level, service, alias, foreign,
+               design_speed, run_speed, length_km, open_date, from_sta, to_sta,
+               intro, url, stops: [{name, km}]}]
+    line_name 为 None 表示线路库里没有这条线（只在资料库里）。
+    """
+    global _CATALOG, _CATALOG_ALL, _CATALOG_STOPS
+    by_line: Dict[str, dict] = {}
+    by_id: Dict[str, dict] = {}
+    stops_by_id: Dict[str, List[dict]] = {}
+    for e in entries or []:
+        if not e:
+            continue
+        lid = str(e.get("id") or "")
+        if not lid:
+            continue
+        stops_by_id[lid] = [{"name": s.get("name"), "km": s.get("km")}
+                            for s in (e.get("stops") or []) if s.get("name")]
+        rec = {k: v for k, v in e.items() if k != "stops"}
+        rec["stops"] = stops_by_id[lid]
+        by_id[lid] = rec
+        ln = _norm(e.get("line_name") or "")
+        if ln:
+            by_line.setdefault(ln, rec)
+    _CATALOG, _CATALOG_ALL, _CATALOG_STOPS = by_line, by_id, stops_by_id
+    if _LOADED:
+        rebuild_lines()
+
+
+def catalog_of(name: str) -> Optional[dict]:
+    """某条线路对应的资料（没有返回 None）"""
+    _ensure()
+    return _CATALOG.get(_norm(name))
+
+
+def catalog_get(lid_or_name: str) -> Optional[dict]:
+    """按资料 id 或线路名取一条完整资料（含站表）"""
+    _ensure()
+    key = _norm(lid_or_name)
+    if key in _CATALOG_ALL:
+        return _CATALOG_ALL[key]
+    for name, rec in _CATALOG.items():
+        if key in (name, _norm(rec.get("name") or ""), _norm(rec.get("title") or "")):
+            return rec
+    for rec in _CATALOG_ALL.values():
+        if key in (_norm(rec.get("name") or ""), _norm(rec.get("title") or "")):
+            return rec
+    return None
+
+
+def catalog_search(q: str, limit: int = 20, only_unmatched: bool = True) -> List[dict]:
+    """搜线路资料库；默认只给「线路库里还没有」的那些"""
+    _ensure()
+    q = _norm(q)
+    out = []
+    for rec in _CATALOG_ALL.values():
+        if only_unmatched and rec.get("line_name"):
+            continue
+        if len(rec.get("stops") or []) < 2:       # 没有站表的条目搜出来也没用
+            continue
+        if q:
+            hay = _norm(rec.get("name") or "") + _norm(rec.get("title") or "") \
+                + _norm(rec.get("alias") or "")
+            if q not in hay:
+                continue
+        out.append(rec)
+    out.sort(key=lambda r: (-int(r.get("n_km") or 0), -int(r.get("n_stop") or 0)))
+    return [{"id": r.get("id"), "name": r.get("name"), "title": r.get("title"),
+             "type": r.get("type"), "level": r.get("level"), "length_km": r.get("length_km"),
+             "n_stop": len(r.get("stops") or []),
+             "n_km": sum(1 for s in (r.get("stops") or []) if s.get("km") is not None),
+             "line_name": r.get("line_name"), "url": r.get("url"),
+             "open_date": r.get("open_date")} for r in out[:limit]]
+
+
+def _km_check(ln: dict, rec: dict) -> dict:
+    """
+    比对档案里程与资料库里程：
+      pairs   两套都有里程的共同站数
+      agree   两套是否同一口径（最大偏差 ≤2 km）
+      diff    偏差最大的几个站，给前端提示用
+      fill    档案缺里程、资料库有值的站数（口径一致才能补）
+    """
+    hint = {_key(s["name"]): s["km"] for s in (rec.get("stops") or [])
+            if s.get("km") is not None}
+    pairs, fill = [], 0
+    for p in ln.get("stations") or []:
+        k = _key(p.get("name") or "")
+        h = hint.get(k)
+        if p.get("km") is None:
+            if h is not None:
+                fill += 1
+            continue
+        if h is not None:
+            pairs.append((p["name"], float(p["km"]), float(h)))
+    if not pairs:
+        return {"pairs": 0, "fill": fill, "agree": None, "diff": []}
+    diffs = sorted(h - o for _, o, h in pairs)
+    med = diffs[len(diffs) // 2]
+    worst = max(abs(d) for d in diffs)
+    samples = sorted(pairs, key=lambda t: -abs(t[2] - t[1]))[:3]
+    return {"pairs": len(pairs), "fill": fill, "agree": worst <= 2.0,
+            "median": round(med, 1), "worst": round(worst, 1),
+            "diff": [{"name": n, "ours": o, "theirs": h} for n, o, h in samples]}
+
+
+def _fill_km_from_catalog(raw_lines: List[dict]) -> int:
+    """
+    口径一致的线路上，用资料库里多出来的里程点补档案的空白站（只补 None，不改已有值）。
+
+    返回补了多少站。资料库和档案不是同一套里程口径时一律不补 —— 宁缺勿错。
+    """
+    if not _CATALOG:
+        return 0
+    filled = 0
+    for ln in raw_lines:
+        rec = _CATALOG.get(_norm(ln.get("name") or ""))
+        if not rec:
+            continue
+        chk = _km_check(ln, rec)
+        if not chk["fill"] or chk.get("agree") is not True:
+            continue
+        hint = {_key(s["name"]): s["km"] for s in (rec.get("stops") or [])
+                if s.get("km") is not None}
+        offset = chk.get("median") or 0.0
+        stations = ln.get("stations") or []
+        for i, p in enumerate(stations):
+            if p.get("km") is not None:
+                continue
+            h = hint.get(_key(p.get("name") or ""))
+            if h is None:
+                continue
+            val = round(h - offset, 1)
+            prev = next((q["km"] for q in reversed(stations[:i]) if q.get("km") is not None), None)
+            nxt = next((q["km"] for q in stations[i + 1:] if q.get("km") is not None), None)
+            if prev is not None and val <= prev:
+                continue                          # 补进去会倒挂，不如留空
+            if nxt is not None and val >= nxt:
+                continue
+            p["km"] = val
+            p["kmSrc"] = "catalog"
+            filled += 1
+    return filled
 
 
 def _ensure() -> None:
@@ -411,6 +562,7 @@ def line_detail(name: str) -> Optional[dict]:
         c = coord(p["name"])
         pts.append({"name": _key(p["name"]), "km": p["km"],
                     "kmBase": p.get("kmBase", p["km"]),
+                    "kmSrc": p.get("kmSrc"),
                     "lat": c[0] if c else None, "lon": c[1] if c else None})
     n = len(pts)
     seg = ln.get("segKm")
@@ -421,10 +573,22 @@ def line_detail(name: str) -> Optional[dict]:
             a, b = pts[i]["km"], pts[i + 1]["km"]
             seg.append(round(float(b) - float(a), 1) if (a is not None and b is not None) else None)
     ov = _LINE_OVR.get(ln["name"]) or {}
+    rec = _CATALOG.get(_norm(ln["name"]))
+    info = None
+    km_check = None
+    if rec:
+        info = {k: rec.get(k) for k in (
+            "id", "name", "title", "type", "level", "service", "alias", "foreign",
+            "design_speed", "run_speed", "length_km", "open_date", "from_sta", "to_sta",
+            "intro", "url")}
+        info["matchHow"] = rec.get("match_how")
+        km_check = _km_check(ln, rec)
     return {**ln, "stations": pts, "segKm": seg,
             "override": {"segKm": ov.get("segKm") or {}, "staKm": ov.get("staKm") or {},
                          "totalKm": ov.get("totalKm"),
                          "note": ov.get("note") or ""} if ov else None,
+            "info": info, "kmCheck": km_check,
+            "kmFromCatalog": sum(1 for p in pts if p.get("kmSrc") == "catalog"),
             "coordCoverage": round(sum(1 for p in pts if p["lat"] is not None) / max(n, 1) * 100, 1)}
 
 

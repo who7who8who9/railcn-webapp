@@ -2114,15 +2114,18 @@ function lnRenderHead() {
     <div class="l1"><span class="code">${esc(d.name)}</span>
       <span class="tag">${d.n} 站</span>
       <span class="tag${d.totalKm == null ? ' warn' : ''}">${lnKmText(d.totalKm)}</span>
+      ${d.info && d.info.type ? `<span class="tag type">${esc(d.info.type)}</span>` : ''}
       ${d.kmManual ? '<span class="tag manual">人工里程</span>' : ''}
       ${d.kmComplete ? '' : '<span class="tag warn">里程不完整</span>'}
+      ${d.source === 'huirui' ? '<span class="tag manual">资料库</span>' : ''}
       ${d.custom ? '<span class="tag manual">自建</span>' : ''}
       <span class="ln-acts">
-        ${d.custom ? '<button class="btn sm ghost" id="lnDel">删除</button>' : ''}
+        ${d.custom || d.source === 'huirui' ? '<button class="btn sm ghost" id="lnDel">删除</button>' : ''}
         <button class="btn sm${LN.editing ? ' on' : ''}" id="lnEditBtn">${LN.editing ? '收起编辑' : '编辑里程'}</button>
       </span>
     </div>
-    <div class="l2">坐标覆盖 ${d.coordCoverage}% · 点击站点查看所属线路 · <span id="lnFoot"></span></div>`;
+    <div class="l2">${d.aliasOf ? `「${esc(d.aliasOf)}」在资料库里对应这条线 · ` : ''}坐标覆盖 ${d.coordCoverage}% · 点击站点查看所属线路 · <span id="lnFoot"></span></div>`;
+  lnRenderInfo();
   $('#lnEditBtn').addEventListener('click', () => {
     LN.editing = !LN.editing;
     lnWide(LN.editing);
@@ -2152,6 +2155,107 @@ function lnRenderHead() {
     });
   }
   lnRefreshPreview();
+}
+
+/* ---------- 线路资料（来自线路资料库：参数 / 介绍 / 来源） ---------- */
+function lnRenderInfo() {
+  const d = LN.data, el = $('#lnInfo');
+  if (!el) return;
+  const i = d && d.info;
+  const ck = (d && d.kmCheck) || null;
+  if (!i) {
+    if (ck && ck.agree === false) {
+      el.hidden = false;
+      el.innerHTML = lnKmBanner(d);
+      lnBindBanner();
+      return;
+    }
+    el.hidden = true;
+    el.innerHTML = '';
+    return;
+  }
+  const rows = [
+    ['类型', i.type], ['等级', i.level], ['服务', i.service],
+    ['设计速度', i.design_speed], ['运营速度', i.run_speed],
+    ['线路长度', i.length_km ? `${i.length_km} km` : ''],
+    ['开通', i.open_date],
+    ['起止', (i.from_sta && i.to_sta) ? `${i.from_sta} – ${i.to_sta}` : ''],
+    ['外文名', i.foreign], ['别名', i.alias],
+  ].filter(r => r[1]);
+  const intro = (i.intro || '').trim();
+  el.hidden = false;
+  el.innerHTML = `
+    <div class="ln-i-head">
+      <b>${esc(i.title || i.name || '线路资料')}</b>
+      <span class="ln-i-src">线路资料库</span>
+      ${i.url ? `<a class="ln-i-link" href="${i.url}" target="_blank" rel="noopener noreferrer">原始页面 ↗</a>` : ''}
+      ${intro ? `<button class="btn sm ghost" id="lnIntroBtn">简介</button>` : ''}
+    </div>
+    ${rows.length ? `<div class="ln-i-grid">${rows.map(([k, v]) =>
+      `<div><span>${k}</span><em>${esc(v)}</em></div>`).join('')}</div>` : ''}
+    ${intro ? `<div class="ln-i-intro" id="lnIntro" hidden>${esc(intro)
+      .replace(/\n{2,}/g, '<br><br>').replace(/\n/g, '<br>')}</div>` : ''}
+    ${lnKmBanner(d)}`;
+  const ib = $('#lnIntroBtn');
+  if (ib) ib.addEventListener('click', () => {
+    const box = $('#lnIntro');
+    if (!box) return;
+    box.hidden = !box.hidden;
+    ib.classList.toggle('on', !box.hidden);
+    ib.textContent = box.hidden ? '简介' : '收起简介';
+  });
+  lnBindBanner();
+}
+
+/** 档案里程与资料库对不上时的提示条 */
+function lnKmBanner(d) {
+  const ck = d && d.kmCheck;
+  if (!ck) return '';
+  const bits = [];
+  if (ck.agree === false) {
+    const s = (ck.diff || []).slice(0, 2)
+      .map(x => `${esc(x.name)} ${x.ours} / ${x.theirs}`).join('，');
+    bits.push(`<div class="ln-km-warn">
+        <b>档案里程与资料库不一致</b>
+        <span>${ck.pairs} 个共同站里最大差 ${ck.worst} km（档案 / 资料库：${s}）。
+          档案可能是按站数摊出来的，资料库是铁路里程表口径。</span>
+        <button class="btn sm" id="lnRebase">按资料库里程重算</button>
+      </div>`);
+  }
+  if (ck.fill && ck.agree === true) {
+    bits.push(`<div class="ln-km-note">资料库补齐了 ${ck.fill} 个原本缺里程的车站</div>`);
+  }
+  if (d && d.kmFromCatalog) {
+    bits.push(`<div class="ln-km-note">其中 ${d.kmFromCatalog} 站里程来自线路资料库</div>`);
+  }
+  return bits.join('');
+}
+
+function lnBindBanner() {
+  const btn = $('#lnRebase');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    const d = LN.data;
+    if (!d) return;
+    btn.disabled = true;
+    btn.textContent = '重算中…';
+    try {
+      const r = await postJSON('/api/line/km/rebase', { name: d.name });
+      await showLine(d.name);
+      const box = $('#lnInfo');
+      if (box) {
+        const tip = document.createElement('div');
+        tip.className = 'ln-km-note ok';
+        tip.textContent = `已按资料库的 ${r.anchors} 个里程锚点重算，总里程 ${r.totalKm} km；`
+          + '不想要了可以「全部恢复档案」。';
+        box.prepend(tip);
+      }
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = '按资料库里程重算';
+      alert('重算失败：' + e.message);
+    }
+  });
 }
 
 function lnRenderEditor() {
@@ -2254,6 +2358,7 @@ async function showLine(q) {
     LN.totalKm = d.override && d.override.totalKm != null ? String(d.override.totalKm) : '';
     det.innerHTML = `
       <div class="dhead" id="lnHead"></div>
+      <div class="lninfo" id="lnInfo" hidden></div>
       <div class="lnkm" id="lnKmBox" hidden></div>
       <ul class="stops" id="lnStops">
         ${d.stations.map((p, i) => `<li class="stop${i === 0 ? ' start' : ''}${i === d.stations.length - 1 ? ' end' : ''}" data-i="${i}">
@@ -2270,7 +2375,111 @@ async function showLine(q) {
       MapView.focusStop(Number(li.dataset.i));
     }));
   } catch (e) {
-    box.innerHTML = `<div class="empty">${e.message}</div>`;
+    // 线路库里没有：看看「线路资料库」里有没有，有就列出来（可只读查看 / 一键收进线路库）
+    const hit = await showCatalogList(q, box);
+    if (!hit) box.innerHTML = `<div class="empty">${e.message}</div>`;
+  }
+}
+
+/* ---------- 线路资料库（线路库里还没有的线路） ---------- */
+async function showCatalogList(q, box) {
+  try {
+    const d = await api('/api/line/catalog', { q, limit: 20 });
+    if (!d.items || !d.items.length) return false;
+    box.innerHTML = `<div class="cat-head">线路库里没有「${esc(q)}」，资料库里找到 ${d.items.length} 条：</div>`
+      + d.items.map(it => `<div class="cat-row" data-id="${esc(it.id)}">
+          <div class="cat-n">${esc(it.name)}<i>${esc(it.title || '')}</i></div>
+          <div class="cat-m">${[it.type, it.open_date, it.length_km ? it.length_km + ' km' : '',
+            `${it.n_stop} 站`].filter(Boolean).join(' · ')}</div>
+        </div>`).join('');
+    $$('#netList .cat-row').forEach(el =>
+      el.addEventListener('click', () => showCatalog(el.dataset.id)));
+    return true;
+  } catch (_) { return false; }
+}
+
+async function showCatalog(id) {
+  const box = $('#netList'), det = $('#netDetail');
+  $('#paneNet').classList.add('line-only');      // 资料页也独占侧栏高度
+  lnWide(false);
+  det.classList.remove('show');
+  LN.data = null;
+  box.innerHTML = `<div class="empty">载入线路资料…</div>`;
+  try {
+    const c = await api('/api/line/catalog/detail', { id });
+    $('#hud').classList.add('hidden');
+    $('#dock').classList.add('hidden');
+    const pts = [];
+    (c.stops || []).forEach((s, i) => {
+      if (s.lat != null && s.lon != null) {      // 有坐标的站才画
+        pts.push({ i: i + 1, name: s.name, lat: s.lat, lon: s.lon });
+      }
+    });
+    if (pts.length >= 2) {
+      MapView.setRoute({ code: c.name, stops: pts });
+      MapView.fit();
+    }
+    const rows = [
+      ['类型', c.type], ['等级', c.level], ['服务', c.service],
+      ['设计速度', c.design_speed], ['运营速度', c.run_speed],
+      ['线路长度', c.length_km ? c.length_km + ' km' : ''], ['开通', c.open_date],
+      ['起止', (c.from_sta && c.to_sta) ? `${c.from_sta} – ${c.to_sta}` : ''],
+      ['外文名', c.foreign], ['别名', c.alias],
+    ].filter(r => r[1]);
+    const intro = (c.intro || '').trim();
+    box.innerHTML = '';
+    det.innerHTML = `
+      <div class="dhead">
+        <div class="l1"><span class="code">${esc(c.name)}</span>
+          <span class="tag">${(c.stops || []).length} 站</span>
+          ${c.type ? `<span class="tag type">${esc(c.type)}</span>` : ''}
+          <span class="tag warn">线路库未收录</span></div>
+        <div class="l2">${esc(c.title || '')}</div>
+      </div>
+      <div class="lninfo">
+        <div class="ln-i-head">
+          <span class="ln-i-src">线路资料库</span>
+          ${c.url ? `<a class="ln-i-link" href="${esc(c.url)}" target="_blank" rel="noopener noreferrer">原始页面 ↗</a>` : ''}
+          ${intro ? '<button class="btn sm ghost" id="catIntroBtn">简介</button>' : ''}
+          <button class="btn sm primary" id="catAdd" style="margin-left:auto">收进线路库</button>
+        </div>
+        ${rows.length ? `<div class="ln-i-grid">${rows.map(([k, v]) =>
+          `<div><span>${k}</span><em>${esc(v)}</em></div>`).join('')}</div>` : ''}
+        ${intro ? `<div class="ln-i-intro" id="catIntro" hidden>${esc(intro)
+          .replace(/\n{2,}/g, '<br><br>').replace(/\n/g, '<br>')}</div>` : ''}
+      </div>
+      <ul class="stops" id="catStops">
+        ${(c.stops || []).map((s, i) => `<li class="stop" data-i="${i}">
+          <div class="t"><div class="arr">${i + 1}</div></div>
+          <div class="rail"><span class="dot"></span></div>
+          <div class="name"><span class="n">${esc(s.name)}</span>${s.lat != null ? '' : '<span class="s">缺坐标</span>'}</div>
+          <div class="km">${s.km == null ? '-' : s.km + ' km'}</div>
+        </li>`).join('')}
+      </ul>`;
+    det.classList.add('show');
+    const ib = $('#catIntroBtn');
+    if (ib) ib.addEventListener('click', () => {
+      const el = $('#catIntro');
+      el.hidden = !el.hidden;
+      ib.classList.toggle('on', !el.hidden);
+      ib.textContent = el.hidden ? '简介' : '收起简介';
+    });
+    const add = $('#catAdd');
+    if (add) add.addEventListener('click', async () => {
+      add.disabled = true;
+      add.textContent = '收进中…';
+      try {
+        const r = await postJSON('/api/line/catalog/add', { id });
+        det.classList.remove('show');
+        await showLine(r.line.name);
+      } catch (e) {
+        add.disabled = false;
+        add.textContent = '收进线路库';
+        alert('失败：' + e.message);
+      }
+    });
+  } catch (e) {
+    box.innerHTML = `<div class="empty">资料载入失败：${e.message}</div>`;
   }
 }
 

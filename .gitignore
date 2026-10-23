@@ -18,6 +18,10 @@ webapp/data/osm_stations.json
 # ---------- 可再抓取的中间缓存 ----------
 cache/
 *.log
+# 抓下来的 844 个页面，重新跑 fetch_huirui.py 即可
+data/huirui/html/
+data/huirui/index.html
+.tmp/
 
 # ---------- 第三方二进制 ----------
 *.exe

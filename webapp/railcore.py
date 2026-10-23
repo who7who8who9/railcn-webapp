@@ -183,12 +183,18 @@ def _norm(name: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _clean_via(via) -> List[dict]:
-    """把前端传来的经由整理成 [{line, from, to}]，丢掉没有线路名的空行"""
+    """把前端传来的经由整理成 [{line, from, to}]，丢掉没有线路名的空行
+
+    `src="auto"` 的段是程序自动推断出来的「虚拟经由」，只在校对页作参考；
+    正式经由只收人工填写的段，这类段在这里一律丢弃。
+    """
     out: List[dict] = []
     for seg in via or []:
         if isinstance(seg, str):
             seg = {"line": seg}
         if not isinstance(seg, dict):
+            continue
+        if str(seg.get("src") or "").strip().lower() == "auto":
             continue
         name = str(seg.get("line") or "").strip()
         if not name:

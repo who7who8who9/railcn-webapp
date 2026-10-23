@@ -201,8 +201,9 @@ def _clean_via(via) -> List[dict]:
             continue
         out.append({
             "line": name,
-            "from": _norm(seg.get("from") or ""),
-            "to": _norm(seg.get("to") or ""),
+            # 与车次站名同口径：库里写「天津站」的，存成「天津」
+            "from": cnrail.station_name(_norm(seg.get("from") or "")),
+            "to": cnrail.station_name(_norm(seg.get("to") or "")),
         })
     return out
 
@@ -425,7 +426,9 @@ def _build_custom_line(name: str, stations, note: str = "") -> dict:
     clean: List[dict] = []
     seen = set()
     for it in stations or []:
-        sn = _norm_line_name(it.get("name") if isinstance(it, dict) else it)
+        # 站名统一成 12306 口径（去掉「站」后缀）：自建线路要和库内线路、
+        # 车次站名对得上，否则「天津站」和「天津」会被当成两个站
+        sn = cnrail.station_name(_norm_line_name(it.get("name") if isinstance(it, dict) else it))
         if not sn:
             continue
         if sn in seen:
@@ -533,7 +536,8 @@ def list_custom_stations() -> List[dict]:
 
 def save_custom_station(name: str, lat, lon, lines=None, tele: str = "",
                         bureau: str = "", note: str = "") -> dict:
-    nm = _norm_line_name(name)
+    # 站名统一成档案口径（「天津站」→「天津」，「十八站」保持不变）
+    nm = cnrail.station_name(_norm_line_name(name))
     if not nm:
         raise ValueError("站名不能为空")
     if cnrail.station(nm):

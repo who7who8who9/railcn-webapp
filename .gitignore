@@ -2,6 +2,8 @@
 webapp/data/rail.db
 webapp/data/rail.db-wal
 webapp/data/rail.db-shm
+# 迁移前的自动备份
+webapp/data/rail.db.bak-*
 webapp/data/railcn.db
 webapp/data/exports/
 

@@ -31,6 +31,7 @@ _LINES_RAW: Optional[List[dict]] = None                          # 档案原值�
 _BY_LINE: Optional[Dict[str, dict]] = None
 _POS: Optional[Dict[str, List[Tuple[int, int, float]]]] = None   # 站名 -> [(线路序号, 站位, 里程)]
 _POSALL: Optional[Dict[str, List[Tuple[int, int]]]] = None       # 站名 -> [(线路序号, 站位)]，不限里程可信
+_NAMES: Optional[set] = None                                     # 线路库里出现过的站名（原样），station_name 用
 _LOADED = False
 
 # 人工里程：{线路名: {"segKm": {"0": 12.3}, "totalKm": 240.0}}
@@ -64,6 +65,37 @@ def _key(name: str) -> str:
         if len(n) > len(suf) and n.endswith(suf):
             return n[: -len(suf)]
     return n
+
+
+def station_name(name: str) -> str:
+    """
+    站名规范化，存储 / 显示都用它：
+
+      「天津西站」→「天津西」（线路库里另有「天津西」这种不带「站」的写法）
+      「十八站」  →「十八站」（库里的站名本身带「站」，是地名的一部分，不能截）
+
+    判据：去掉尾部「站」之后，若线路库里存在**不带「站」的同名站**，说明裸名才是
+    规范写法，取短名；否则保持原样（「十八站」「新九站」这类不会被截坏）。
+    """
+    n = _norm(name)
+    if not n or not n.endswith("站") or len(n) <= 1:
+        return n
+    short = n[:-1]
+    return short if short in _line_names() else n
+
+
+def _line_names() -> set:
+    """线路库里出现过的站名（原样，用于判断「XX站」是不是后缀）"""
+    global _NAMES
+    if _NAMES is None:
+        s = set()
+        for ln in (_LINES or []):
+            for p in ln.get("stations") or []:
+                nm = _norm(p.get("name") or "")
+                if nm:
+                    s.add(nm)
+        _NAMES = s
+    return _NAMES
 
 
 def load(force: bool = False) -> bool:
@@ -181,7 +213,7 @@ def _line_with_override(raw: dict, ov: Optional[dict]) -> dict:
 
 def rebuild_lines() -> None:
     """把人工里程套回线路表，并重建「站名 → 线路里程」索引"""
-    global _LINES, _BY_LINE, _POS, _POSALL
+    global _LINES, _BY_LINE, _POS, _POSALL, _NAMES
     custom = _CUSTOM_LINES or {}
     raw_lines = list(custom.values())
     raw_lines += [r for r in (_LINES_RAW or []) if r.get("name") not in custom]
@@ -203,6 +235,7 @@ def rebuild_lines() -> None:
                 pos.setdefault(k, []).append((li, pi, p["km"]))
     _POS = pos
     _POSALL = posall
+    _NAMES = None          # 站名集合随线路表变化，下次用到时重建
 
 
 def set_line_overrides(mapping: Optional[Dict[str, dict]]) -> None:
@@ -314,11 +347,16 @@ def search_line(q: str, limit: int = 20) -> List[dict]:
 
 
 def line_station_names(name: str) -> Optional[List[str]]:
-    """某条线路按站序排好的站名（只取名字，供校对页「经由」选站用）"""
+    """某条线路按站序排好的站名（只取名字，供校对页「经由」选站用）
+
+    站名按 12306 口径输出（去掉「站」后缀），这样自建线路和库内线路、
+    车次站名三者对得上（「天津站」和「天津」不该是两个站）。
+    """
     ln = line(name)
     if not ln:
         return None
-    return [p.get("name") for p in (ln.get("stations") or []) if p.get("name")]
+    names = [station_name(p.get("name")) for p in (ln.get("stations") or []) if p.get("name")]
+    return list(dict.fromkeys(n for n in names if n))
 
 
 def line_detail(name: str) -> Optional[dict]:
@@ -716,8 +754,8 @@ def path_stations(stops: Sequence[dict], max_points: int = 2000,
             nk = _norm(name)
             if nk.endswith("线路所") or nk.endswith("所") or nk.endswith("中继站") or "线路所" in nk:
                 return
-            # 线路库里常写成「董家庄站」，与 12306 车次站名对齐成「董家庄」
-            name = _key(name) or name
+            # 线路库里常写成「董家庄站」，按档案口径对齐成「董家庄」（「十八站」这种不动）
+            name = station_name(name)
         if pts and _key(pts[-1]["name"]) == _key(name):
             pts[-1]["km"] = round(km, 1)
             if stop:

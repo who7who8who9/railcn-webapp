@@ -135,7 +135,11 @@ def init_db() -> None:
                 tele        TEXT,
                 bureau      TEXT,
                 note        TEXT,
-                updated_at  REAL
+                updated_at  REAL,
+                type        TEXT,          -- 车站 / 线路所 / 乘降所
+                source      TEXT,          -- manual 手工自建 / line-fill 线路补全
+                alias       TEXT,          -- 线路里出现过的原写法（如带「站」的）
+                coord_src   TEXT           -- 坐标来源：osm / manual / null
             );
 
             -- 数据校对扫描结果（curate.py 生成）
@@ -169,6 +173,11 @@ def init_db() -> None:
         lcols = {r[1] for r in conn.execute("PRAGMA table_info(line_override)")}
         if "sta_km_json" not in lcols:
             conn.execute("ALTER TABLE line_override ADD COLUMN sta_km_json TEXT")
+        # 老库迁移：车站扩展信息（类型 / 来源 / 原写法 / 坐标来源）
+        scols = {r[1] for r in conn.execute("PRAGMA table_info(station_custom)")}
+        for col in ("type", "source", "alias", "coord_src"):
+            if col not in scols:
+                conn.execute(f"ALTER TABLE station_custom ADD COLUMN {col} TEXT")
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +190,126 @@ def _norm(name: str) -> str:
         return ""
     s = re.sub(r"\s+", "", str(name))
     return s
+
+
+# ---------------------------------------------------------------------------
+# 经纬度文本解析（前端只要粘一行就能填坐标）
+# ---------------------------------------------------------------------------
+
+# 认这些写法：
+#   经度:126.576636,纬度:42.038926     ← 带中文标签（顺序任意）
+#   lng:126.576636, lat:42.038926      ← 英文标签
+#   126.576636, 42.038926              ← 裸数字成对
+#   126.576636E 42.038926N             ← 带方向字母
+#   126°34'35.9"E, 42°2'20.1"N         ← 度分秒
+_COORD_LABEL_RE = re.compile(
+    r"(?P<lab>经度|纬度|longitude|latitude|long|lng|lon|lat)\s*[:=：]?\s*"
+    r"(?P<num>[-+]?\d+(?:\.\d+)?"
+    r"(?:\s*[°度]\s*\d+(?:\.\d+)?\s*['′分]?"
+    r"(?:\s*\d+(?:\.\d+)?\s*[\"″秒]?)?)?)"
+    r"\s*(?P<dir>[NSEWnsew北南东西])?", re.I)
+
+_COORD_DIR = {"N": "lat", "S": "lat", "北": "lat", "南": "lat",
+              "E": "lon", "W": "lon", "东": "lon", "西": "lon"}
+_COORD_LAB_AXIS = {"经度": "lon", "longitude": "lon", "long": "lon",
+                   "lng": "lon", "lon": "lon",
+                   "纬度": "lat", "latitude": "lat", "lat": "lat"}
+
+
+def _angle(text: str) -> Optional[float]:
+    """把一段角度文本（10 进制 / 度分秒）转成 10 进制度数"""
+    s = str(text or "").strip().replace("，", "").replace(",", "")
+    if not s:
+        return None
+    nums = re.findall(r"[-+]?\d+(?:\.\d+)?", s)
+    if not nums:
+        return None
+    val = abs(float(nums[0]))
+    if len(nums) > 1:
+        val += abs(float(nums[1])) / 60.0
+    if len(nums) > 2:
+        val += abs(float(nums[2])) / 3600.0
+    if str(nums[0]).startswith("-"):
+        val = -val
+    return val
+
+
+def parse_latlon(text) -> Tuple[float, float]:
+    """
+    从一行文本里解析出 (lat, lon)。支持「经度:126.576636,纬度:42.038926」这类写法，
+    也支持反序、英文标签、方向字母、度分秒。解析不出来就抛 ValueError。
+
+    只有一对裸数字时按「经度, 纬度」处理，但只要落在北纬 3~54 / 东经 73~136 之外
+    就按另一种顺序再猜一次（中国境内的站两种都试得出来）。
+    """
+    raw = str(text if text is not None else "").strip()
+    if not raw:
+        raise ValueError("经纬度不能为空")
+    s = raw.replace("：", ":").replace("（", "(").replace("）", ")")
+    s = re.sub(r"[()（）]", " ", s)
+
+    # 1) 带标签的写法
+    got: Dict[str, float] = {}
+    for m in _COORD_LABEL_RE.finditer(s):
+        lab = m.group("lab").strip().lower()
+        axis = _COORD_LAB_AXIS.get(lab)
+        v = _angle(m.group("num"))
+        if v is None:
+            continue
+        d = (m.group("dir") or "").strip()
+        if d:                                  # 带了方向字母就以字母为准
+            axis = _COORD_DIR.get(d.upper()) or _COORD_DIR.get(d) or axis
+            if d.upper() in ("S", "W") or d in ("南", "西"):
+                v = -abs(v)
+        if axis and axis not in got:
+            got[axis] = v
+    if "lat" in got and "lon" in got:
+        lat, lon = got["lat"], got["lon"]
+    else:
+        # 2) 裸数字：先看方向字母，再按数值范围猜
+        dirs = re.findall(r"(\d+(?:\.\d+)?(?:\s*[°度][^,;，；\s]*)?)\s*([NSEWnsew北南东西])", s)
+        pair = re.findall(r"[-+]?\d+(?:\.\d+)?", s)
+        if len(dirs) >= 2:
+            vals: Dict[str, float] = {}
+            for num, d in dirs[:2]:
+                axis = _COORD_DIR.get(d.upper(), _COORD_DIR.get(d))
+                v = _angle(num)
+                if not axis or v is None:
+                    continue
+                if d.upper() in ("S", "W") or d in ("南", "西"):
+                    v = -abs(v)
+                vals[axis] = v
+            if "lat" in vals and "lon" in vals:
+                lat, lon = vals["lat"], vals["lon"]
+            else:
+                raise ValueError("经纬度里认不出经度/纬度，试试「经度:126.576636,纬度:42.038926」")
+        elif len(pair) >= 2:
+            a, b = float(pair[0]), float(pair[1])
+            lat, lon = _order_pair(a, b)
+        else:
+            raise ValueError("经纬度要成对填，比如「经度:126.576636,纬度:42.038926」")
+
+    if not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
+        raise ValueError("经纬度超出范围（纬度 ±90，经度 ±180）")
+    if lat == 0 and lon == 0:
+        raise ValueError("(0, 0) 多半是填错了")
+    return round(lat, 6), round(lon, 6)
+
+
+def _order_pair(a: float, b: float) -> Tuple[float, float]:
+    """两个裸数字谁是谁：先按「经度, 纬度」，不合中国范围就换个顺序再试"""
+    def in_cn(lon: float, lat: float) -> bool:
+        return 73 <= lon <= 136 and 3 <= lat <= 54
+
+    if in_cn(a, b):
+        return b, a
+    if in_cn(b, a):
+        return a, b
+    if abs(b) > 90 and abs(a) <= 90:          # 第二个数超出纬度范围 → 它是经度
+        return a, b
+    if abs(a) > 90 and abs(b) <= 90:
+        return b, a
+    return b, a                                # 兜底按「经度, 纬度」
 
 
 # ---------------------------------------------------------------------------
@@ -572,7 +701,8 @@ def list_custom_stations() -> List[dict]:
     try:
         with db() as conn:
             rows = conn.execute(
-                "SELECT name, lat, lon, lines_json, tele, bureau, note, updated_at "
+                "SELECT name, lat, lon, lines_json, tele, bureau, note, updated_at, "
+                "       type, source, alias, coord_src "
                 "FROM station_custom ORDER BY name"
             ).fetchall()
     except sqlite3.Error:
@@ -585,24 +715,25 @@ def list_custom_stations() -> List[dict]:
             lines = []
         out.append({"name": row["name"], "lat": row["lat"], "lon": row["lon"],
                     "lines": lines, "tele": row["tele"], "bureau": row["bureau"],
-                    "note": row["note"], "updatedAt": row["updated_at"]})
+                    "note": row["note"], "updatedAt": row["updated_at"],
+                    "type": row["type"], "source": row["source"] or "manual",
+                    "alias": row["alias"], "coordSrc": row["coord_src"]})
     return out
 
 
 def save_custom_station(name: str, lat, lon, lines=None, tele: str = "",
-                        bureau: str = "", note: str = "") -> dict:
+                        bureau: str = "", note: str = "", coord=None,
+                        stype: str = "") -> dict:
     # 站名统一成档案口径（「天津站」→「天津」，「十八站」保持不变）
     nm = cnrail.station_name(_norm_line_name(name))
     if not nm:
         raise ValueError("站名不能为空")
     if cnrail.station(nm):
-        raise ValueError(f"车站库里已经有「{nm}」，改坐标请到「数据校对」里改")
-    try:
-        lat, lon = float(lat), float(lon)
-    except (TypeError, ValueError):
-        raise ValueError("经纬度必须是数字")
-    if not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
-        raise ValueError("经纬度超出范围")
+        raise ValueError(f"车站库里已经有「{nm}」，改坐标请到「车站」详情里补")
+    if coord not in (None, ""):
+        lat, lon = parse_latlon(coord)
+    else:
+        lat, lon = _coord_pair(lat, lon)
     if isinstance(lines, str):
         lines = [x for x in re.split(r"[,，、;；\s]+", lines) if x]
     lines = [x.strip() for x in (lines or []) if str(x).strip()]
@@ -610,13 +741,17 @@ def save_custom_station(name: str, lat, lon, lines=None, tele: str = "",
     now = time.time()
     with _db_lock, db() as conn:
         conn.execute(
-            """INSERT INTO station_custom(name, lat, lon, lines_json, tele, bureau, note, updated_at)
-               VALUES(?,?,?,?,?,?,?,?)
+            """INSERT INTO station_custom(name, lat, lon, lines_json, tele, bureau, note,
+                                          updated_at, type, source, coord_src)
+               VALUES(?,?,?,?,?,?,?,?,?,'manual','manual')
                ON CONFLICT(name) DO UPDATE SET lat=excluded.lat, lon=excluded.lon,
                  lines_json=excluded.lines_json, tele=excluded.tele,
-                 bureau=excluded.bureau, note=excluded.note, updated_at=excluded.updated_at""",
+                 bureau=excluded.bureau, note=excluded.note, updated_at=excluded.updated_at,
+                 type=COALESCE(excluded.type, station_custom.type),
+                 source='manual', coord_src='manual'""",
             (nm, lat, lon, json.dumps(lines, ensure_ascii=False),
-             (tele or "").strip(), (bureau or "").strip(), (note or "").strip(), now),
+             (tele or "").strip(), (bureau or "").strip(), (note or "").strip(), now,
+             (stype or "").strip() or "车站"),
         )
     _apply_custom()
     reg = globals().get("stations")
@@ -740,11 +875,20 @@ def _apply_custom() -> None:
         lines[ln["name"]] = ln
     sts: Dict[str, dict] = {}
     for it in list_custom_stations():
-        if _norm_line_name(it["name"]):
-            sts[cnrail._key(it["name"])] = {
-                "name": it["name"], "lat": it["lat"], "lon": it["lon"],
+        nm = _norm_line_name(it["name"])
+        if nm:
+            # 「XX线路所」「XX所」是独立设施，别被 cnrail._key 截成「XX」把车站顶掉
+            k = nm if nm.endswith("所") else cnrail._key(nm)
+            sts[k] = {
+                "name": it["name"], "key": it["name"],
+                "lat": it["lat"], "lon": it["lon"],
                 "lines": it.get("lines") or [], "tele": it.get("tele") or "",
                 "bureau": it.get("bureau") or "", "custom": True,
+                "type": it.get("type") or "车站",
+                "source": it.get("source") or "manual",
+                "alias": it.get("alias") or "",
+                "coordSrc": it.get("coordSrc") or "",
+                "note": it.get("note") or "",
             }
     cnrail.set_custom(lines, sts)
 
@@ -920,19 +1064,48 @@ def clear_line_override(name: str) -> bool:
     return hit
 
 
-def set_coord(name: str, lat: float, lon: float) -> dict:
-    """人工补录车站坐标（写 coord_override，并让坐标缓存失效重载）"""
+def _coord_pair(lat, lon) -> Tuple[float, float]:
+    """
+    把前端/接口传来的坐标整理成 (lat, lon)。
+
+    两种传法都认：
+      - 两个数字：lat / lon
+      - 一行文本：lat 或 lon 里是「经度:126.576636,纬度:42.038926」这种（另一格填空）
+    """
+    lo_s = "" if lon is None else str(lon).strip()
+    la_s = "" if lat is None else str(lat).strip()
+    # 明显是「一行文本」的：里面除了数字还有别的字
+    for one in (lo_s, la_s):
+        if one and re.search(r"[^\d.eE+\-\s]", one):
+            return parse_latlon(one)
+    if not la_s or not lo_s:
+        raise ValueError("经纬度要成对填，比如「经度:126.576636,纬度:42.038926」")
+    try:
+        a, b = float(la_s), float(lo_s)
+    except (TypeError, ValueError):
+        raise ValueError("经纬度必须是数字")
+    if not (-90 <= a <= 90) or not (-180 <= b <= 180):
+        raise ValueError("经纬度超出范围（纬度 ±90，经度 ±180）")
+    if a == 0 and b == 0:
+        raise ValueError("(0,0) 多半是填错了")
+    return round(a, 6), round(b, 6)
+
+
+def set_coord(name: str, lat, lon, coord=None) -> dict:
+    """人工补录车站坐标（写 coord_override，并让坐标缓存失效重载）
+
+    coord 可以直接给一行文本（「经度:126.576636,纬度:42.038926」），这时 lat/lon 留空。
+    """
     name = _norm(name)
     if not name:
         raise ValueError("缺少站名")
-    try:
-        lat, lon = float(lat), float(lon)
-    except (TypeError, ValueError):
-        raise ValueError("经纬度必须是数字")
-    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
-        raise ValueError("经纬度超出范围")
-    if lat == 0 and lon == 0:
-        raise ValueError("(0,0) 多半是填错了")
+    st = cnrail.station(name)
+    if st and st.get("key"):
+        name = st["key"]                       # 与档案口径对齐（「天津站」→「天津」）
+    if coord not in (None, ""):
+        lat, lon = parse_latlon(coord)
+    else:
+        lat, lon = _coord_pair(lat, lon)
     with _db_lock, db() as conn:
         conn.execute(
             """INSERT INTO coord_override(name, lat, lon) VALUES(?,?,?)
@@ -1094,11 +1267,13 @@ class StationRegistry:
         return _norm(name)
 
     def suggest(self, q: str, limit: int = 12) -> List[dict]:
+        """站名联想：12306 站表 + 车站档案（含自建 / 线路补全的车站）"""
         self.ensure()
         q = _norm(q)
         if not q:
             return []
         out = []
+        seen = set()
         low = q.lower()
         for name, code in self.by_name.items():
             st = self.by_code.get(code, {})
@@ -1113,8 +1288,26 @@ class StationRegistry:
                 hit = 3
             else:
                 continue
-            out.append((hit, len(name), name, st.get("city", ""), bool(self.coords.get(name))))
-        out.sort()
+            seen.add(name)
+            out.append((hit, len(name), name, st.get("city") or "", bool(self.coords.get(name))))
+
+        # 12306 站表里没有、但线路 / 档案里有的站（补全进来的那批就在这里）
+        for key, st in (cnrail._STATIONS or {}).items():
+            nm = _norm(st.get("name") or key)
+            if not nm or nm in seen:
+                continue
+            if nm == q:
+                hit = 0
+            elif nm.startswith(q):
+                hit = 1
+            elif q in nm:
+                hit = 2
+            else:
+                continue
+            seen.add(nm)
+            out.append((hit, len(nm), nm, st.get("city") or "", bool(self.coords.get(nm))))
+
+        out.sort(key=lambda x: x[:3])
         return [
             {"name": n, "city": city, "hasCoord": has}
             for _, _, n, city, has in out[:limit]
@@ -1731,14 +1924,22 @@ def station_detail(q: str) -> dict:
             "SELECT COUNT(*) c FROM trains WHERE start_sta = ?", (name,)).fetchone()["c"]
         as_end = conn.execute(
             "SELECT COUNT(*) c FROM trains WHERE end_sta = ?", (name,)).fetchone()["c"]
-    return {
+    # 坐标取「当前生效值」：人工补录的优先，其次档案 / OSM
+    info = stations.coord_info(st.get("name") or name)
+    lat = info.get("lat") if info.get("lat") is not None else st.get("lat")
+    lon = info.get("lon") if info.get("lon") is not None else st.get("lon")
+    out = {
         "found": True,
         **{k: st.get(k) for k in ("name", "key", "en", "type", "loc", "province", "city",
                                   "district", "opened", "bureau", "tele", "services",
-                                  "wikidata", "lat", "lon", "coordSrc", "lines", "custom")},
+                                  "wikidata", "coordSrc", "lines", "custom",
+                                  "source", "alias", "note")},
+        "lat": lat, "lon": lon,
+        "coordSource": info.get("source") or ("base" if lat is not None else "none"),
         "trainsFrom": as_start,
         "trainsTo": as_end,
     }
+    return out
 
 
 init_db()

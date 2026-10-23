@@ -156,7 +156,8 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == "/api/coord":
                 res = railcore.set_coord(
-                    payload.get("name"), payload.get("lat"), payload.get("lon")
+                    payload.get("name"), payload.get("lat"), payload.get("lon"),
+                    payload.get("coord"),
                 )
                 refreshed = curate.refresh_station(res["name"])
                 return self.json({"ok": True, "refreshed": refreshed, **res})
@@ -182,6 +183,7 @@ class Handler(BaseHTTPRequestHandler):
                     payload.get("name"), payload.get("lat"), payload.get("lon"),
                     payload.get("lines") or [], payload.get("tele") or "",
                     payload.get("bureau") or "", payload.get("note") or "",
+                    payload.get("coord"), payload.get("type") or "",
                 )
                 return self.json({"ok": True, "station": st})
 

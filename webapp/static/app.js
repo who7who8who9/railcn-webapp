@@ -1303,7 +1303,7 @@ function nmRender() {
     </div>
     <div class="nm-field">
       <label>经纬度</label>
-      <input id="nmPair" placeholder="可粘贴「经度,纬度」，如 121.523100,31.204800">
+      <input id="nmPair" placeholder="粘一行就行，如 经度:126.576636,纬度:42.038926">
       <div class="nm-pair">
         <span>经度</span><input id="nmLon" type="number" step="0.000001" placeholder="121.5231">
         <span>纬度</span><input id="nmLat" type="number" step="0.000001" placeholder="31.2048">
@@ -1592,13 +1592,23 @@ async function showStation(q) {
         <div class="l1"><span class="code">${d.name}</span>
           ${d.tele ? `<span class="tag">电报码 ${d.tele}</span>` : ''}
           ${d.type ? `<span class="tag">${d.type}</span>` : ''}
-          ${d.custom ? '<span class="tag manual">自建</span><button class="btn sm ghost ln-edit" id="stDel">删除</button>' : ''}</div>
+          ${d.custom ? `<span class="tag manual">${d.source === 'line-fill' ? '线路补全' : '自建'}</span>`
+            + '<button class="btn sm ghost ln-edit" id="stDel">删除</button>' : ''}</div>
         <div class="l2">${[d.province, d.city, d.district].filter(Boolean).join(' / ') || d.loc || ''}</div>
         <div class="l3">
           ${d.bureau ? `<span>${d.bureau}</span>` : ''}
           ${d.opened ? `<span>${d.opened} 启用</span>` : ''}
-          <span>${(d.lat || 0).toFixed(4)}, ${(d.lon || 0).toFixed(4)}</span>
+          <span id="stCoordNow">${d.lat == null ? '坐标缺失'
+            : `纬度 ${(+d.lat).toFixed(6)} · 经度 ${(+d.lon).toFixed(6)}`
+              + (d.coordSource === 'manual' ? '（人工）' : '')}</span>
+          ${d.alias ? `<span>原名 ${d.alias}</span>` : ''}
         </div>
+        <div class="st-coord">
+          <input id="stCoordIn" placeholder="经度:126.576636,纬度:42.038926" autocomplete="off" spellcheck="false">
+          <button class="btn sm" id="stCoordSave">补坐标</button>
+          <span class="st-coord-msg" id="stCoordMsg"></span>
+        </div>
+        ${stNote(d) ? `<div class="l3 st-note">${esc(stNote(d))}</div>` : ''}
         ${svc ? `<div class="l3">${svc}</div>` : ''}
         <div class="l3" style="margin-top:6px">连接线路 ${(d.lines || []).length} 条（点击可在地图查看）</div>
         <div class="l3 chips">${chips || '<span style="color:#9aa6ba">无</span>'}</div>
@@ -1612,6 +1622,7 @@ async function showStation(q) {
           <div class="km"></div></li>
       </ul>`;
     det.classList.add('show');
+    bindStationCoord(d);
     const stDel = $('#stDel');
     if (stDel) {
       let armed = false;
@@ -1640,6 +1651,58 @@ async function showStation(q) {
   } catch (e) {
     box.innerHTML = `<div class="empty">查询失败：${e.message}</div>`;
   }
+}
+
+/** 备注里已经用「原名」标过原写法了，别重复显示 */
+function stNote(d) {
+  return String(d.note || '')
+    .split('；')
+    .filter(x => x && !(d.alias && x === `原写法 ${d.alias}`))
+    .join('；');
+}
+
+/* 车站详情里的「补坐标」：一行文本就能填（经度:126.576636,纬度:42.038926） */
+function bindStationCoord(d) {
+  const inp = $('#stCoordIn'), btn = $('#stCoordSave');
+  if (!inp || !btn) return;
+  const label = btn.textContent;
+  const save = async () => {
+    const txt = (inp.value || '').trim();
+    if (!txt) { inp.focus(); return; }
+    const pair = cuParsePair(txt);
+    if (!pair) {
+      inp.classList.add('bad');
+      btn.textContent = '认不出经纬度';
+      setTimeout(() => { btn.textContent = label; inp.classList.remove('bad'); }, 2200);
+      return;
+    }
+    btn.disabled = true;
+    try {
+      const r = await postJSON('/api/coord', { name: d.name, coord: txt });
+      S.staleCode = d.code || null;
+      inp.value = '';
+      inp.classList.remove('bad');
+      await showStation(d.name);            // 重拉一次，坐标与地图一起更新
+      const msg = $('#stCoordMsg');
+      if (msg) {
+        msg.textContent = `已存 经度 ${fmtDeg(r.lon)} · 纬度 ${fmtDeg(r.lat)}`
+          + (r.refreshed ? ` · 重算 ${r.refreshed} 趟车` : '');
+      }
+    } catch (e) {
+      btn.textContent = '保存失败';
+      setTimeout(() => { btn.textContent = label; }, 2200);
+    } finally {
+      btn.disabled = false;
+    }
+  };
+  btn.addEventListener('click', e => { e.preventDefault(); save(); });
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); save(); }
+  });
+  inp.addEventListener('input', () => {
+    inp.classList.toggle('ok', !!cuParsePair(inp.value));
+    inp.classList.toggle('bad', !!inp.value.trim() && !cuParsePair(inp.value));
+  });
 }
 
 /* ---------- 线路里程：人工校正 ---------- */
@@ -3367,14 +3430,83 @@ function cuRenderEditor() {
 }
 
 /* ---------- 车站坐标编辑 ---------- */
-/** 「经度,纬度」成对输入：也接受中文逗号 / 分号 / 空格，并做顺序自检 */
-function cuParsePair(text) {
-  const s = String(text).trim();
-  const m = s.match(/^([-+]?\d+(?:\.\d+)?)\s*[,，;；\s]\s*([-+]?\d+(?:\.\d+)?)$/);
-  if (!m) return null;
-  const a = Number(m[1]), b = Number(m[2]);
-  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+/* 经纬度文本框认这些写法（顺序随意）：
+     经度:126.576636,纬度:42.038926     ← 带中文标签（从别的网站整行粘过来最省事）
+     lng:126.576636, lat:42.038926      ← 英文标签
+     126.576636, 42.038926              ← 裸数字成对
+     126.576636E 42.038926N             ← 方向字母
+     126°34'35.9"E, 42°2'20.1"N         ← 度分秒
+   `LATLON_LABEL` 里长标签排在短标签前面，免得 long 被 lon 抢走。 */
+const LATLON_LABEL = {
+  '经度': 'lon', longitude: 'lon', long: 'lon', lng: 'lon', lon: 'lon',
+  '纬度': 'lat', latitude: 'lat', lat: 'lat',
+};
+const LATLON_DIR = {
+  n: 'lat', s: 'lat', '北': 'lat', '南': 'lat',
+  e: 'lon', w: 'lon', '东': 'lon', '西': 'lon',
+};
 
+/** 一段角度文本（10 进制 / 度分秒）→ 10 进制度数 */
+function latlonAngle(text) {
+  const m = String(text == null ? '' : text).replace(/[，,]/g, '').match(/-?\d+(?:\.\d+)?/g);
+  if (!m || !m.length) return null;
+  let v = Math.abs(Number(m[0]));
+  if (m.length > 1) v += Math.abs(Number(m[1])) / 60;
+  if (m.length > 2) v += Math.abs(Number(m[2])) / 3600;
+  if (!Number.isFinite(v)) return null;
+  return String(m[0]).startsWith('-') ? -v : v;
+}
+
+/** 已经明确是「纬度 / 经度」的两个数，只做范围校验 */
+function latlonPair(lat, lon) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
+  return { lat, lon };
+}
+
+/** 成对输入解析；认不出来返回 null（调用方据此不覆盖输入框） */
+function cuParsePair(text) {
+  const raw = String(text == null ? '' : text).trim();
+  if (!raw) return null;
+  const s = raw.replace(/[：]/g, ':').replace(/[（）()]/g, ' ');
+
+  // 1) 带标签：经度:126.576636,纬度:42.038926 / lat:42.038926, lng:126.576636
+  const got = {};
+  const re = /(经度|纬度|longitude|latitude|long|lat|lng|lon)\s*[:=]?\s*(-?\d+(?:\.\d+)?(?:\s*[°度]\s*\d+(?:\.\d+)?\s*['′分]?\s*(?:\d+(?:\.\d+)?\s*["″秒]?)?)?)\s*([NSEWnsew北南东西])?/g;
+  let m;
+  while ((m = re.exec(s))) {
+    let axis = LATLON_LABEL[m[1].toLowerCase()] || LATLON_LABEL[m[1]];
+    let v = latlonAngle(m[2]);
+    if (v == null) continue;
+    const d = m[3] || '';
+    if (d) {                                   // 带了方向字母就以字母为准
+      axis = LATLON_DIR[d.toLowerCase()] || LATLON_DIR[d] || axis;
+      if (['s', 'w', '南', '西'].includes(d.toLowerCase()) || d === '南' || d === '西') v = -Math.abs(v);
+    }
+    if (axis && got[axis] == null) got[axis] = v;
+  }
+  if (got.lat != null && got.lon != null) return latlonPair(got.lat, got.lon);
+  if (got.lat != null || got.lon != null) return null;   // 只给了一半，别瞎猜
+
+  // 2) 方向字母：126.576636E 42.038926N
+  const dirs = [...s.matchAll(/(\d+(?:\.\d+)?(?:\s*[°度][^,;，；]*)?)\s*([NSEWnsew北南东西])/g)];
+  if (dirs.length >= 2) {
+    const vals = {};
+    dirs.slice(0, 2).forEach(([, num, d]) => {
+      const axis = LATLON_DIR[d.toLowerCase()] || LATLON_DIR[d];
+      let v = latlonAngle(num);
+      if (v == null || !axis) return;
+      if (['s', 'w', '南', '西'].includes(d.toLowerCase()) || d === '南' || d === '西') v = -Math.abs(v);
+      vals[axis] = v;
+    });
+    if (vals.lat != null && vals.lon != null) return latlonPair(vals.lat, vals.lon);
+  }
+
+  // 3) 裸数字成对
+  const pair = s.match(/-?\d+(?:\.\d+)?/g) || [];
+  if (pair.length < 2) return null;
+  const a = Number(pair[0]), b = Number(pair[1]);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
   const inLat = v => Math.abs(v) <= 90;
   const inLon = v => Math.abs(v) <= 180;
   let lon, lat;
@@ -3389,8 +3521,7 @@ function cuParsePair(text) {
   } else {
     lon = a; lat = b;                       // 兜底按「经度,纬度」
   }
-  if (!inLon(lon) || !inLat(lat)) return null;
-  return { lat, lon };
+  return latlonPair(lat, lon);
 }
 
 const fmtDeg = v => String(Number(Number(v).toFixed(6)));
@@ -3405,8 +3536,8 @@ function cuCoordRowHtml(s, i) {
     : `档案原值 ${fmtDeg(s.baseLat)}, ${fmtDeg(s.baseLon)}`;
   return `<div class="coord-row ${src}" data-nm="${esc(s.name)}" data-i="${i}">
     <span class="nm" title="${esc(s.name)}"><i>${i + 1}</i>${esc(s.name)}</span>
-    <input class="lat" value="${lat}" placeholder="纬度" title="纬度 -90 ~ 90｜也可粘贴「经度,纬度」一次填两格">
-    <input class="lon" value="${lon}" placeholder="经度" title="经度 -180 ~ 180｜也可粘贴「经度,纬度」一次填两格">
+    <input class="lat" value="${lat}" placeholder="纬度" title="纬度 -90 ~ 90｜也可粘一行「经度:126.576636,纬度:42.038926」，一次填两格">
+    <input class="lon" value="${lon}" placeholder="经度" title="经度 -180 ~ 180｜也可粘一行「经度:126.576636,纬度:42.038926」，一次填两格">
     <span class="src ${src}" title="${esc(tip)}">${srcCn}</span>
     <button class="btn sm coord-save">保存</button>
     <button class="btn sm ghost coord-clear"${s.coordSource === 'manual' ? '' : ' disabled'}>还原</button>
@@ -3448,7 +3579,7 @@ function cuBindCoordRows() {
       const row = e.target.closest('.coord-row');
       row.querySelector('.lat').value = fmtDeg(pair.lat);
       row.querySelector('.lon').value = fmtDeg(pair.lon);
-      cuMsg('ok', `${row.dataset.nm}：已按「经度, 纬度」拆开 → 经度 ${fmtDeg(pair.lon)}、纬度 ${fmtDeg(pair.lat)}，按回车保存`);
+      cuMsg('ok', `${row.dataset.nm}：认出来了 → 经度 ${fmtDeg(pair.lon)}、纬度 ${fmtDeg(pair.lat)}，回车即存`);
     });
   });
 }

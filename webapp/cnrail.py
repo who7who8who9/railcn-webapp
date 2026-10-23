@@ -491,11 +491,13 @@ def available() -> bool:
 # --------------------------------------------------------------------------
 
 def station(name: str) -> Optional[dict]:
+    """按站名取档案：先认全名（「南仓线路所」不该被当成「南仓」），再按 12306 口径截后缀"""
     _ensure()
-    k = _key(name)
     if not _STATIONS:
         return None
-    return _STATIONS.get(k) or _STATIONS.get(_norm(name))
+    return (_STATIONS.get(_norm(name))
+            or _STATIONS.get(_key(name))
+            or _STATIONS.get(_norm(name) + "站"))
 
 
 def coord(name: str) -> Optional[Tuple[float, float]]:

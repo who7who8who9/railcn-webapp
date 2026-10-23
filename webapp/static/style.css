@@ -65,7 +65,11 @@ main{flex:1;display:flex;min-height:0}
   display:flex;flex-direction:column;min-height:0;
 }
 .stage{flex:1;position:relative;min-width:0;background:#dde5ee;z-index:0;isolation:isolate}
-#map{position:absolute;inset:0}
+/* z-index:0 不只是排序，是给 #map 建一个独立的层叠上下文：
+   腾讯 GL JS 会往容器里塞 z-index:1000 的透明事件层，若 #map 是 auto，
+   这 1000 会直接参与 .stage 的层叠比较，把 dock（时间轴）、图例、提示
+   全压在下面 —— 表现就是「看得见，点上去却落到地图上、拖不动」。 */
+#map{position:absolute;inset:0;z-index:0;isolation:isolate}
 #fallback{position:absolute;inset:0;width:100%;height:100%;background:
   radial-gradient(circle at 30% 20%,#f7fafd,#e6edf5 70%)}
 #fallback circle.halo{animation:pulse 2s ease-out infinite;transform-origin:center;transform-box:fill-box}
@@ -319,7 +323,7 @@ code.inline{background:#eef2f8;padding:1px 5px;border-radius:4px;font-size:10.5p
 .dock{
   position:absolute;left:16px;right:16px;bottom:14px;display:flex;align-items:center;gap:12px;
   background:rgba(255,255,255,.97);border:1px solid var(--line);border-radius:14px;
-  box-shadow:var(--shadow);padding:10px 14px;z-index:10;backdrop-filter:blur(6px);
+  box-shadow:var(--shadow);padding:10px 14px;z-index:20;backdrop-filter:blur(6px);
 }
 .dock-mid{flex:1;min-width:0}
 /* ---------- 自绘时间轴（不依赖 input[type=range]，各浏览器表现一致） ---------- */
@@ -372,8 +376,39 @@ code.inline{background:#eef2f8;padding:1px 5px;border-radius:4px;font-size:10.5p
 .dock-labels #labNow{position:absolute;left:50%;transform:translateX(-50%);
   color:var(--accent);font-weight:600;background:#fff;padding:0 6px;border-radius:6px}
 .dock-right{display:flex;align-items:center;gap:5px}
-.btn.speed{padding:0 8px;height:28px;font-size:11.5px;border-radius:7px;color:var(--muted)}
+.btn.speed{padding:0 8px;height:28px;font-size:11.5px;border-radius:7px;color:var(--muted);
+  font-variant-numeric:tabular-nums}
 .btn.speed.active{background:var(--accent-soft);border-color:#c7dbff;color:var(--accent);font-weight:600}
+
+/* 倍速自选：300× 只是入口，点开可选预设或自己填 */
+.spd-wrap{position:relative}
+.spd-pop{
+  position:absolute;right:0;bottom:calc(100% + 8px);width:236px;z-index:40;
+  background:#fff;border:1px solid var(--line);border-radius:11px;
+  box-shadow:0 12px 30px rgba(23,42,74,.18);padding:9px 10px 10px;
+}
+.spd-pop::after{
+  content:'';position:absolute;right:16px;bottom:-5px;width:8px;height:8px;
+  background:#fff;border-right:1px solid var(--line);border-bottom:1px solid var(--line);
+  transform:rotate(45deg);
+}
+.spd-pop .spd-h{font-size:10.5px;color:var(--muted);margin:0 0 7px 2px;letter-spacing:.3px}
+.spd-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:5px}
+.spd-grid button{
+  height:26px;border:1px solid var(--line);background:#fff;border-radius:7px;cursor:pointer;
+  font-size:11.5px;color:var(--text);font-variant-numeric:tabular-nums;
+  transition:background .12s,border-color .12s,color .12s;
+}
+.spd-grid button:hover{background:#f2f6fd;border-color:#c7dbff;color:var(--accent)}
+.spd-grid button.on{background:var(--accent-soft);border-color:#c7dbff;color:var(--accent);font-weight:600}
+.spd-cust{display:flex;gap:5px;margin-top:8px;padding-top:8px;border-top:1px dashed var(--line)}
+.spd-cust input{
+  flex:1;min-width:0;height:28px;border:1px solid var(--line);border-radius:7px;
+  padding:0 8px;font-size:11.5px;outline:none;font-variant-numeric:tabular-nums;
+}
+.spd-cust input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.spd-cust .btn{height:28px;padding:0 10px;font-size:11.5px;border-radius:7px}
+.spd-tip{font-size:10px;color:var(--muted);margin-top:6px;line-height:1.5}
 
 /* ---------- misc ---------- */
 .map-hint{

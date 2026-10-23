@@ -186,7 +186,26 @@
         <div class="dock-right">
           <button class="btn speed" data-speed="1">1×</button>
           <button class="btn speed active" data-speed="60">60×</button>
-          <button class="btn speed" data-speed="300">300×</button>
+          <div class="spd-wrap">
+            <button id="btnSpeedMore" class="btn speed" data-speed="300" title="点开可选其它倍速，也可自己填">300× ▾</button>
+            <div id="spdPop" class="spd-pop hidden">
+              <div class="spd-h">选一个，或自己填（越大跑得越快）</div>
+              <div class="spd-grid">
+                <button data-speed="120">120×</button>
+                <button data-speed="300">300×</button>
+                <button data-speed="600">600×</button>
+                <button data-speed="1200">1200×</button>
+                <button data-speed="3600">3600×</button>
+                <button data-speed="14400">14400×</button>
+              </div>
+              <div class="spd-cust">
+                <input id="spdInput" type="text" inputmode="decimal" autocomplete="off"
+                       placeholder="自定义，如 900">
+                <button id="spdOk" class="btn primary">确定</button>
+              </div>
+              <div class="spd-tip">1× 与现实同速 · 60× 是一分钟看完一小时 · 最大 86400×（1 秒 = 1 天）</div>
+            </div>
+          </div>
           <button id="btnNow" class="btn ghost">此刻</button>
         </div>
       </div>

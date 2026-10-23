@@ -2513,11 +2513,86 @@ async function boot() {
     $('#btnPlay').textContent = '▶';
     S.simT = Date.now();
   });
-  $$('.btn.speed').forEach(b => b.addEventListener('click', () => {
-    $$('.btn.speed').forEach(x => x.classList.remove('active'));
-    b.classList.add('active');
-    S.speed = Number(b.dataset.speed);
-  }));
+  // 倍速：1× / 60× 直接点；300× 那个位置是「更多倍速」入口（预设 + 自定义）
+  const SPEED_MIN = 1, SPEED_MAX = 86400;
+  const spdLabel = v => `${v < 10 ? (Math.round(v * 10) / 10) : Math.round(v)}×`;
+
+  function spdPaint() {
+    $$('.btn.speed').forEach(b => b.classList.remove('active'));
+    const direct = $$('.btn.speed').find(
+      b => b.id !== 'btnSpeedMore' && Number(b.dataset.speed) === S.speed);
+    if (direct) direct.classList.add('active');
+    const more = $('#btnSpeedMore');
+    if (more) {
+      // 直接按钮命中时，入口回落到「300×」这个默认暗示值；否则显示当前自定义倍速
+      more.classList.toggle('active', !direct);
+      more.textContent = `${direct ? '300' : Math.round(S.speed)}× ▾`;
+    }
+    $$('#spdPop .spd-grid button').forEach(
+      b => b.classList.toggle('on', Number(b.dataset.speed) === S.speed));
+  }
+
+  function setSpeed(v, save = true) {
+    const raw = String(v).trim().replace(/[×xX\s,，]/g, '');
+    let n = Number(raw);
+    if (!isFinite(n) || n <= 0) n = Number(raw.replace(/[^\d.]/g, ''));  // 兜底：抠出数字
+    if (!isFinite(n) || n <= 0) return false;
+    n = Math.min(SPEED_MAX, Math.max(SPEED_MIN, n));
+    S.speed = n;
+    if (save) { try { localStorage.setItem('railcn.speed', String(n)); } catch (_) { } }
+    spdPaint();
+    return true;
+  }
+
+  const spdPop = $('#spdPop'), spdInput = $('#spdInput'), spdBtn = $('#btnSpeedMore');
+  const spdOpen = () => {
+    spdPop.classList.remove('hidden');
+    spdInput.value = '';
+    spdPaint();
+    spdBtn.setAttribute('aria-expanded', 'true');
+  };
+  const spdClose = () => {
+    if (spdPop.classList.contains('hidden')) return;
+    spdPop.classList.add('hidden');
+    spdBtn.setAttribute('aria-expanded', 'false');
+  };
+  const spdCommit = () => {
+    const raw = spdInput.value.trim();
+    if (!raw) { spdInput.focus(); return; }
+    if (!setSpeed(raw)) { spdInput.select(); return; }
+    spdClose();
+  };
+
+  $$('.btn.speed').forEach(b => {
+    if (b.id === 'btnSpeedMore') return;
+    b.addEventListener('click', () => setSpeed(b.dataset.speed));
+  });
+  spdBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    spdPop.classList.contains('hidden') ? spdOpen() : spdClose();
+  });
+  spdPop.addEventListener('click', e => {
+    const b = e.target.closest('button[data-speed]');
+    if (b && setSpeed(b.dataset.speed)) spdClose();
+  });
+  $('#spdOk').addEventListener('click', spdCommit);
+  spdInput.addEventListener('keydown', e => {
+    if (e.isComposing || e.keyCode === 229) return;   // 输入法组字中不抢键
+    if (e.key === 'Enter') { e.preventDefault(); spdCommit(); }
+    else if (e.key === 'Escape') { e.stopPropagation(); spdClose(); spdBtn.focus(); }
+  });
+  document.addEventListener('pointerdown', e => {
+    if (spdPop.classList.contains('hidden')) return;
+    if (spdPop.contains(e.target) || spdBtn.contains(e.target)) return;
+    spdClose();
+  }, true);
+
+  // 记住上次用的倍速
+  try {
+    const sv = Number(localStorage.getItem('railcn.speed'));
+    if (sv > 0) setSpeed(sv, false);
+  } catch (_) { }
+  spdPaint();
   TL.init();
 
   // map key modal

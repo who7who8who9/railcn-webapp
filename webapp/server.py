@@ -28,6 +28,7 @@ sys.path.insert(0, BASE_DIR)
 import railcore  # noqa: E402
 import cnrail   # noqa: E402
 import collector  # noqa: E402
+import historyq  # noqa: E402
 import curate   # noqa: E402
 import railgeom  # noqa: E402
 
@@ -367,6 +368,19 @@ class Handler(BaseHTTPRequestHandler):
                     date, one("q"), int(one("limit", "40") or 40), int(one("offset", "0") or 0)
                 )
             )
+
+        # 历史查询：车次开行日历 / 大类统计 / 某日停站时刻
+        if path == "/api/history/coverage":
+            return self.json(historyq.coverage(one("from"), one("to")))
+
+        if path == "/api/history/calendar":
+            return self.json(historyq.train_calendar(one("code"), one("from"), one("to")))
+
+        if path == "/api/history/types":
+            return self.json(historyq.type_stats(one("from"), one("to"), one("type")))
+
+        if path == "/api/history/stops":
+            return self.json(historyq.stops_of(one("code"), one("date")))
 
         # ---- 数据校对（补全经由 / 里程 / 坐标）----
         if path == "/api/curate/stats":

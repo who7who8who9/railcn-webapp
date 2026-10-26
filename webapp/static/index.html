@@ -115,19 +115,68 @@
       <div id="paneHist" class="pane hidden">
         <div class="dl-head">
           <div class="dl-h1">历史数据 · 已下载到本地</div>
-          <div class="dl-h2">包含全部已落库的日期（下载窗口内的和更早的都在），可检索车次、查看经停站、随时导出</div>
+          <div class="dl-h2">按日浏览 / 按车次查开行日历 / 按大类统计开行与不开行；数据永久保存在本地</div>
           <div class="dl-ctrl">
             <button id="histRefresh" class="btn sm">刷新</button>
             <span id="histSum" class="hist-sum"></span>
           </div>
         </div>
-        <div id="histDates" class="hist-dates"></div>
-        <div class="hist-bar">
-          <input id="histQ" placeholder="车次号 / 始发站 / 终到站" autocomplete="off">
-          <button id="histGo" class="btn sm primary">检索</button>
+
+        <div class="hq-tabs">
+          <button class="hq-tab active" data-mode="day">按日浏览</button>
+          <button class="hq-tab" data-mode="train">车次查询</button>
+          <button class="hq-tab" data-mode="type">大类统计</button>
         </div>
-        <div id="histList" class="list"></div>
-        <div id="histFoot" class="hist-foot"></div>
+
+        <div id="hqDay" class="hq-pane">
+          <div id="histDates" class="hist-dates"></div>
+          <div class="hist-bar">
+            <input id="histQ" placeholder="车次号 / 始发站 / 终到站" autocomplete="off">
+            <button id="histGo" class="btn sm primary">检索</button>
+          </div>
+          <div id="histList" class="list"></div>
+          <div id="histFoot" class="hist-foot"></div>
+        </div>
+
+        <div id="hqTrain" class="hq-pane hidden">
+          <div class="hq-bar">
+            <input id="hqCode" class="hq-input" placeholder="车次号，如 G1 / K8361" autocomplete="off">
+            <span class="hq-sep">日期段</span>
+            <input type="date" id="hqFrom" class="hq-date">
+            <span class="hq-sep">→</span>
+            <input type="date" id="hqTo" class="hq-date">
+            <button id="hqGo" class="btn sm primary">查询</button>
+            <button class="btn sm" data-range="7">近 7 天</button>
+            <button class="btn sm" data-range="30">近 30 天</button>
+            <button class="btn sm" data-range="all">全部</button>
+          </div>
+          <div id="hqCalSum" class="hq-sum"></div>
+          <div id="hqCalLegend" class="hq-legend hidden">
+            <span><i class="dot open"></i>开行</span>
+            <span><i class="dot open nostops"></i>开行·停站未下载</span>
+            <span><i class="dot skip"></i>不开行</span>
+            <span><i class="dot none"></i>无数据</span>
+            <span class="tip">点「开行」的格子看当日停站时刻</span>
+          </div>
+          <div id="hqCal" class="hq-cal"></div>
+          <div id="hqStops" class="hq-stops"></div>
+        </div>
+
+        <div id="hqType" class="hq-pane hidden">
+          <div class="hq-bar">
+            <span class="hq-sep">日期段</span>
+            <input type="date" id="hqTFrom" class="hq-date">
+            <span class="hq-sep">→</span>
+            <input type="date" id="hqTTo" class="hq-date">
+            <button id="hqTGo" class="btn sm primary">统计</button>
+            <button class="btn sm" data-trange="7">近 7 天</button>
+            <button class="btn sm" data-trange="30">近 30 天</button>
+            <button class="btn sm" data-trange="all">全部</button>
+          </div>
+          <div id="hqTypeSum" class="hq-sum"></div>
+          <div id="hqTypeTable" class="hq-tbl-wrap"></div>
+          <div id="hqTypeDays" class="hq-days"></div>
+        </div>
       </div>
 
       <!-- 数据校对 -->

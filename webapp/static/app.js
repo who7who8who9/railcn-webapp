@@ -102,6 +102,13 @@ const GCJ = (() => {
 /* ============================================================
  * 状态
  * ============================================================ */
+/** 一条线上百个站，标签全标会糊成一片：首末必标，中间均匀取样 */
+function thinStops(list, maxN = 16, threshold = 40) {
+  if (!list || list.length <= threshold) return list;
+  const k = Math.ceil(list.length / maxN);
+  return list.filter((_, i) => i === 0 || i === list.length - 1 || i % k === 0);
+}
+
 const S = {
   date: todayStr(),
   route: null,
@@ -174,12 +181,19 @@ const TMapView = {
       ? route.lineStops
       : route.stops.map(s => ({ ...s, stop: true }));
     const pts = raw.filter(s => s.lat != null);
+    const geoAll = (route.geom || []);
 
-    if (!pts.length) return;
+    if (!pts.length && !geoAll.length) return;
 
     // 线：外套 + 主线
     const linePts = (route.path && route.path.length > 1) ? route.path : pts;
     const path = linePts.map(s => this.g(s.lat, s.lon));
+    // route.geom = OSM 真实走向（WGS-84 的 [[lon,lat],…] 折线数组）。
+    // 有几何就照着几何画，站点直连那条只在没几何时兜底。
+    const geo = (route.geom && route.geom.length) ? route.geom : null;
+    const geoPaths = geo
+      ? geo.map(part => part.map(p => this.g(p[1], p[0]))).filter(a => a.length > 1)
+      : null;
     this.layers.line = new TMap.MultiPolyline({
       map: this.map,
       styles: {
@@ -190,10 +204,11 @@ const TMapView = {
           color: '#1f6feb', width: 5, lineCap: 'round', borderWidth: 0,
         }),
       },
-      geometries: [
-        { id: 'casing', styleId: 'casing', paths: path },
-        { id: 'main', styleId: 'main', paths: path },
-      ],
+      geometries: (geoPaths && geoPaths.length)
+        ? [{ id: 'casing', styleId: 'casing', paths: geoPaths },
+           { id: 'main', styleId: 'main', paths: geoPaths }]
+        : [{ id: 'casing', styleId: 'casing', paths: path },
+           { id: 'main', styleId: 'main', paths: path }],
       zIndex: 5,
     });
 
@@ -226,7 +241,7 @@ const TMapView = {
 
     // 站名 + 时刻：只标本次停车站（通过站太密，标了糊成一片）
     const nStop = (route.stops || []).length;
-    const labeled = pts.map((s, k) => ({ s, k })).filter(o => o.s.stop);
+    const labeled = thinStops(pts.map((s, k) => ({ s, k })).filter(o => o.s.stop));
     this.layers.labels = new TMap.MultiLabel({
       map: this.map,
       styles: {
@@ -267,8 +282,12 @@ const TMapView = {
     this.layer = this.layers;
     // 注意：必须给一个有效初始位置。传 null 会在构造时立刻挂到地图，
     // SDK 内部读 position.x 直接抛 "Cannot read properties of null"。
+    // 只有几何、没有站点（OSM 独有线路）时，拿几何第一个点顶上。
+    const anchor = pts[0]
+      ? this.g(pts[0].lat, pts[0].lon)
+      : this.g(geoAll[0][0][1], geoAll[0][0][0]);
     this.info = new TMap.InfoWindow({
-      map: this.map, position: this.g(pts[0].lat, pts[0].lon),
+      map: this.map, position: anchor,
       offset: { x: 0, y: -14 }, enableCustom: false,
     });
     this.info.close();
@@ -309,6 +328,10 @@ const TMapView = {
 
   setTrain(pt) {
     if (!this.ok || !this.layers.train) return;
+    if (!pt) {                                   // 离开车次视图时把列车标记收起来
+      this.layers.train.setGeometries([]);
+      return;
+    }
     this.layers.train.setGeometries([{ id: 'train', styleId: 't', position: this.g(pt.lat, pt.lon) }]);
   },
 
@@ -322,14 +345,22 @@ const TMapView = {
     const all = (this.route?.lineStops && this.route.lineStops.length > 1)
       ? this.route.lineStops : (this.route?.stops || []);
     const pts = all.filter(s => s.lat != null);
-    if (!pts || !pts.length) return;
+    const geo = this.route?.geom || [];
+    if ((!pts || !pts.length) && !geo.length) return;
     let minLat = 90, maxLat = -90, minLon = 180, maxLon = -180;
     pts.forEach(s => {
       minLat = Math.min(minLat, s.lat); maxLat = Math.max(maxLat, s.lat);
       minLon = Math.min(minLon, s.lon); maxLon = Math.max(maxLon, s.lon);
     });
+    // 几何比站点范围大（支线 / 绕行）时按几何收边，别把线画到框外
+    geo.forEach(part => part.forEach(([lon, lat]) => {
+      minLat = Math.min(minLat, lat); maxLat = Math.max(maxLat, lat);
+      minLon = Math.min(minLon, lon); maxLon = Math.max(maxLon, lon);
+    }));
+    if (!(maxLat > -90)) return;
     if (maxLat - minLat < 0.05 && maxLon - minLon < 0.05) {
-      this.map.easeTo({ center: this.g(pts[0].lat, pts[0].lon), zoom: 12 });
+      const c = pts[0] || { lat: minLat, lon: minLon };
+      this.map.easeTo({ center: this.g(c.lat, c.lon), zoom: 12 });
       return;
     }
     const b = new TMap.LatLngBounds(this.g(minLat, minLon), this.g(maxLat, maxLon));
@@ -393,7 +424,8 @@ const SvgView = {
     this.svg.setAttribute('viewBox', `0 0 ${this.W} ${this.H}`);
     this.gRoot.innerHTML = '';
     const pts = route.stops.filter(s => s.lat != null);
-    if (!pts.length) return;
+    const geoIn = route.geom || [];
+    if (!pts.length && !geoIn.length) return;
 
     const xy = pts.map(s => ({ s, p: this.proj(s.lat, s.lon) }));
     let minX = 1, maxX = 0, minY = 1, maxY = 0;
@@ -401,6 +433,12 @@ const SvgView = {
       minX = Math.min(minX, o.p[0]); maxX = Math.max(maxX, o.p[0]);
       minY = Math.min(minY, o.p[1]); maxY = Math.max(maxY, o.p[1]);
     });
+    // 有真实几何时把几何也纳入范围，否则边角会被裁掉
+    (route.geom || []).forEach(part => part.forEach(([lon, lat]) => {
+      const p = this.proj(lat, lon);
+      minX = Math.min(minX, p[0]); maxX = Math.max(maxX, p[0]);
+      minY = Math.min(minY, p[1]); maxY = Math.max(maxY, p[1]);
+    }));
     const padX = 0.12 * (maxX - minX || 0.02), padY = 0.12 * (maxY - minY || 0.02);
     this.view = {
       x0: minX - padX, x1: maxX + padX,
@@ -446,16 +484,29 @@ const SvgView = {
     }
 
     const px = pts.map(s => this.toPx(this.proj(s.lat, s.lon)));
-    const lineArr = (route.path && route.path.length > 1) ? route.path : pts;
-    const lpx = lineArr.map(s => this.toPx(this.proj(s.lat, s.lon)));
-    // 线路：外套 + 主线
-    const d = lpx.map((p, i) => `${i ? 'L' : 'M'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
-    this.mk('path', { d, fill: 'none', stroke: '#ffffff', 'stroke-width': 9, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' });
-    this.mk('path', { d, fill: 'none', stroke: '#1f6feb', 'stroke-width': 4.5, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' });
+    const geo = this.route.geom || [];
+    if (geo.length) {
+      geo.forEach(part => {
+        if (part.length < 2) return;
+        const d = part.map(([lon, lat]) => this.toPx(this.proj(lat, lon)))
+          .map((p, i) => `${i ? 'L' : 'M'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
+        this.mk('path', { d, fill: 'none', stroke: '#ffffff', 'stroke-width': 7, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' });
+        this.mk('path', { d, fill: 'none', stroke: '#1f6feb', 'stroke-width': 3.6, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' });
+      });
+    } else {
+      const lineArr = (route.path && route.path.length > 1) ? route.path : pts;
+      const lpx = lineArr.map(s => this.toPx(this.proj(s.lat, s.lon)));
+      // 线路：外套 + 主线
+      const d = lpx.map((p, i) => `${i ? 'L' : 'M'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
+      this.mk('path', { d, fill: 'none', stroke: '#ffffff', 'stroke-width': 9, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' });
+      this.mk('path', { d, fill: 'none', stroke: '#1f6feb', 'stroke-width': 4.5, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' });
+    }
 
     // 站点：本次停车实心点 + 站名与时刻，通过站小空心点
     this.stopNodes = {};
     const nStop = (route.stops || []).length;
+    // 站特别多（整条线路）时只标一部分，否则文字糊成一片
+    const labelIdx = new Set(thinStops(pts.map((_, i) => i), 16));
     pts.forEach((s, i) => {
       const p = px[i];
       const stop = s.stop !== false;
@@ -472,7 +523,7 @@ const SvgView = {
       });
       this.stopNodes[s.i] = c;
 
-      if (stop) {
+      if (stop && labelIdx.has(i)) {
         const last = (s.i || 0) >= nStop;
         const t = last ? (s.arr || s.dep) : (s.dep || s.arr);
         const label = this.mk('text', {
@@ -530,6 +581,10 @@ const SvgView = {
 
   setTrain(pt) {
     if (!this.trainNode || !this.view) return;
+    if (!pt) {                       // 离开车次视图时把列车标记收起来
+      this.trainNode.setAttribute('opacity', 0);
+      return;
+    }
     const p = this.toPx(this.proj(pt.lat, pt.lon));
     this.trainNode.setAttribute('transform', `translate(${p[0]},${p[1]})`);
     this.trainNode.setAttribute('opacity', 1);
@@ -1037,9 +1092,13 @@ function tick() {
     S.simT = clamp(S.simT, a, b);
 
     const pos = posAt(S.route, S.simT);
-    if (pos.point) {
+    // 地图上现在画的不是这趟车（切到线路 / 车站页了）就别把列车标记甩上去
+    const onTrain = !MapView.impl?.route || MapView.impl.route.code === S.route.code;
+    if (pos.point && onTrain) {
       MapView.setTrain(pos.point);
       if (SvgView.lastPt !== pos.point) SvgView.lastPt = pos.point;
+    } else if (!onTrain) {
+      MapView.setTrain(null);
     }
     renderHud(pos);
     syncSlider();
@@ -1609,6 +1668,7 @@ async function showStation(q) {
           <span class="st-coord-msg" id="stCoordMsg"></span>
         </div>
         ${stNote(d) ? `<div class="l3 st-note">${esc(stNote(d))}</div>` : ''}
+        ${d.addr ? `<div class="l3 st-addr" title="来自 12306 站资料">${esc(d.addr)}</div>` : ''}
         ${svc ? `<div class="l3">${svc}</div>` : ''}
         <div class="l3" style="margin-top:6px">连接线路 ${(d.lines || []).length} 条（点击可在地图查看）</div>
         <div class="l3 chips">${chips || '<span style="color:#9aa6ba">无</span>'}</div>
@@ -1706,7 +1766,7 @@ function bindStationCoord(d) {
 }
 
 /* ---------- 线路里程：人工校正 ---------- */
-const LN = { data: null, segKm: {}, staKm: {}, totalKm: '', editing: false, busy: false, mode: 'seg', bad: {} };
+const LN = { data: null, segKm: {}, staKm: {}, totalKm: '', editing: false, busy: false, mode: 'seg', bad: {}, gdata: null };
 
 const lnKmText = v => (v == null ? '-' : `${v} km`);
 
@@ -2226,15 +2286,13 @@ function lnRenderInfo() {
   if (!el) return;
   const i = d && d.info;
   const ck = (d && d.kmCheck) || null;
+  const osm = lnOsmBlock(d);
   if (!i) {
-    if (ck && ck.agree === false) {
-      el.hidden = false;
-      el.innerHTML = lnKmBanner(d);
-      lnBindBanner();
-      return;
-    }
-    el.hidden = true;
-    el.innerHTML = '';
+    const warn = (ck && ck.agree === false) ? lnKmBanner(d) : '';
+    el.hidden = false;
+    el.innerHTML = osm + warn;
+    lnBindGeom();
+    lnBindBanner();
     return;
   }
   const rows = [
@@ -2256,9 +2314,11 @@ function lnRenderInfo() {
     </div>
     ${rows.length ? `<div class="ln-i-grid">${rows.map(([k, v]) =>
       `<div><span>${k}</span><em>${esc(v)}</em></div>`).join('')}</div>` : ''}
+    ${osm}
     ${intro ? `<div class="ln-i-intro" id="lnIntro" hidden>${esc(intro)
       .replace(/\n{2,}/g, '<br><br>').replace(/\n/g, '<br>')}</div>` : ''}
     ${lnKmBanner(d)}`;
+  lnBindGeom();
   const ib = $('#lnIntroBtn');
   if (ib) ib.addEventListener('click', () => {
     const box = $('#lnIntro');
@@ -2398,22 +2458,90 @@ function lnRenderEditor() {
   lnRefreshPreview();
 }
 
+/* ---------- 真实走向（OSM 几何，来自 CRTrainRoute 数据） ---------- */
+/** 默认按真实走向画；关掉就退回「站点直连」 */
+function lnGeomOn() {
+  return localStorage.getItem('railcn.lineGeom') !== '0';
+}
+
+/** 拉一条线的几何，缓存到 LN.gdata */
+async function lnLoadGeom(osmName, expectKm) {
+  if (!osmName) return null;
+  if (LN.gdata && LN.gdata.name === osmName) return LN.gdata;
+  try {
+    // expectKm 用来挡掉同名残段：osm 里「潍烟高速铁路」只剩 2 km，和 585 km 的线对不上
+    LN.gdata = await api('/api/line/osm', { q: osmName, km: expectKm });
+  } catch (_) {
+    LN.gdata = null;
+  }
+  return LN.gdata;
+}
+
+/** 按当前开关重画地图（几何 / 站点直连） */
+function lnDrawMap() {
+  const d = LN.data;
+  if (!d) return;
+  const pts = d.stations.filter(p => p.lat != null);
+  const geom = (lnGeomOn() && LN.gdata) ? (LN.gdata.parts || []) : null;
+  MapView.setRoute({
+    code: d.name,
+    stops: pts.map((p, i) => ({ i: i + 1, name: p.name, lat: p.lat, lon: p.lon })),
+    geom,
+  });
+  MapView.fit();
+}
+
+/** 线路详情里的「真实走向」小卡：OSM 线名 / 几何里程 / 桥隧 */
+function lnOsmBlock(d) {
+  const o = d && d.osm;
+  if (!o) {
+    return `<div class="ln-osm"><div class="ln-i-head"><b>真实走向</b>
+      <span class="ln-i-src">OSM</span></div>
+      <div class="ln-osm-none">OSM 数据里没有能对上这条线的线名，地图只能画站点直连</div></div>`;
+  }
+  const fam = o.match === 'family' ? `　<span class="ln-osm-tag">同族匹配</span>` : '';
+  const diff = (d.totalKm != null && o.km) ? Math.round(o.km - d.totalKm) : null;
+  const rows = [
+    ['OSM 线名', o.name],
+    ['几何里程', `${o.km} km${o.kmMain && o.kmMain < o.km ? `（最长一段 ${o.kmMain}）` : ''}`],
+    ['连通段', `${o.nPart} 段 · ${o.nFrag} 节折线`],
+    ['桥 / 隧', `${o.nBridge} / ${o.nTunnel} 处`],
+  ];
+  return `<div class="ln-osm">
+    <div class="ln-i-head"><b>真实走向</b><span class="ln-i-src">OSM${fam}</span>
+      ${diff != null ? `<span class="ln-osm-diff${Math.abs(diff) > 40 ? ' warn' : ''}">几何比档案 ${diff > 0 ? '+' : ''}${diff} km</span>` : ''}
+      <button class="btn sm ghost" id="lnGeomBtn">${lnGeomOn() ? '改站点直连' : '按真实走向'}</button>
+    </div>
+    <div class="ln-i-grid">${rows.map(([k, v]) =>
+      `<div><span>${k}</span><em>${esc(v)}</em></div>`).join('')}</div>
+  </div>`;
+}
+
+function lnBindGeom() {
+  const btn = $('#lnGeomBtn');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    const on = !lnGeomOn();
+    localStorage.setItem('railcn.lineGeom', on ? '1' : '0');
+    if (on && LN.data && LN.data.osm && !LN.gdata) await lnLoadGeom(LN.data.osm.name, LN.data.totalKm);
+    lnDrawMap();
+    lnRenderInfo();
+  });
+}
+
 async function showLine(q) {
   const box = $('#netList'), det = $('#netDetail');
   try {
     det.classList.remove('show');
     box.innerHTML = `<div class="empty">查询线路 ${q} …</div>`;
     const d = await api('/api/line', { q });
-    const pts = d.stations.filter(p => p.lat != null);
-    MapView.setRoute({
-      code: d.name,
-      stops: pts.map((p, i) => ({ i: i + 1, name: p.name, lat: p.lat, lon: p.lon })),
-    });
-    MapView.fit();
+    LN.data = d;                       // 先挂上，lnDrawMap 要靠它取站点
+    LN.gdata = null;
+    if (d.osm && lnGeomOn()) await lnLoadGeom(d.osm.name, d.totalKm);
+    lnDrawMap();
     $('#hud').classList.add('hidden');
     $('#dock').classList.add('hidden');
     box.innerHTML = '';
-    LN.data = d;
     LN.editing = false;
     lnWide(false);
     LN.segKm = { ...((d.override && d.override.segKm) || {}) };
@@ -2438,9 +2566,82 @@ async function showLine(q) {
       MapView.focusStop(Number(li.dataset.i));
     }));
   } catch (e) {
-    // 线路库里没有：看看「线路资料库」里有没有，有就列出来（可只读查看 / 一键收进线路库）
+    // 线路库里没有：先看「线路资料库」，再退到 OSM（CRTrainRoute）那 3000 多条线
     const hit = await showCatalogList(q, box);
-    if (!hit) box.innerHTML = `<div class="empty">${e.message}</div>`;
+    if (!hit) {
+      const hit2 = await showOsmList(q, box);
+      if (!hit2) box.innerHTML = `<div class="empty">${e.message}</div>`;
+    }
+  }
+}
+
+/* ---------- OSM 线路（CRTrainRoute 数据里有、线路库里没有的） ---------- */
+async function showOsmList(q, box) {
+  try {
+    const d = await api('/api/line/osm/list', { q, limit: 24 });
+    if (!d.items || !d.items.length) return false;
+    const st = d.stats || {};
+    box.innerHTML = `<div class="cat-head">线路库和资料库都没有「${esc(q)}」，`
+      + `OSM 铁路数据里找到 ${d.items.length} 条：</div>`
+      + d.items.map(it => `<div class="cat-row" data-nm="${esc(it.name)}">
+          <div class="cat-n">${esc(it.name)}<i>${it.km} km</i></div>
+          <div class="cat-m">${[`桥 ${it.nBridge}`, `隧 ${it.nTunnel}`,
+            `${it.nPart} 段`, `${it.nFeat} 个要素`].join(' · ')}</div>
+        </div>`).join('')
+      + `<div class="cat-foot">OSM 共 ${st.lines || 0} 条线、约 ${(st.km || 0).toLocaleString()} km（上下行已去重）</div>`;
+    $$('#netList .cat-row').forEach(el =>
+      el.addEventListener('click', () => showOsmLine(el.dataset.nm)));
+    return true;
+  } catch (_) { return false; }
+}
+
+async function showOsmLine(name) {
+  const box = $('#netList'), det = $('#netDetail');
+  $('#paneNet').classList.add('line-only');
+  lnWide(false);
+  det.classList.remove('show');
+  LN.data = null;
+  LN.gdata = null;
+  box.innerHTML = `<div class="empty">载入「${esc(name)}」的 OSM 几何…</div>`;
+  try {
+    const g = await api('/api/line/osm', { q: name });
+    LN.gdata = g;
+    MapView.setRoute({ code: g.name, stops: [], geom: g.parts || [] });
+    MapView.fit();
+    $('#hud').classList.add('hidden');
+    $('#dock').classList.add('hidden');
+    const rows = [
+      ['几何里程', `${g.km} km`],
+      ['最长一段', g.kmMain && g.kmMain < g.km ? `${g.kmMain} km` : ''],
+      ['连通段', `${g.nPart} 段 · ${g.nFrag} 节折线`],
+      ['桥 / 隧', `${g.nBridge} / ${g.nTunnel} 处`],
+      ['OSM 要素', `${g.nFeat} 个`],
+      ['范围', (g.bbox || []).length === 4
+        ? `${g.bbox[1].toFixed(2)}–${g.bbox[3].toFixed(2)}°N, ${g.bbox[0].toFixed(2)}–${g.bbox[2].toFixed(2)}°E` : ''],
+    ].filter(r => r[1]);
+    box.innerHTML = '';
+    det.innerHTML = `
+      <div class="dhead">
+        <div class="l1"><span class="code">${esc(g.name)}</span>
+          <span class="tag">${g.km} km</span>
+          <span class="tag warn">线路库未收录</span></div>
+        <div class="l2">OSM 铁路数据（CRTrainRoute）· 只有几何与走向，没有站表</div>
+      </div>
+      <div class="lninfo">
+        <div class="ln-i-head"><b>几何信息</b><span class="ln-i-src">OSM</span>
+          <button class="btn sm ghost" id="osmBack">返回</button></div>
+        <div class="ln-i-grid">${rows.map(([k, v]) =>
+          `<div><span>${k}</span><em>${esc(v)}</em></div>`).join('')}</div>
+        <div class="ln-osm-none">这条线只有 OSM 的轨道几何，没有线路参数与站表。要完整资料可以补进线路库后再编辑里程。</div>
+      </div>`;
+    det.classList.add('show');
+    $('#osmBack').addEventListener('click', () => {
+      det.classList.remove('show');
+      $('#paneNet').classList.remove('line-only');
+      showOsmList(g.name, box);
+    });
+  } catch (e) {
+    box.innerHTML = `<div class="empty">${e.message}</div>`;
   }
 }
 
@@ -2478,17 +2679,34 @@ async function showCatalog(id) {
         pts.push({ i: i + 1, name: s.name, lat: s.lat, lon: s.lon });
       }
     });
-    if (pts.length >= 2) {
+    // 真实走向：优先用资料库里挂到的线名去取 OSM 几何
+    let geom = null;
+    const osmQ = (c.osm && c.osm.name) || c.line_name || c.name;
+    if (lnGeomOn() && c.osm) {          // 没匹配到就不去要几何，免得白跑一趟 404
+      try {
+        const g = await api('/api/line/osm', { q: osmQ, km: c.length_km });
+        geom = g.parts || null;
+      } catch (_) { /* 没有就算了 */ }
+    }
+    if (pts.length >= 2 && geom) {
+      MapView.setRoute({ code: c.name, stops: pts, geom });
+      MapView.fit();
+    } else if (pts.length >= 2) {
       MapView.setRoute({ code: c.name, stops: pts });
       MapView.fit();
     }
     const rows = [
       ['类型', c.type], ['等级', c.level], ['服务', c.service],
       ['设计速度', c.design_speed], ['运营速度', c.run_speed],
-      ['线路长度', c.length_km ? c.length_km + ' km' : ''], ['开通', c.open_date],
+      ['线路长度', c.length_km ? `${c.length_km} km` : ''], ['开通', c.open_date],
       ['起止', (c.from_sta && c.to_sta) ? `${c.from_sta} – ${c.to_sta}` : ''],
       ['外文名', c.foreign], ['别名', c.alias],
     ].filter(r => r[1]);
+    if (c.osm) {
+      rows.push(['几何里程', `${c.osm.km} km`],
+        ['OSM 线名', c.osm.name + (c.osm.match === 'family' ? '（同族）' : '')],
+        ['桥 / 隧', `${c.osm.nBridge} / ${c.osm.nTunnel} 处`]);
+    }
     const intro = (c.intro || '').trim();
     box.innerHTML = '';
     det.innerHTML = `

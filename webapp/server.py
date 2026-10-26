@@ -29,6 +29,7 @@ import railcore  # noqa: E402
 import cnrail   # noqa: E402
 import collector  # noqa: E402
 import curate   # noqa: E402
+import railgeom  # noqa: E402
 
 mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("text/css", ".css")
@@ -216,7 +217,9 @@ class Handler(BaseHTTPRequestHandler):
             return v[0] if v else default
 
         if path == "/api/stats":
-            return self.json(railcore.stats())
+            st = railcore.stats()
+            st["osm"] = railgeom.stats()
+            return self.json(st)
 
         if path == "/api/stations":
             return self.json({"items": railcore.stations.suggest(one("q"), int(one("limit", "12")))})
@@ -271,9 +274,24 @@ class Handler(BaseHTTPRequestHandler):
                 if target:
                     d = cnrail.line_detail(target)
                     if d:
-                        return self.json({**d, "aliasOf": q})
+                        return self.json({**d, "aliasOf": q,
+                                          "osm": (railgeom.meta(q, d.get("totalKm"))
+                                                  or railgeom.meta(target, d.get("totalKm")))})
                 return self.err("未找到线路: " + q, 404)
-            return self.json(d)
+            return self.json({**d, "osm": railgeom.meta(d.get("name") or q, d.get("totalKm"))})
+
+        # OSM 线路几何（CRTrainRoute 整理）：真实走向 + 几何里程 + 桥隧统计
+        if path == "/api/line/osm":
+            # km 给了已知里程时，几何里程差太多的残段会被排除
+            g = railgeom.geom(one("q") or one("name"), expect_km=one("km") or None)
+            if not g:
+                return self.err("OSM 数据里没有这条线路: " + (one("q") or one("name")), 404)
+            return self.json(g)
+
+        if path == "/api/line/osm/list":
+            kw = one("q")
+            return self.json({"items": railgeom.search(kw, int(one("limit", "30"))),
+                              "stats": railgeom.stats()})
 
         if path == "/api/line/catalog":
             items = railcore.catalog_search(one("q"), int(one("limit", "20")))
@@ -283,6 +301,8 @@ class Handler(BaseHTTPRequestHandler):
             d = railcore.catalog_detail(one("id") or one("q"))
             if not d:
                 return self.err("资料库里没有这条线路", 404)
+            d["osm"] = railgeom.meta(d.get("line_name") or d.get("name") or "",
+                                     d.get("length_km"))
             return self.json(d)
 
         # ---- 按日期批量下载 ----

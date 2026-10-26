@@ -35,7 +35,8 @@ if RAILCN_DIR not in sys.path:
 
 import config as rail_config            # noqa: E402
 import trainclaw                        # noqa: E402
-import cnrail                           # noqa: E402   cnrail_data_v2 静态知识库
+import cnrail                            # noqa: E402   cnrail_data_v2 静态知识库
+import railgeom                          # noqa: E402   OSM 线路几何 / 12306 站资料
 
 # ---------------------------------------------------------------------------
 # 基础设施
@@ -1939,6 +1940,12 @@ def station_detail(q: str) -> dict:
         "trainsFrom": as_start,
         "trainsTo": as_end,
     }
+    # 12306 那份站资料只用来补：缺电报码时补上，顺带给个街道地址
+    extra = railgeom.station_extra(out.get("name") or name) or {}
+    if not out.get("tele") and extra.get("code"):
+        out["tele"] = extra["code"]
+    if extra.get("addr"):
+        out["addr"] = extra["addr"]
     return out
 
 

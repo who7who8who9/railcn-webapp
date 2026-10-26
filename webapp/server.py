@@ -439,6 +439,14 @@ def free_port(preferred: int) -> int:
 
 
 def main() -> None:
+    # 输出被重定向到文件 / 管道时，控制台编码（中文 Windows 是 cp936）编不出横幅里的 emoji，
+    # print 抛 UnicodeEncodeError 会把服务带走。换成 replace，宁可显示成 ? 也别崩
+    for _s in (sys.stdout, sys.stderr):
+        try:
+            _s.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8686)
     ap.add_argument("--open", action="store_true", help="启动后自动打开浏览器")

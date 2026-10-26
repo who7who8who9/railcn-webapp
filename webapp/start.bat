@@ -1,25 +1,47 @@
 @echo off
-chcp 65001 >nul
+setlocal
 cd /d "%~dp0"
+title railcn ±¾µØ·şÎñ
 
-rem ä¾æ¬¡å°è¯• python / py / python3ï¼Œé¿å…å†™æ­»æœ¬æœºè·¯å¾„
+rem ÒÀ´Î³¢ÊÔ python / py / python3£¬±ÜÃâĞ´ËÀ±¾»úÂ·¾¶
 set "PY="
 where python >nul 2>nul && set "PY=python"
 if not defined PY where py >nul 2>nul && set "PY=py"
 if not defined PY where python3 >nul 2>nul && set "PY=python3"
 
 if not defined PY (
-  echo [x] æœªæ‰¾åˆ° Pythonï¼Œè¯·å®‰è£… Python 3.9+ å¹¶å‹¾é€‰ "Add Python to PATH"
+  echo [x] Î´ÕÒµ½ Python£¬Çë°²×° Python 3.9+ ²¢¹´Ñ¡ "Add Python to PATH"
+  echo     ÏÂÔØµØÖ·£ºhttps://www.python.org/downloads/windows/
+  pause
+  exit /b 1
+)
+
+rem Ó¦ÓÃÉÌµêÄÇ¸ö python.exe ÊÇ¿Õ¿Ç£¬Ö´ĞĞ»áµ¯ÉÌµê£»ÕâÀïÏÈÑéÒ»´ÎÕæÄÜÅÜ
+%PY% -c "import sys;raise SystemExit(0 if sys.version_info>=(3,9) else 1)" >nul 2>nul
+if errorlevel 1 (
+  echo [x] ÕÒµ½µÄ %PY% Ö´ĞĞ²»ÁË£¨¿ÉÄÜÊÇÓ¦ÓÃÉÌµêµÄ¿Õ¿Ç£©£¬»ò°æ±¾µÍÓÚ 3.9
+  echo     Çë×° Python 3.9+ ²¢¹´Ñ¡ "Add Python to PATH"
   pause
   exit /b 1
 )
 
 %PY% -c "import requests" >nul 2>nul
 if errorlevel 1 (
-  echo é¦–æ¬¡è¿è¡Œï¼Œæ­£åœ¨å®‰è£…ä¾èµ– ...
+  echo Ê×´ÎÔËĞĞ£¬ÕıÔÚ°²×°ÒÀÀµ ...
   %PY% -m pip install -r "%~dp0..\requirements.txt"
+  %PY% -c "import requests" >nul 2>nul
+  if errorlevel 1 (
+    echo [x] ÒÀÀµÃ»×°ÉÏ£¨¶à°ëÊÇÃ»Íø»ò±»´úÀíµ²×¡£©£¬·şÎñÆğ²»À´
+    echo     ÊÖ¶¯×°Ò»´Î£º%PY% -m pip install requests
+    pause
+    exit /b 1
+  )
 )
 
-echo å¯åŠ¨ railcn æœ¬åœ°æœåŠ¡ï¼šhttp://127.0.0.1:8686/
+echo Æô¶¯ railcn ±¾µØ·şÎñ£ºhttp://127.0.0.1:8686/
+echo ¹Øµô±¾´°¿Ú»ò°´ Ctrl+C ¼´Í£Ö¹
 %PY% server.py --port 8686 --open
+set "RC=%errorlevel%"
+echo.
+echo [·şÎñÒÑÍË³ö£¬ÍË³öÂë %RC%]
 pause

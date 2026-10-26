@@ -3188,6 +3188,10 @@ async function hqQueryTrain() {
   }
 }
 
+/* 同一车次号的不同版本用固色区分（调图 / 缩线 / 改号） */
+const HQ_VCOLOR = ['#2563eb', '#7c3aed', '#ea580c', '#0d9488', '#db2777', '#64748b'];
+const hqVColor = (v) => HQ_VCOLOR[((v || 1) - 1) % HQ_VCOLOR.length];
+
 function hqRenderCal() {
   const d = HQ.cal;
   if (!d) return;
@@ -3196,10 +3200,15 @@ function hqRenderCal() {
       —— 可能这个车次号写错了，或者含它的日期还没下载过。`;
     $('#hqCalLegend').classList.add('hidden');
     $('#hqCal').innerHTML = '';
+    $('#hqCalVar').innerHTML = '';
     return;
   }
   const s = d.summary;
-  const od = d.od && d.od.from ? `${d.od.from} → ${d.od.to}` : '';
+  const vs = d.variants || [];
+  // 多方案时不在顶部给单一「始发→终到」，否则会和日历里的另一套方案互相打脸
+  const od = vs.length > 1
+    ? `该号 ${vs.length} 套方案`
+    : (d.od && d.od.from ? `${d.od.from} → ${d.od.to}` : '');
   const runs = d.runs.length
     ? '连续开行：' + d.runs.map(r => r.days === 1
       ? r.from.slice(5)
@@ -3208,8 +3217,27 @@ function hqRenderCal() {
   $('#hqCalSum').innerHTML = `<b>${esc(d.code)}</b> ${esc(od)} · ${d.from} ~ ${d.to}（${d.span} 天）<br>
     开行 <b>${s.open}</b> 天 · 不开行 <b>${s.skip}</b> 天 · 无数据 ${s.nodata} 天${
       s.withStops ? ` · 其中 ${s.withStops} 天有停站时刻` : ''}${
-      runs ? `<br><span style="color:#64748b">${runs}</span>` : ''}`;
+      runs ? `<br><span style="color:#64748b">${runs}</span>` : ''}${
+      s.stopChanged ? `<br><span class="warn">有 ${s.stopChanged} 天的停站/时刻和前一开行日不一样</span>` : ''}${
+      s.stopMismatch ? `<br><span class="warn">有 ${s.stopMismatch} 天的停站表起讫站与车次信息不符 —— 可能抓到了同号另一趟车的数据，别直接拿来当这趟的停站</span>` : ''}`;
+
+  // 同一车次号在不同日期可能是完全不同的车（调图/缩线/改号）
+  $('#hqCalVar').innerHTML = vs.length > 1
+    ? `<div class="hq-var-warn">这个车次号在区间内有 <b>${vs.length}</b> 套不同方案
+        —— 调图、缩线或改号后，同号的经停站与时刻可能完全不同，<b>跨版本不能直接比</b>${
+          vs.some(v => v.mismatch) ? '；带 ⚠ 的方案，车次信息的终到站与停站表对不上' : ''}</div>
+      <div class="hq-vars">${vs.map(v => `<div class="hq-var">
+        <span class="vn" style="color:${hqVColor(v.v)};border-color:${hqVColor(v.v)}">v${v.v}</span>
+        <span class="vd">${esc(v.label)}</span>
+        <span class="vo">${esc(v.from || '?')} → ${esc(v.to || '?')}${
+          v.mismatch ? '<span class="warn" title="这套方案里有日子的停站表起讫与车次信息不符"> ⚠</span>' : ''}</span>
+        <span class="vt">${v.trainNo ? '编号 ' + esc(v.trainNo) : '编号未知'}</span>
+        <span class="vc">${v.days} 天</span>
+      </div>`).join('')}</div>`
+    : '';
+
   $('#hqCalLegend').classList.remove('hidden');
+  $('#hqLegVar').classList.toggle('hidden', vs.length <= 1);
   $('#hqCal').innerHTML = d.days.map(x => {
     const cls = x.state === 'open'
       ? (x.hasRoute ? 'open' : 'open nostops')
@@ -3217,12 +3245,20 @@ function hqRenderCal() {
     const lab = x.state === 'open'
       ? (x.stops ? `${x.stops} 站` : '停站未下载')
       : (x.state === 'skip' ? (x.inferred ? '不开行·推断' : '不开行') : '无数据');
-    const tip = `${x.date} ${x.weekday} · ${lab}${x.trainNo ? ' · ' + x.trainNo : ''}`;
-    return `<button class="hq-cell ${cls}" data-date="${x.date}" data-state="${x.state}" data-route="${x.hasRoute ? 1 : 0}" title="${esc(tip)}">
+    const vTag = (vs.length > 1 && x.v) ? `v${x.v}` : '';
+    const tip = `${x.date} ${x.weekday} · ${lab}${x.trainNo ? ' · ' + x.trainNo : ''}${
+      vTag ? ` · 方案 ${vTag}` : ''}${x.from || x.to ? ` · ${x.from || '?'} → ${x.to || '?'}` : ''}${
+      x.stopChanged ? ` · 停站/时刻与 ${x.changedFrom} 不同` : ''}${
+      x.stopMismatch ? ` · 停站表实际是 ${x.routeFrom} → ${x.routeTo}，与车次信息不符` : ''}`;
+    const vc = vTag ? hqVColor(x.v) : '';
+    return `<button class="hq-cell ${cls}${vTag ? ' has-v' : ''}" data-date="${x.date}" data-state="${x.state}" data-route="${x.hasRoute ? 1 : 0}"
+      data-v="${x.v || ''}" title="${esc(tip)}"${vc ? ` style="border-color:${vc}"` : ''}>
+      ${vTag ? `<span class="vn" style="color:${vc}">${vTag}</span>` : ''}
       <span class="d">${x.date.slice(5)}</span>
       <span class="w">${x.weekday}</span>
       <span class="s">${lab}</span>
       ${x.inferred ? '<span class="tag">推断</span>' : ''}
+      ${x.stopChanged ? '<span class="tag chg">改点</span>' : ''}
     </button>`;
   }).join('');
   $$('#hqCal .hq-cell').forEach(b => b.addEventListener('click', () => {
@@ -3256,9 +3292,20 @@ async function hqLoadStops(code, date) {
       return;
     }
     const m = d.meta || {};
+    const day = ((HQ.cal && HQ.cal.days) || []).find(x => x.date === d.date) || {};
+    const multiV = ((HQ.cal && HQ.cal.variants) || []).length > 1;
+    // 起讫以停站表为准显示（它才是下面这张表的内容），不一致时另外说明
+    const hFrom = (day.stopMismatch && day.routeFrom) || m.start_sta || (d.stops[0] ? d.stops[0].name : '');
+    const hTo = (day.stopMismatch && day.routeTo) || m.end_sta
+      || (d.stops.length ? d.stops[d.stops.length - 1].name : '');
     box.innerHTML = `
       <div class="hq-sum" style="border:0;background:transparent;padding:8px 2px 6px">
-        <b>${esc(d.code)}</b> ${esc(d.date)} · ${esc(m.start_sta || '')} → ${esc(m.end_sta || '')} · ${d.stops.length} 站
+        <b>${esc(d.code)}</b> ${esc(d.date)} · ${esc(hFrom)} → ${esc(hTo)} · ${d.stops.length} 站${
+          m.train_no ? ` · 编号 ${esc(m.train_no)}` : ''}${
+          multiV && day.v ? ` · <span style="color:${hqVColor(day.v)}">方案 v${day.v}</span>` : ''}
+        ${day.stopMismatch ? `<div class="hq-note">车次信息写的是 ${esc(m.start_sta || '?')} → ${esc(m.end_sta || '?')}，
+          但停站表实际止于 ${esc(day.routeTo || '?')} —— 两边打架，可能抓到了同号的另一趟车，用前先核对</div>` : ''}
+        ${day.stopChanged ? `<div class="hq-note">这天与上一个开行日（${esc(day.changedFrom)}）的停站或时刻不同 —— 可能是加站、减站或改点</div>` : ''}
       </div>
       <table class="hq-st">
         <thead><tr><th>#</th><th>车站</th><th>到达</th><th>出发</th><th>停留</th><th>累计运行</th></tr></thead>
@@ -3848,6 +3895,7 @@ function cuRenderEditor() {
       <span class="ce-badge">${esc(d.date || '')}</span>
       ${isManual ? '<span class="ce-badge manual">已人工校正</span>' : ''}
       ${(a.viaUnknown || []).length ? '<span class="ce-badge warn">经由有缺口</span>' : ''}
+      ${d.variants > 1 ? `<span class="ce-badge warn" title="这个车次号在库里有 ${d.variants} 套不同走法（调图/缩线/改号）。校正按车次号保存，会同时作用到其它日期的运行">该号有 ${d.variants} 套走法</span>` : ''}
       <span class="ce-spacer"></span>
       <button id="ceGoTrain" class="btn sm ghost">在车次详情中打开</button>
     </div>

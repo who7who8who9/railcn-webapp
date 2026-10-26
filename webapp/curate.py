@@ -391,6 +391,17 @@ def detail(code: str) -> dict:
         return out
 
     out["date"] = date
+    # 同一车次号可能被调图改得面目全非（不同经由/停站/时刻），而校正按 code 保存，
+    # 会同时作用到其他日期的运行 —— 这里给出方案数，让编辑者知道自己在校哪一套。
+    try:
+        with railcore.db() as conn:
+            row = conn.execute(
+                """SELECT COUNT(DISTINCT IFNULL(train_no,'')||'|'||IFNULL(start_sta,'')
+                          ||'|'||IFNULL(end_sta,'')) n
+                   FROM trains WHERE code=?""", (code,)).fetchone()
+            out["variants"] = (row["n"] if row else 0) or 0
+    except Exception:                                 # noqa: BLE001
+        out["variants"] = 0
     try:
         d = railcore.build_route_payload(
             code, date, cache_only=True, with_path=False, use_override=False

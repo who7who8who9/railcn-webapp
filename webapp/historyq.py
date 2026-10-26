@@ -184,6 +184,13 @@ def coverage(date_from: Optional[str] = None, date_to: Optional[str] = None) -> 
 # ---------------------------------------------------------------------------
 def train_calendar(code: str, date_from: Optional[str] = None,
                    date_to: Optional[str] = None) -> dict:
+    """某车次的开行日历
+
+    **同一车次号不等于同一趟车**：调图、缩线、改号、套跑都会让同一个 code 在不同日期
+    对应完全不同的经停站和时刻（例：C177 商南→西安 6 站，调图后 商南→宝鸡 11 站）。
+    所以这里按 (train_no, 始发, 终到) 把日期分成若干「版本」，每天带 `v` 号；
+    前端据此给日历格加角标，并明确「跨版本不可比」。
+    """
     code = (code or "").strip().upper()
     if not code:
         raise ValueError("缺少车次号")
@@ -199,11 +206,19 @@ def train_calendar(code: str, date_from: Optional[str] = None,
             "SELECT date, raw FROM routes WHERE code=? AND date BETWEEN ? AND ?",
             (code, df, dt_)).fetchall()
         stops_n: Dict[str, int] = {}
+        seqs: Dict[str, tuple] = {}
         for r in rrows:
             try:
-                stops_n[r["date"]] = len(json.loads(r["raw"])) if r["raw"] else 0
+                raw = json.loads(r["raw"]) if r["raw"] else []
             except (ValueError, TypeError):
-                stops_n[r["date"]] = 0
+                raw = []
+            stops_n[r["date"]] = len(raw)
+            # 停站指纹：站名 + 到发时刻。同版本内变了 = 临时调整/改点
+            seqs[r["date"]] = tuple(
+                ((x.get("station_name") or ""),
+                 (x.get("arrive_time") or "").replace("----", ""),
+                 (x.get("start_time") or "").replace("----", ""))
+                for x in raw)
         skipped = {r["date"] for r in c.execute(
             "SELECT date FROM day_skip WHERE code=? AND date BETWEEN ? AND ?",
             (code, df, dt_))}
@@ -223,9 +238,10 @@ def train_calendar(code: str, date_from: Optional[str] = None,
         return {
             "code": code, "unknown": True,
             "from": df, "to": dt_, "span": span, "od": {}, "trainNos": [],
-            "days": days, "runs": [],
+            "days": days, "runs": [], "variants": [],
             "summary": {"open": 0, "skip": 0, "nodata": len(days), "total": len(days),
-                        "withStops": 0, "covered": 0},
+                        "withStops": 0, "covered": 0, "variants": 0,
+                        "stopChanged": 0, "stopMismatch": 0},
         }
 
     days = []
@@ -258,6 +274,17 @@ def train_calendar(code: str, date_from: Optional[str] = None,
         }
         if state == "skip" and s not in skipped:
             row["inferred"] = True
+
+        # 车次信息（trains 的起讫）和停站表（routes 的首尾站）打架：
+        # 常见于同号同编号套跑不同区段，12306 两个接口给出的结果互相矛盾。
+        # 不猜谁对，只标出来，避免把两趟车的数据拼成一条。
+        seq = seqs.get(s)
+        if has_route and seq and (row["from"] or row["to"]):
+            r0, r1 = seq[0][0], seq[-1][0]
+            if (row["from"] and r0 != row["from"]) or (row["to"] and r1 != row["to"]):
+                row["stopMismatch"] = True
+                row["routeFrom"] = r0
+                row["routeTo"] = r1
         days.append(row)
 
         if state == "open":
@@ -267,6 +294,75 @@ def train_calendar(code: str, date_from: Optional[str] = None,
             else:
                 runs.append({"from": s, "to": s, "days": 1})
         prev = s
+
+    # ---- 版本划分：同一车次号 ≠ 同一趟车 ----
+    def _sig(meta: Optional[dict]):
+        if not meta:
+            return None
+        tn = meta.get("train_no") or ""
+        a = meta.get("start_sta") or ""
+        b = meta.get("end_sta") or ""
+        return (tn, a, b) if (tn or a or b) else None
+
+    # 版本只看真的开行的日子；不开行/无数据的日子不参与版本统计
+    open_idx = [i for i, d in enumerate(days) if d["state"] == "open"]
+    sigs = [_sig(info.get(days[i]["date"])) for i in open_idx]
+    # 只下了停站、没枚举车次的开行日没有 meta，沿用最近的已知版本（先向后、再向前）
+    last = next((s for s in sigs if s), None)
+    for k, s in enumerate(sigs):
+        if s is None:
+            sigs[k] = last
+        else:
+            last = s
+    nxt = None
+    for k in range(len(sigs) - 1, -1, -1):
+        if sigs[k] is None:
+            sigs[k] = nxt
+        else:
+            nxt = sigs[k]
+
+    vidx: Dict[tuple, int] = {}
+    variants: List[dict] = []
+    for k, sg in enumerate(sigs):
+        if sg is None:
+            continue
+        i = open_idx[k]
+        if sg not in vidx:
+            vidx[sg] = len(variants) + 1
+            variants.append({"v": vidx[sg], "trainNo": sg[0], "from": sg[1], "to": sg[2],
+                             "dates": [], "runs": [], "days": 0,
+                             "first": None, "last": None})
+        v = variants[vidx[sg] - 1]
+        s = days[i]["date"]
+        days[i]["v"] = v["v"]
+        v["dates"].append(s)
+        v["first"] = v["first"] or s
+        v["last"] = s
+        v["days"] = len(v["dates"])
+        if days[i].get("stopMismatch"):
+            v["mismatch"] = v.get("mismatch", 0) + 1
+
+    for v in variants:
+        for s in v["dates"]:
+            cur = dt.date.fromisoformat(s)
+            if v["runs"] and (cur - dt.date.fromisoformat(v["runs"][-1][1])).days == 1:
+                v["runs"][-1][1] = s
+            else:
+                v["runs"].append([s, s])
+        v["label"] = "、".join(
+            a[5:] if a == b else f"{a[5:]}~{b[5:]}" for a, b in v["runs"])
+
+    # ---- 同版本内相邻开行日比停站/时刻，变了就标出来 ----
+    prev_open = None            # (date, v, seq)
+    for d in days:
+        if d["state"] != "open" or not d["hasRoute"]:
+            continue                # 不开行 / 停站未下载都不打断比较
+        seq = seqs.get(d["date"])
+        if (prev_open and seq is not None and prev_open[2] is not None
+                and prev_open[1] == d.get("v") and seq != prev_open[2]):
+            d["stopChanged"] = True
+            d["changedFrom"] = prev_open[0]
+        prev_open = (d["date"], d.get("v"), seq)
 
     od = {}
     for r in reversed(days):
@@ -281,6 +377,7 @@ def train_calendar(code: str, date_from: Optional[str] = None,
         "trainNos": sorted({x["trainNo"] for x in days if x["trainNo"]}),
         "days": days,
         "runs": runs,
+        "variants": variants,
         "summary": {
             "open": sum(1 for x in days if x["state"] == "open"),
             "skip": sum(1 for x in days if x["state"] == "skip"),
@@ -288,6 +385,9 @@ def train_calendar(code: str, date_from: Optional[str] = None,
             "total": len(days),
             "withStops": sum(1 for x in days if x["hasRoute"]),
             "covered": sum(1 for x in days if x["state"] != "nodata"),
+            "variants": len(variants),
+            "stopChanged": sum(1 for x in days if x.get("stopChanged")),
+            "stopMismatch": sum(1 for x in days if x.get("stopMismatch")),
         },
     }
 

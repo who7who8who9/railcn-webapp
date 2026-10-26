@@ -282,6 +282,7 @@ main{flex:1;display:flex;min-height:0}
   background:linear-gradient(90deg,var(--accent),#4c9bff);transition:width .4s}
 .dl-chain-box.done .dl-chain-bar i{background:var(--ok)}
 .dl-chain-msg{margin-top:6px;font-size:10.5px;color:#4a5768;line-height:1.65;white-space:pre-wrap}
+.dl-chain-note{margin-top:6px;font-size:10.5px;color:#7a879c;line-height:1.65}
 .btn[disabled]{opacity:.45;cursor:default;box-shadow:none}
 code.inline{background:#eef2f8;padding:1px 5px;border-radius:4px;font-size:10.5px}
 

@@ -41,6 +41,40 @@ FULL_RESULT_THRESHOLD = 195      # 搜索接口单页上限约 200，达到则�
 WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
 DATE_WINDOW = 15                 # 含今天在内共 15 天（offset 0..14）
 
+# 限流相关：12306 是按 IP 算的，连续几小时满速跑迟早 403
+THROTTLE_BASE = 0.45             # 正常每线程间隔
+THROTTLE_MAX = 3.0               # 退避上限
+THROTTLE_FRESH_AFTER = 1800      # 半小时没再出事 → 回到正常速度
+CHAIN_GAP = 60                   # 连跑换天冷却（秒）：让节奏看起来不像压测
+CHAIN_GAP_BAD = 180              # 上一天有失败 / 被限流 → 多歇一会
+ENUM_MIN_INTERVAL = 7 * 86400    # 全集一周刷一次就够；这步要发 800 个搜索请求，最容易被 403
+ENUM_MIN_UNIVERSE = 1000         # 全集小于这个数说明库是空的，必须刷
+
+# 全局节流记忆：某次被限流拉长的间隔，不会因为「换一天 / 继续」被清零
+_THROTTLE = {"delay": THROTTLE_BASE, "ts": 0.0}
+_THROTTLE_LOCK = threading.Lock()
+
+
+def _note_throttle(delay: float) -> None:
+    """把这次学到的间隔记下来，跨天、跨任务继续用"""
+    with _THROTTLE_LOCK:
+        _THROTTLE["delay"] = max(_THROTTLE["delay"], min(THROTTLE_MAX, float(delay)))
+        _THROTTLE["ts"] = time.time()
+
+
+def learned_delay() -> float:
+    """新任务该从多慢起步：继承上次的退避，随时间慢慢回到正常速度"""
+    with _THROTTLE_LOCK:
+        d, ts = _THROTTLE["delay"], _THROTTLE["ts"]
+    if d <= THROTTLE_BASE:
+        return THROTTLE_BASE
+    age = time.time() - ts
+    if age > THROTTLE_FRESH_AFTER:
+        return THROTTLE_BASE
+    if age > 600:                # 10 分钟以上没出事：退一半
+        return max(THROTTLE_BASE, THROTTLE_BASE + (d - THROTTLE_BASE) * 0.5)
+    return min(THROTTLE_MAX, d)
+
 
 # ---------------------------------------------------------------------------
 # 数据库
@@ -404,6 +438,8 @@ def download_stops(job: Job, date: str) -> None:
                 flush()
             with err_lock:
                 consec[0] = 0
+                if job._delay > THROTTLE_BASE:      # 恢复顺利就慢慢提速回来
+                    job._delay = max(THROTTLE_BASE, job._delay - 0.002)
             return "ok", u
         if status == "empty":                 # 当天不开行，记下来别再查
             with buf_lock:
@@ -419,8 +455,10 @@ def download_stops(job: Job, date: str) -> None:
             consec[0] += 1
             n = consec[0]
             if n >= 5:
-                job._delay = min(3.0, job._delay * 1.35)
+                job._delay = min(THROTTLE_MAX, job._delay * 1.35)
+                _note_throttle(job._delay)
         if status == "blocked" or n >= 25:
+            _note_throttle(max(job._delay, 1.5))     # 被封了，下次起步就慢一点
             job.message = f"连续 {n} 次失败（疑似 12306 限流），已暂停。稍后点「继续」即可接上"
             job.stop()
             return "blocked", u
@@ -462,7 +500,8 @@ def download_stops(job: Job, date: str) -> None:
 # ---------------------------------------------------------------------------
 def enumerate_trains(job: Job, date: str, delay: float = 2.0) -> int:
     job.phase = "enum"
-    job.message = "正在刷新车次全集（12306 搜索接口较慢，约 5~10 分钟）…"
+    job.message = "正在刷新车次全集（搜索接口单线程 2 秒一次，十几分钟起步，这一步最容易被 403）…"
+    _log(date, "enum_try", "开始刷新车次全集")
     date_compact = date.replace("-", "")
     found: dict[str, dict] = {}
     blocked = 0
@@ -488,7 +527,7 @@ def enumerate_trains(job: Job, date: str, delay: float = 2.0) -> int:
                 "stop_count": int(item.get("total_num") or 0) or None,
             }
 
-    def run(plist):
+    def run(plist, refine=None):
         nonlocal blocked
         for p in plist:
             if job.stopped:
@@ -503,20 +542,29 @@ def enumerate_trains(job: Job, date: str, delay: float = 2.0) -> int:
             if status == "ok":
                 take(res)
                 blocked = 0
+                # 只有顶到单页上限（200 条）的前缀才需要再细分一次，
+                # 以前是 81 个词全细分 → 810 个请求，白白多挨 403
+                if refine is not None and len(res) >= FULL_RESULT_THRESHOLD:
+                    refine.append(p)
             job.bump(done=1)
             time.sleep(delay)
 
-    run(prefixes)
+    need: list[str] = []
+    run(prefixes, need)
     _save_trains(date, found.values())
 
-    # 返回量接近上限的前缀继续细分
-    p2 = []
-    for t in TRAIN_TYPES:
-        for n in range(1, 10):
-            p2.extend(_prefix(t, n * 10 + k) for k in range(10))
-    if not job.stopped:
+    # 只细分「顶到上限」的那几个前缀
+    p2: list[str] = []
+    for p in need:
+        t = _detect_type(p)
+        if t is None:
+            continue
+        num = int(p[1:]) if t != "N" else int(p)
+        p2.extend(_prefix(t, num * 10 + k) for k in range(10))
+    if not job.stopped and p2:
         job.total = len(p2)
         job.done = 0
+        job.message = f"细分 {len(need)} 个顶到上限的前缀（{len(p2)} 个请求）…"
         run(p2)
         _save_trains(date, found.values())
 
@@ -581,7 +629,8 @@ def _reset_job(job: Job, workers: int) -> None:
     job.message = "准备中…"
     job.finished_at = None
     job.started_at = time.time()
-    job._delay = 0.45
+    # 关键：不要写死 0.45。刚被限流过的话，从这里接着慢起步，否则一开就又被封
+    job._delay = learned_delay()
 
 
 def _ensure_job(date: str, workers: int = 6) -> Job:
@@ -694,7 +743,7 @@ def _date_stat(date: str) -> dict:
         "percent": round((total_uni - pending) / total_uni * 100, 1) if total_uni else 0.0,
         "message": msg,
         "workers": st.get("workers") or 6,
-        "delay": 0.45,
+        "delay": round(learned_delay(), 2),
         "errors": [],
         "startedAt": st.get("started_at"),
         "updatedAt": st.get("updated_at"),
@@ -727,8 +776,9 @@ class Chain:
         self.do_enum = bool(do_enum)
         self.index = 0
         self.status = "idle"          # idle / running / paused / done / error
-        self.phase = ""               # enum / stops
+        self.phase = ""               # enum / stops / gap
         self.message = ""
+        self.note = ""                # 附加说明（比如「全集刚刷过，本次跳过」）
         self.started_at = time.time()
         self.updated_at = time.time()
         self.finished_at = None
@@ -754,6 +804,7 @@ class Chain:
             "enum": self.do_enum,
             "percent": round(pos / n * 100, 1) if n else 0.0,
             "message": self.message,
+            "note": self.note,
             "startedAt": self.started_at,
             "updatedAt": self.updated_at,
             "finishedAt": self.finished_at,
@@ -814,6 +865,34 @@ def _chain_restore() -> None:
     _CHAIN = ch
 
 
+def enum_last_ts() -> float:
+    """上次「刷新全集」的时间戳（0 = 从没刷过）。失败/中断的也算，避免反复重试同一个坑"""
+    try:
+        with _conn() as c:
+            row = c.execute(
+                "SELECT MAX(ts) AS t FROM collect_log WHERE kind IN ('enum','enum_try')"
+            ).fetchone()
+        return float(row["t"] or 0.0)
+    except (sqlite3.Error, TypeError, ValueError):
+        return 0.0
+
+
+def universe_size() -> int:
+    with _conn() as c:
+        return c.execute("SELECT COUNT(DISTINCT code) n FROM trains").fetchone()["n"]
+
+
+def _ago(sec: float) -> str:
+    sec = max(0.0, sec)
+    if sec < 90:
+        return "刚刚"
+    m = int(sec // 60)
+    if m < 60:
+        return f"{m} 分钟"
+    h = m / 60
+    return f"{h:.0f} 小时" if h < 48 else f"{h / 24:.0f} 天"
+
+
 def _chain_plan(start: str | None = None) -> list[str]:
     """从 start（默认今天）到窗口最后一天的所有日期"""
     today = dt.date.today()
@@ -845,7 +924,7 @@ def _chain_runner(chain: Chain) -> None:
                 chain.index = i
                 chain.phase = "enum" if (i == 0 and chain.do_enum) else "stops"
                 chain.updated_at = time.time()
-                chain.message = ("正在刷新车次全集（12306 搜索接口较慢，约 5~10 分钟）…"
+                chain.message = ("正在刷新车次全集（搜索接口慢且容易 403，先耐心等这一步）…"
                                  if chain.phase == "enum"
                                  else f"第 {i + 1}/{n} 天 · {date} · 下载经停站")
             _chain_persist(chain)
@@ -865,6 +944,20 @@ def _chain_runner(chain: Chain) -> None:
                                  f"点「继续连跑」从这一天接上")
                 _log(date, "chain", chain.message)
                 return
+
+            # 换天冷却：连跑是几小时的持续请求，中间不留缝就容易被当成压测
+            if i + 1 < n:
+                gap = CHAIN_GAP
+                if job.failed or learned_delay() > THROTTLE_BASE:
+                    gap = CHAIN_GAP_BAD
+                with chain._lock:
+                    chain.phase = "gap"
+                    chain.message = (f"第 {i + 1}/{n} 天（{date}）完成，"
+                                     f"冷却 {gap}s 后接着下 {chain.plan[i + 1]}…")
+                    chain.updated_at = time.time()
+                _chain_persist(chain)
+                if chain._stop.wait(gap):
+                    break
         else:
             chain.status = "done"
             chain.index = n
@@ -899,9 +992,22 @@ def chain_start(workers: int = 6, do_enum: bool = True,
             j = get_job(d)
             if j and j.status == "running":
                 raise ValueError(f"{d} 正在单独下载，先「暂停」它再开连跑")
+        skipped_note = ""
+        if do_enum:
+            age = time.time() - enum_last_ts()
+            if universe_size() > ENUM_MIN_UNIVERSE and age < ENUM_MIN_INTERVAL:
+                do_enum = False
+                ago = _ago(age)
+                skipped_note = (f"车次全集{'刚刚' if ago == '刚刚' else ago + '前'}刷过"
+                                f"（本地 {universe_size()} 趟），本次跳过刷新这一步"
+                                f" —— 它最容易被 403；要强制刷：到任意一天的详情点「刷新全集」")
         ch = Chain(plan, workers, do_enum)
         ch.status = "running"
-        ch.message = ("正在刷新车次全集…" if do_enum else f"准备下载 {len(plan)} 天…")
+        ch.note = skipped_note
+        ch.message = ("正在刷新车次全集…" if do_enum
+                      else (skipped_note or f"准备下载 {len(plan)} 天…"))
+        if do_enum:
+            ch.note = "开头先刷新车次全集（搜索接口要跑十几分钟，且最容易被 403；刷完 15 天都直接下）"
         _CHAIN = ch
         _chain_persist(ch)
         t = threading.Thread(target=_chain_runner, args=(ch,), daemon=True)
@@ -934,7 +1040,7 @@ def chain_status() -> dict:
     if ch:
         return ch.snapshot()
     return {"status": "idle", "phase": "", "index": 0, "total": 0,
-            "curDate": None, "plan": [], "percent": 0.0, "message": "",
+            "curDate": None, "plan": [], "percent": 0.0, "message": "", "note": "",
             "startedAt": None, "updatedAt": None, "finishedAt": None}
 
 

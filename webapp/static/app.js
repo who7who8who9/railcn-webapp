@@ -2891,6 +2891,7 @@ function dlRenderChain() {
   const row = DL.dates.find(x => x.date === c.curDate);
   const wd = row ? ' ' + row.weekday : '';
   const phase = c.phase === 'enum' ? '刷新车次全集'
+    : c.phase === 'gap' ? '换天冷却'
     : c.status === 'running' ? '下载经停站' : '';
 
   const head = st === 'running' ? `连跑中 ${Math.min(c.total, c.index + 1)}/${c.total}`
@@ -2904,14 +2905,20 @@ function dlRenderChain() {
   } else {
     if (day) meta.push(`第 ${c.index + 1} 天 ${day}${wd}`);
     if (phase) meta.push(phase);
+    if (st === 'running') {
+      const el = chainElapsed(c);
+      if (el) meta.push(el);
+    } else if (c.updatedAt) {
+      meta.push(`停于 ${fmtStamp(c.updatedAt * 1000)}`);
+    }
   }
-  const el = chainElapsed(c);
-  if (el) meta.push(el);
 
   const resume = (st === 'paused' || st === 'error')
     ? '<button class="btn sm" data-act="resume">继续</button>' : '';
-  const msg = c.message && (st !== 'running' || c.phase === 'enum')
+  const msg = c.message && (st !== 'running' || c.phase === 'enum' || c.phase === 'gap')
     ? `<div class="dl-chain-msg">${esc(c.message)}</div>` : '';
+  const note = (st === 'running' && c.note)
+    ? `<div class="dl-chain-note">${esc(c.note)}</div>` : '';
 
   box.innerHTML = `<div class="dl-chain-box ${st}">
       <div class="dl-chain-top">
@@ -2919,7 +2926,7 @@ function dlRenderChain() {
         <span class="m">${meta.join(' · ')}</span>
       </div>
       <div class="dl-chain-bar"><i style="width:${pct}%"></i></div>
-      ${msg}
+      ${note}${msg}
     </div>`;
 
   const rb = $('[data-act="resume"]', box);
@@ -2958,6 +2965,9 @@ function dlRenderList() {
       act = '<button class="btn sm" data-act="stop">暂停</button>';
     } else if (chRun && DL.chain.curDate !== s.date) {
       act = '<button class="btn sm" disabled>排队中</button>';
+    } else if (chRun) {
+      act = `<button class="btn sm" disabled>${
+        DL.chain.phase === 'enum' ? '刷新全集中' : DL.chain.phase === 'gap' ? '冷却中' : '排队中'}</button>`;
     } else {
       act = `<button class="btn sm${s.pending || !s.trains ? ' primary' : ''}" data-act="start">${
         s.trains && !s.pending ? '校验' : '下载'}</button>`;

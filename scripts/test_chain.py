@@ -48,6 +48,7 @@ with sqlite3.connect(TMP) as c:                 # 车次全集直接落库，走
     )
 
 ENUM_CALLS = []
+REAL_ENUM = collector.enumerate_trains        # 备份真身，第 6 步要用
 
 
 def fake_enum(job, date, delay=2.0):
@@ -69,6 +70,10 @@ def fake_stops(slow=0.0, empty_for=()):
 
 collector.enumerate_trains = fake_enum
 collector._stops = fake_stops()
+# 测试里把「换天冷却」和「全集刷新间隔」压掉，否则要等十几分钟
+collector.CHAIN_GAP = 0.05
+collector.CHAIN_GAP_BAD = 0.05
+collector.ENUM_MIN_UNIVERSE = 1
 
 today = dt.date.today()
 PLAN = [(today + dt.timedelta(days=i)).isoformat() for i in range(3)]
@@ -152,5 +157,41 @@ print("  恢复 ->", st["status"], st["index"], st["curDate"], st["message"])
 assert st["status"] == "paused", st["status"]
 assert st["index"] == 1
 assert st["curDate"] == PLAN[1]
+
+print("\n== 5. 全集刚刷过 → 连跑不再重复刷（一次近 900 个搜索请求，最容易被 403）==")
+with sqlite3.connect(TMP) as c:
+    c.execute("INSERT INTO collect_log (date, ts, kind, msg) VALUES (?,?,?,?)",
+              (PLAN[0], time.time(), "enum", "车次全集已刷新，本次拿到 3 趟"))
+collector._CHAIN = None
+collector._stops = fake_stops()
+res = collector.chain_start(workers=2, do_enum=True)
+print("  enum 开关:", res["enum"], "| note:", res["note"])
+assert res["enum"] is False, res
+assert "跳过刷新" in (res["note"] or ""), res["note"]
+for _ in range(600):
+    if collector.chain_status()["status"] in ("done", "error", "paused"):
+        break
+    time.sleep(0.05)
+print("  最终:", collector.chain_status()["status"])
+
+print("\n== 6. 刷新全集：只细分顶到单页上限的前缀（以前 891 个请求）==")
+calls = []
+
+
+def fake_search(keyword, date_compact, retries=2):
+    calls.append(keyword)
+    n = 200 if keyword == "G1" else 4        # 只有 G1 顶到上限
+    return ("ok", [{"station_train_code": f"{keyword}{i:03d}",
+                    "train_no": f"X{i}", "from_station": "甲",
+                    "to_station": "乙", "total_num": 3} for i in range(n)])
+
+
+collector._search = fake_search
+collector.enumerate_trains = REAL_ENUM
+job = collector.Job(PLAN[0], 4)
+collector.enumerate_trains(job, PLAN[0], delay=0)
+print("  搜索请求数:", len(calls), "（81 个一位前缀 + 10 个细分）")
+assert len(calls) == 91, len(calls)
+assert calls[81:].count("G1") == 0 and "G10" in calls[81:]
 
 print("\n全部通过 ✓")

@@ -86,6 +86,21 @@ def init_db() -> None:
                 date TEXT, ts REAL, kind TEXT, msg TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_collectlog_date ON collect_log(date);
+            -- 一键连跑的断点（单行）：服务重启后还能看出来跑到哪天
+            CREATE TABLE IF NOT EXISTS chain_run (
+                id          INTEGER PRIMARY KEY CHECK (id = 1),
+                status      TEXT,
+                phase       TEXT,
+                cur_date    TEXT,
+                idx         INTEGER DEFAULT 0,
+                total       INTEGER DEFAULT 0,
+                plan        TEXT,
+                workers     INTEGER DEFAULT 6,
+                started_at  REAL,
+                updated_at  REAL,
+                finished_at REAL,
+                message     TEXT
+            );
             """
         )
 
@@ -104,24 +119,37 @@ def _log(date: str, kind: str, msg: str) -> None:
 # ---------------------------------------------------------------------------
 # 车次全集
 # ---------------------------------------------------------------------------
+# 同一车次号在不同日期可能登记了不同 train_no，这里统一取 MAX(train_no)，
+# 保证「全集 / 待处理 / 进度统计」三处选到的是同一个值（否则 pending 会算不准）
+_UNIVERSE_SQL = """
+    SELECT code, MAX(train_no) AS train_no, MAX(type) AS type,
+           MAX(start_sta) AS start_sta, MAX(end_sta) AS end_sta,
+           MAX(date) AS d
+      FROM trains
+     WHERE train_no IS NOT NULL AND train_no <> ''
+     GROUP BY code
+"""
+
+
 def universe() -> list[dict]:
     """本地已知的全部车次（车次号 + train_no），train_no 跨日期稳定"""
     with _conn() as c:
-        rows = c.execute(
-            """SELECT code, train_no, type, start_sta, end_sta, stop_count, MAX(date) AS d
-               FROM trains WHERE train_no IS NOT NULL AND train_no <> ''
-               GROUP BY code"""
-        ).fetchall()
+        rows = c.execute(_UNIVERSE_SQL).fetchall()
     return [dict(r) for r in rows]
 
 
 def _pending(date: str) -> list[dict]:
     """该日期还没处理过的车次（既没下过经停站，也没被标记为不开行）"""
-    uni = universe()
     with _conn() as c:
-        done = {r[0] for r in c.execute("SELECT train_no FROM routes WHERE date=?", (date,))}
-        skip = {r[0] for r in c.execute("SELECT code FROM day_skip WHERE date=?", (date,))}
-    return [u for u in uni if u["train_no"] not in done and u["code"] not in skip]
+        rows = c.execute(
+            f"""SELECT u.* FROM ({_UNIVERSE_SQL}) u
+                 WHERE NOT EXISTS (SELECT 1 FROM routes r
+                                    WHERE r.train_no = u.train_no AND r.date = ?)
+                   AND NOT EXISTS (SELECT 1 FROM day_skip s
+                                    WHERE s.code = u.code AND s.date = ?)""",
+            (date, date),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +215,10 @@ class Job:
 
 _JOBS: dict[str, Job] = {}
 _JOBS_LOCK = threading.Lock()
+
+# 一键连跑：刷新全集 → 从今天起按天依次下载（同一时刻只允许一个）
+_CHAIN = None
+_CHAIN_LOCK = threading.Lock()
 
 
 def get_job(date: str) -> Job | None:
@@ -537,6 +569,30 @@ def _runner(job: Job, do_enum: bool) -> None:
         _persist(job)
 
 
+def _reset_job(job: Job, workers: int) -> None:
+    """把某一天的 Job 复位到「准备开跑」状态（单独下载 / 连跑共用）"""
+    job.workers = max(1, min(8, int(workers or 6)))
+    job._stop.clear()
+    job.status = "running"
+    job.phase = ""
+    job.done = job.failed = job.skipped = 0
+    job.total = 0
+    job.errors = []
+    job.message = "准备中…"
+    job.finished_at = None
+    job.started_at = time.time()
+    job._delay = 0.45
+
+
+def _ensure_job(date: str, workers: int = 6) -> Job:
+    with _JOBS_LOCK:
+        job = _JOBS.get(date)
+        if job is None:
+            job = Job(date, workers)
+            _JOBS[date] = job
+        return job
+
+
 def start(date: str, workers: int = 6, do_enum: bool = False) -> dict:
     try:
         d = dt.date.fromisoformat(date)
@@ -547,23 +603,14 @@ def start(date: str, workers: int = 6, do_enum: bool = False) -> dict:
         raise ValueError(
             f"只能下载含今天在内 {DATE_WINDOW} 天内的车次（今天 ~ 第 {DATE_WINDOW} 天）：{date} 超出范围"
         )
+    ch = _CHAIN
+    if ch and ch.status == "running":
+        raise ValueError(f"一键连跑正在进行（{ch.cur_date}），先「暂停连跑」再单独操作某一天")
 
-    with _JOBS_LOCK:
-        job = _JOBS.get(date)
-        if job and job.status == "running":
-            return job.snapshot()
-        if job is None:
-            job = Job(date, workers)
-            _JOBS[date] = job
-    job.workers = max(1, min(8, int(workers or 6)))
-    job._stop.clear()
-    job.status = "running"
-    job.phase = ""
-    job.done = job.failed = job.skipped = 0
-    job.total = 0
-    job.message = "准备中…"
-    job.finished_at = None
-    job.started_at = job.started_at or time.time()
+    job = _ensure_job(date, workers)
+    if job.status == "running":
+        return job.snapshot()
+    _reset_job(job, workers)
     _persist(job)
     t = threading.Thread(target=_runner, args=(job, do_enum), daemon=True)
     job._thread = t
@@ -617,12 +664,11 @@ def _date_stat(date: str) -> dict:
             "SELECT COUNT(DISTINCT code) n FROM trains WHERE train_no IS NOT NULL AND train_no<>''"
         ).fetchone()["n"]
         pending = c.execute(
-            """SELECT COUNT(*) n FROM (
-                   SELECT code, train_no FROM trains
-                   WHERE train_no IS NOT NULL AND train_no<>'' GROUP BY code
-               ) u
-               WHERE NOT EXISTS (SELECT 1 FROM routes r WHERE r.train_no=u.train_no AND r.date=?)
-                 AND NOT EXISTS (SELECT 1 FROM day_skip s WHERE s.code=u.code AND s.date=?)""",
+            f"""SELECT COUNT(*) n FROM ({_UNIVERSE_SQL}) u
+                 WHERE NOT EXISTS (SELECT 1 FROM routes r
+                                    WHERE r.train_no = u.train_no AND r.date = ?)
+                   AND NOT EXISTS (SELECT 1 FROM day_skip s
+                                    WHERE s.code = u.code AND s.date = ?)""",
             (date, date),
         ).fetchone()["n"]
         row = c.execute("SELECT * FROM day_collect WHERE date=?", (date,)).fetchone()
@@ -667,6 +713,229 @@ def avail_dates() -> list[dict]:
         s["offset"] = i
         out.append(s)
     return out
+
+
+# ---------------------------------------------------------------------------
+# 一键连跑：先刷新车次全集，再从今天起按天依次下载
+# ---------------------------------------------------------------------------
+class Chain:
+    """一条流水线：enum（刷新全集，只第一天做）→ 第 1 天 → 第 2 天 → …"""
+
+    def __init__(self, plan: list[str], workers: int = 6, do_enum: bool = True):
+        self.plan = list(plan)
+        self.workers = max(1, min(8, int(workers or 6)))
+        self.do_enum = bool(do_enum)
+        self.index = 0
+        self.status = "idle"          # idle / running / paused / done / error
+        self.phase = ""               # enum / stops
+        self.message = ""
+        self.started_at = time.time()
+        self.updated_at = time.time()
+        self.finished_at = None
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._thread = None
+
+    @property
+    def cur_date(self) -> str | None:
+        return self.plan[self.index] if 0 <= self.index < len(self.plan) else None
+
+    def snapshot(self) -> dict:
+        n = len(self.plan)
+        pos = n if self.status == "done" else self.index
+        return {
+            "status": self.status,
+            "phase": self.phase,
+            "index": pos,
+            "total": n,
+            "curDate": self.cur_date,
+            "plan": self.plan,
+            "workers": self.workers,
+            "enum": self.do_enum,
+            "percent": round(pos / n * 100, 1) if n else 0.0,
+            "message": self.message,
+            "startedAt": self.started_at,
+            "updatedAt": self.updated_at,
+            "finishedAt": self.finished_at,
+        }
+
+
+def _chain_persist(chain: Chain) -> None:
+    # 被新连跑顶掉的旧线程不要再写库，免得把新版状态盖成旧的
+    if _CHAIN is not None and _CHAIN is not chain:
+        return
+    try:
+        with _conn() as c:
+            c.execute(
+                """INSERT INTO chain_run (id,status,phase,cur_date,idx,total,plan,workers,
+                       started_at,updated_at,finished_at,message)
+                   VALUES (1,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(id) DO UPDATE SET
+                     status=excluded.status, phase=excluded.phase, cur_date=excluded.cur_date,
+                     idx=excluded.idx, total=excluded.total, plan=excluded.plan,
+                     workers=excluded.workers, started_at=excluded.started_at,
+                     updated_at=excluded.updated_at, finished_at=excluded.finished_at,
+                     message=excluded.message""",
+                (chain.status, chain.phase, chain.cur_date, chain.index, len(chain.plan),
+                 json.dumps(chain.plan), chain.workers, chain.started_at,
+                 time.time(), chain.finished_at, chain.message),
+            )
+    except Exception:                                   # noqa: BLE001
+        pass
+
+
+def _chain_restore() -> None:
+    """服务重启后把上一次连跑的断点读回来（running 的降级成 paused，可继续）"""
+    global _CHAIN
+    try:
+        with _conn() as c:
+            row = c.execute("SELECT * FROM chain_run WHERE id=1").fetchone()
+    except sqlite3.Error:
+        return
+    if not row:
+        return
+    try:
+        plan = json.loads(row["plan"] or "[]")
+    except json.JSONDecodeError:
+        plan = []
+    if not plan:
+        return
+    ch = Chain(plan, row["workers"] or 6, False)
+    ch.status = row["status"] or "idle"
+    ch.phase = row["phase"] or ""
+    ch.index = max(0, min(int(row["idx"] or 0), len(plan)))
+    ch.message = row["message"] or ""
+    ch.started_at = row["started_at"] or time.time()
+    ch.updated_at = row["updated_at"] or time.time()
+    ch.finished_at = row["finished_at"]
+    if ch.status == "running":
+        ch.status = "paused"
+        ch.message = "上次连跑被中断（服务重启），点「继续连跑」接着跑"
+    _CHAIN = ch
+
+
+def _chain_plan(start: str | None = None) -> list[str]:
+    """从 start（默认今天）到窗口最后一天的所有日期"""
+    today = dt.date.today()
+    d0 = today
+    if start:
+        try:
+            d0 = max(today, dt.date.fromisoformat(start))
+        except ValueError:
+            raise ValueError("日期格式应为 YYYY-MM-DD")
+    horizon = today + dt.timedelta(days=DATE_WINDOW - 1)
+    out: list[str] = []
+    d = d0
+    while d <= horizon:
+        out.append(d.isoformat())
+        d += dt.timedelta(days=1)
+    if not out:
+        raise ValueError(f"可下载窗口只剩今天起 {DATE_WINDOW} 天，没有可跑的日期")
+    return out
+
+
+def _chain_runner(chain: Chain) -> None:
+    n = len(chain.plan)
+    try:
+        for i in range(chain.index, n):
+            if chain._stop.is_set():
+                break
+            date = chain.plan[i]
+            with chain._lock:
+                chain.index = i
+                chain.phase = "enum" if (i == 0 and chain.do_enum) else "stops"
+                chain.updated_at = time.time()
+                chain.message = ("正在刷新车次全集（12306 搜索接口较慢，约 5~10 分钟）…"
+                                 if chain.phase == "enum"
+                                 else f"第 {i + 1}/{n} 天 · {date} · 下载经停站")
+            _chain_persist(chain)
+
+            job = _ensure_job(date, chain.workers)
+            _reset_job(job, chain.workers)
+            _persist(job)
+            _runner(job, do_enum=(chain.phase == "enum"))
+
+            with chain._lock:
+                chain.updated_at = time.time()
+            if chain._stop.is_set():
+                break
+            if job.status != "done":
+                chain.status = "paused" if job.status in ("paused", "running", "idle") else "error"
+                chain.message = (f"{date} 没跑完：{job.message or job.status}。"
+                                 f"点「继续连跑」从这一天接上")
+                _log(date, "chain", chain.message)
+                return
+        else:
+            chain.status = "done"
+            chain.index = n
+            chain.finished_at = time.time()
+            chain.message = f"连跑完成：{n} 天全部处理完毕"
+            _log(chain.plan[-1] if n else "", "chain", chain.message)
+            return
+
+        chain.status = "paused"
+        chain.message = chain.message or "连跑已暂停（进度已保存，点「继续连跑」可接上）"
+    except Exception as exc:                             # noqa: BLE001
+        import traceback
+        traceback.print_exc()
+        chain.status = "error"
+        chain.message = f"{type(exc).__name__}: {exc}"
+        _log(chain.cur_date or "", "chain", chain.message)
+    finally:
+        chain.updated_at = time.time()
+        _chain_persist(chain)
+
+
+def chain_start(workers: int = 6, do_enum: bool = True,
+                start: str | None = None) -> dict:
+    """开始一键连跑。start 给了就从那天开始（用于「继续连跑」）"""
+    global _CHAIN
+    plan = _chain_plan(start)
+    with _CHAIN_LOCK:
+        cur = _CHAIN
+        if cur and cur.status == "running":
+            return cur.snapshot()
+        for d in plan:
+            j = get_job(d)
+            if j and j.status == "running":
+                raise ValueError(f"{d} 正在单独下载，先「暂停」它再开连跑")
+        ch = Chain(plan, workers, do_enum)
+        ch.status = "running"
+        ch.message = ("正在刷新车次全集…" if do_enum else f"准备下载 {len(plan)} 天…")
+        _CHAIN = ch
+        _chain_persist(ch)
+        t = threading.Thread(target=_chain_runner, args=(ch,), daemon=True)
+        ch._thread = t
+        t.start()
+        return ch.snapshot()
+
+
+def chain_stop() -> dict:
+    ch = _CHAIN
+    if not ch:
+        return {"status": "idle", "index": 0, "total": 0}
+    ch._stop.set()
+    d = ch.cur_date
+    if d:
+        job = get_job(d)
+        if job and job.status == "running":
+            job.stop()
+            _persist(job)
+    if ch.status == "running":
+        ch.status = "paused"
+        ch.message = "连跑已暂停（进度已保存，点「继续连跑」可接上）"
+    ch.updated_at = time.time()
+    _chain_persist(ch)
+    return ch.snapshot()
+
+
+def chain_status() -> dict:
+    ch = _CHAIN
+    if ch:
+        return ch.snapshot()
+    return {"status": "idle", "phase": "", "index": 0, "total": 0,
+            "curDate": None, "plan": [], "percent": 0.0, "message": "",
+            "startedAt": None, "updatedAt": None, "finishedAt": None}
 
 
 # ---------------------------------------------------------------------------
@@ -845,3 +1114,4 @@ def export_list() -> list[dict]:
 
 
 init_db()
+_chain_restore()

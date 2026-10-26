@@ -265,6 +265,24 @@ main{flex:1;display:flex;min-height:0}
   border:1px solid var(--line);border-radius:8px;padding:8px 10px;white-space:pre-wrap}
 .dl-msg.err{background:#fdf2f2;border-color:#f6dada;color:#a33}
 .dl-errs{margin-top:8px;font-size:10.5px;color:var(--muted);line-height:1.7}
+/* 一键连跑横幅 */
+.dl-chain{margin-top:9px}
+.dl-chain.hidden{display:none}
+.dl-chain-box{border:1px solid #d7e3f5;background:#f4f8ff;border-radius:9px;padding:8px 10px}
+.dl-chain-box.done{border-color:#cfe8da;background:#f4fbf7}
+.dl-chain-box.paused{border-color:#f2ddc2;background:#fffaf3}
+.dl-chain-box.error{border-color:#f3d4d4;background:#fdf5f5}
+.dl-chain-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.dl-chain-top .t{font-size:11.5px;font-weight:600;color:var(--text)}
+.dl-chain-top .m{font-size:10.5px;color:var(--muted);margin-left:auto;white-space:nowrap}
+.dl-chain-box .btn.sm{height:22px;padding:0 8px;font-size:10.5px}
+.dl-chain-bar{height:4px;border-radius:2px;background:#e2ebf8;overflow:hidden;margin-top:7px}
+.dl-chain-box.done .dl-chain-bar{background:#dff1e7}
+.dl-chain-bar i{display:block;height:100%;border-radius:2px;
+  background:linear-gradient(90deg,var(--accent),#4c9bff);transition:width .4s}
+.dl-chain-box.done .dl-chain-bar i{background:var(--ok)}
+.dl-chain-msg{margin-top:6px;font-size:10.5px;color:#4a5768;line-height:1.65;white-space:pre-wrap}
+.btn[disabled]{opacity:.45;cursor:default;box-shadow:none}
 code.inline{background:#eef2f8;padding:1px 5px;border-radius:4px;font-size:10.5px}
 
 /* ---------- 详情头：跨日行程带 ---------- */

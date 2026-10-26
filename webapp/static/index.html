@@ -94,6 +94,8 @@
           <div class="dl-h1">按日期下载全部车次与经停站</div>
           <div class="dl-h2">含当日共 <b>15</b> 天；数据永久保存在本地 <code>rail.db</code>，已下载的车次不会重复抓取</div>
           <div class="dl-ctrl">
+            <button id="dlChain" class="btn sm primary"
+                    title="先刷新车次全集，再按天依次下载今天起的每一天；中途随时可暂停、继续">▶ 一键连跑</button>
             <label>并发线程</label>
             <select id="dlWorkers">
               <option value="2">2（最慢最稳）</option>
@@ -103,6 +105,7 @@
             </select>
             <button id="dlRefresh" class="btn ghost">刷新</button>
           </div>
+          <div id="dlChainBar" class="dl-chain hidden"></div>
         </div>
         <div id="dlList" class="dl-list"></div>
         <div id="dlDetail" class="dl-detail"></div>

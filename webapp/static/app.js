@@ -2820,7 +2820,7 @@ function bindSuggest(inputSel, sugSel) {
 /* ============================================================
  * 数据下载（按日期批量拉取车次 + 经停站）
  * ============================================================ */
-const DL = { dates: [], sel: null, timer: 0, loading: false };
+const DL = { dates: [], sel: null, timer: 0, loading: false, chain: null };
 
 const nfmt = v => (v == null ? '—' : Number(v).toLocaleString('zh-CN'));
 
@@ -2841,10 +2841,17 @@ async function dlLoad() {
   try {
     const d = await api('/api/dates');
     DL.dates = d.items;
+    DL.chain = d.chain || null;
     if (!DL.sel) DL.sel = DL.dates[0] && DL.dates[0].date;
+    // 连跑换到下一天时，详情自动跟过去（手动点的日期不会被每次都抢回来）
+    if (chainBusy() && DL.chain.curDate && DL.chainSelFor !== DL.chain.curDate) {
+      DL.chainSelFor = DL.chain.curDate;
+      DL.sel = DL.chain.curDate;
+    }
+    dlRenderChain();
     dlRenderList();
     dlRenderDetail();
-    const busy = DL.dates.some(x => x.status === 'running');
+    const busy = DL.dates.some(x => x.status === 'running') || chainBusy();
     clearInterval(DL.timer);
     if (busy) DL.timer = setInterval(dlLoad, 2500);
   } catch (e) {
@@ -2854,22 +2861,113 @@ async function dlLoad() {
   }
 }
 
+const chainBusy = () => !!(DL.chain && DL.chain.status === 'running');
+
+function chainElapsed(c) {
+  const t0 = c.startedAt, t1 = c.status === 'running' ? Date.now() / 1000 : (c.finishedAt || c.updatedAt);
+  if (!t0 || !t1) return '';
+  const m = Math.max(0, Math.round((t1 - t0) / 60));
+  return m < 1 ? '不到 1 分钟' : m < 60 ? `${m} 分钟` : `${Math.floor(m / 60)} 小时 ${m % 60} 分`;
+}
+
+function dlRenderChain() {
+  const btn = $('#dlChain');
+  const box = $('#dlChainBar');
+  if (!btn || !box) return;
+  const c = DL.chain || {};
+  const st = (c.status && c.status !== 'idle') ? c.status : 'idle';
+
+  btn.textContent = st === 'running' ? '⏸ 暂停连跑'
+    : st === 'paused' ? '▶ 继续连跑'
+    : st === 'error' ? '▶ 重新连跑'
+    : '▶ 一键连跑';
+  btn.classList.toggle('primary', st !== 'running');
+
+  if (st === 'idle') { box.classList.add('hidden'); box.innerHTML = ''; return; }
+  box.classList.remove('hidden');
+
+  const pct = Math.max(0, Math.min(100, c.percent || 0));
+  const day = c.curDate ? c.curDate.slice(5) : '';
+  const row = DL.dates.find(x => x.date === c.curDate);
+  const wd = row ? ' ' + row.weekday : '';
+  const phase = c.phase === 'enum' ? '刷新车次全集'
+    : c.status === 'running' ? '下载经停站' : '';
+
+  const head = st === 'running' ? `连跑中 ${Math.min(c.total, c.index + 1)}/${c.total}`
+    : st === 'paused' ? `连跑已暂停 ${Math.min(c.total, c.index + 1)}/${c.total}`
+    : st === 'error' ? `连跑出错 ${Math.min(c.total, c.index + 1)}/${c.total}`
+    : `连跑完成 ${c.total}/${c.total}`;
+
+  const meta = [];
+  if (st === 'done') {
+    if (c.finishedAt) meta.push(fmtStamp(c.finishedAt * 1000));
+  } else {
+    if (day) meta.push(`第 ${c.index + 1} 天 ${day}${wd}`);
+    if (phase) meta.push(phase);
+  }
+  const el = chainElapsed(c);
+  if (el) meta.push(el);
+
+  const resume = (st === 'paused' || st === 'error')
+    ? '<button class="btn sm" data-act="resume">继续</button>' : '';
+  const msg = c.message && (st !== 'running' || c.phase === 'enum')
+    ? `<div class="dl-chain-msg">${esc(c.message)}</div>` : '';
+
+  box.innerHTML = `<div class="dl-chain-box ${st}">
+      <div class="dl-chain-top">
+        <span class="t">${head}</span>${resume}
+        <span class="m">${meta.join(' · ')}</span>
+      </div>
+      <div class="dl-chain-bar"><i style="width:${pct}%"></i></div>
+      ${msg}
+    </div>`;
+
+  const rb = $('[data-act="resume"]', box);
+  if (rb) rb.addEventListener('click', () => dlChainAct('start', c.curDate));
+}
+
+async function dlChainAct(kind, start) {
+  const sel = $('#dlWorkers');
+  const workers = sel ? Number(sel.value) : 6;
+  // 全新开跑 → 先刷新全集；暂停后继续 → 只在「刷新全集那一步被中断」时才重刷
+  const doEnum = start ? (DL.chain && DL.chain.phase === 'enum' ? 1 : 0) : 1;
+  try {
+    if (kind === 'stop') {
+      await api('/api/collect/chain/stop');
+    } else {
+      await api('/api/collect/chain/start', { workers, enum: doEnum, start: start || '' });
+    }
+  } catch (e) {
+    alert('操作失败：' + e.message);
+    return;
+  }
+  await dlLoad();
+}
+
 function dlRenderList() {
   const el = $('#dlList');
   if (!el) return;
+  const chRun = chainBusy();
   el.innerHTML = DL.dates.map(s => {
     const [bc, bt] = dlBadge(s);
     const running = s.status === 'running';
     const pct = Math.max(0, Math.min(100, s.percent || 0));
+    // 连跑进行中：正在跑的那天给「暂停」，其余排队中的不给点（避免两个线程抢同一天）
+    let act;
+    if (running) {
+      act = '<button class="btn sm" data-act="stop">暂停</button>';
+    } else if (chRun && DL.chain.curDate !== s.date) {
+      act = '<button class="btn sm" disabled>排队中</button>';
+    } else {
+      act = `<button class="btn sm${s.pending || !s.trains ? ' primary' : ''}" data-act="start">${
+        s.trains && !s.pending ? '校验' : '下载'}</button>`;
+    }
     return `<div class="drow${DL.sel === s.date ? ' active' : ''}" data-date="${s.date}">
       <div class="dl-date">${s.date.slice(5)}<span class="wd">${s.weekday}</span>${
         s.isToday ? '<span class="today">今天</span>' : ''}</div>
       <div class="dl-r">
         <span class="dl-badge ${bc}">${bt}</span>
-        ${running
-          ? '<button class="btn sm" data-act="stop">暂停</button>'
-          : `<button class="btn sm${s.pending || !s.trains ? ' primary' : ''}" data-act="start">${
-              s.trains && !s.pending ? '校验' : '下载'}</button>`}
+        ${act}
       </div>
       <div class="dl-meta">开行 ${nfmt(s.trains)} 趟${
         s.pending ? ` · 待处理 ${nfmt(s.pending)}` : ''}${
@@ -2915,9 +3013,11 @@ function dlRenderDetail() {
     <div class="dl-actions">
       ${running
         ? '<button class="btn sm" data-act="stop">⏸ 暂停（进度保留）</button>'
-        : `<button class="btn sm primary" data-act="start">${
-            s.trains ? (s.pending ? `▶ 继续补 ${nfmt(s.pending)} 趟` : '↻ 重新校验') : '▶ 开始下载'}</button>`}
-      ${running ? '' : '<button class="btn sm" data-act="reenum">刷新全集</button>'}
+        : (chainBusy()
+            ? '<button class="btn sm" disabled>连跑排队中</button>'
+            : `<button class="btn sm primary" data-act="start">${
+                s.trains ? (s.pending ? `▶ 继续补 ${nfmt(s.pending)} 趟` : '↻ 重新校验') : '▶ 开始下载'}</button>`)}
+      ${running || chainBusy() ? '' : '<button class="btn sm" data-act="reenum">刷新全集</button>'}
       <button class="btn sm" data-act="export-json">⬇ JSON</button>
       <button class="btn sm" data-act="export-csv">⬇ CSV</button>
     </div>
@@ -3228,6 +3328,13 @@ async function boot() {
 
   // 数据下载页
   $('#dlRefresh').addEventListener('click', dlLoad);
+  $('#dlChain').addEventListener('click', () => {
+    const st = DL.chain && DL.chain.status;
+    if (st === 'running') return dlChainAct('stop');
+    // 暂停 / 出错后「继续」：从当前这一天接着跑，不用重新刷新全集
+    const from = (st === 'paused' || st === 'error') ? DL.chain.curDate : '';
+    return dlChainAct('start', from);
+  });
 
   // 历史数据页
   $('#histRefresh').addEventListener('click', () => histLoad(true));

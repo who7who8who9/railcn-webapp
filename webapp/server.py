@@ -307,7 +307,21 @@ class Handler(BaseHTTPRequestHandler):
 
         # ---- 按日期批量下载 ----
         if path == "/api/dates":
-            return self.json({"today": today(), "items": collector.avail_dates()})
+            return self.json({"today": today(), "items": collector.avail_dates(),
+                              "chain": collector.chain_status()})
+
+        if path == "/api/collect/chain/status":
+            return self.json(collector.chain_status())
+
+        if path == "/api/collect/chain/start":
+            return self.json(collector.chain_start(
+                int(one("workers", "6") or 6),
+                one("enum", "1") in ("1", "true"),
+                one("start") or None,
+            ))
+
+        if path == "/api/collect/chain/stop":
+            return self.json(collector.chain_stop())
 
         if path == "/api/collect/status":
             return self.json(collector.status(one("date") or today()))

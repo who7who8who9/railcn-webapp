@@ -5,7 +5,7 @@ historyq.py — 历史数据查询
 面向「已经落库的历史」而不是「今天还能不能买到票」：
   1. 某车次在日期段内哪天开行、哪天不开行
   2. 开行日的经停站时刻（复用 railcore.build_route_payload）
-  3. 按列车大类统计日期段内的开行 / 不开行总量
+  3. 按列车大类「按日」统计开行 / 不开行趟数（每天每类一行数据）
 
 三张表的关系：
   trains     每日枚举到的可售车次        → 某日有该车次 = 当天开行
@@ -90,6 +90,16 @@ def _covered_dates(c: sqlite3.Connection, df: str, dt_: str) -> set:
     out |= {r[0] for r in c.execute(
         "SELECT DISTINCT date FROM routes WHERE date BETWEEN ? AND ?", (df, dt_))}
     return out
+
+
+def _enumerated_dates(c: sqlite3.Connection, df: str, dt_: str) -> set:
+    """「这一天枚举过车次表」的日期 —— 只有这种日子才能断言某车「不开行」
+
+    只有停站、没有枚举的日子（下载中途停掉）确实不知道当天有哪些车，
+    拿它去推断「不开行」会把没跑完的日子误判成停运。
+    """
+    return {r[0] for r in c.execute(
+        "SELECT DISTINCT date FROM trains WHERE date BETWEEN ? AND ?", (df, dt_))}
 
 
 def _range(date_from: Optional[str], date_to: Optional[str]) -> Tuple[str, str, int]:
@@ -197,7 +207,7 @@ def train_calendar(code: str, date_from: Optional[str] = None,
         skipped = {r["date"] for r in c.execute(
             "SELECT date FROM day_skip WHERE code=? AND date BETWEEN ? AND ?",
             (code, df, dt_))}
-        covered = _covered_dates(c, df, dt_)
+        covered = _enumerated_dates(c, df, dt_)
         known = c.execute(
             """SELECT 1 FROM trains WHERE code=?
                UNION SELECT 1 FROM day_skip WHERE code=?
@@ -287,13 +297,14 @@ def train_calendar(code: str, date_from: Optional[str] = None,
 # ---------------------------------------------------------------------------
 def type_stats(date_from: Optional[str] = None, date_to: Optional[str] = None,
                focus: Optional[str] = None) -> dict:
-    """各大类的开行 / 不开行汇总；focus 给了就额外返回该类的每日明细
+    """按日统计：日期段内每天各大类开行 / 不开行多少趟
 
     口径：
       pool        全库登记过的该大类车次数（分母）
       openTimes   覆盖日里每天开行趟数之和（车次·日）
       skipTimes   每天 (pool - 当日开行) 之和（车次·日）
       openDays    段内有开行的天数
+      daily[]     日期段内的每一天，types 里放当日各大类开行趟数
     """
     fk = (focus or "").strip().upper() or None
     if fk and not fk.isalpha():
@@ -313,11 +324,15 @@ def type_stats(date_from: Optional[str] = None, date_to: Optional[str] = None,
                 WHERE date BETWEEN ? AND ? GROUP BY t""",
             (df, dt_)).fetchall()
         unions = {r["t"]: r["u"] for r in union_rows}
-        covered = sorted(_covered_dates(c, df, dt_))
         totals = {r["date"]: r["n"] for r in c.execute(
             "SELECT date, COUNT(*) n FROM trains WHERE date BETWEEN ? AND ? GROUP BY date",
             (df, dt_))}
+        routed = {r[0] for r in c.execute(
+            "SELECT DISTINCT date FROM routes WHERE date BETWEEN ? AND ?", (df, dt_))}
 
+    # 只有「枚举过车次」的日子才能算开行/不开行；只有停站没有枚举的日子无从判断，
+    # 既不能算进分母，也不该被当成「全库都不开行」
+    covered = sorted(totals)
     per: Dict[Tuple[str, str], int] = {(r["date"], r["t"]): r["n"] for r in per_rows}
     cset = set(covered)
     part = _partial(totals)
@@ -340,23 +355,46 @@ def type_stats(date_from: Optional[str] = None, date_to: Optional[str] = None,
             "minOpen": min(open_days) if open_days else 0,
         })
 
+    # 按日矩阵：段内每一天 × 每个大类（无采集的日也留一行，前端灰显）
+    order = [t["type"] for t in types]
+    daily = []
+    for d in _walk(df, dt_):
+        s = d.isoformat()
+        ok = s in cset
+        row = {
+            "date": s, "weekday": WEEKDAYS[d.weekday()],
+            "covered": ok,
+            "routesOnly": (not ok) and s in routed,
+            "listed": totals.get(s, 0),
+            "partial": bool(part.get(s)),
+            "types": {}, "open": 0, "skip": 0,
+        }
+        for t in order:
+            o = per.get((s, t), 0) if ok else 0
+            row["types"][t] = o
+            if ok:
+                row["open"] += o
+                row["skip"] += max(0, pools[t] - o)
+        daily.append(row)
+
     out = {
         "from": df, "to": dt_, "span": span,
         "coveredDays": len(covered),
         "days": [{"date": d, "weekday": WEEKDAYS[dt.date.fromisoformat(d).weekday()],
                   "covered": d in cset, "listed": totals.get(d, 0),
                   "partial": bool(part.get(d))} for d in covered],
+        "daily": daily,
         "types": types,
         "poolTotal": sum(pools.values()),
     }
 
     if fk:
-        daily = []
+        daily_f = []
         for d in _walk(df, dt_):
             s = d.isoformat()
             ok = s in cset
             o = per.get((s, fk), 0) if ok else 0
-            daily.append({
+            daily_f.append({
                 "date": s, "weekday": WEEKDAYS[d.weekday()],
                 "covered": ok,
                 "open": o,
@@ -370,7 +408,7 @@ def type_stats(date_from: Optional[str] = None, date_to: Optional[str] = None,
             "summary": row or {"type": fk, "label": _label(fk), "pool": pools.get(fk, 0),
                                "openTimes": 0, "skipTimes": 0, "avgOpen": 0,
                                "openDays": 0, "unionInRange": 0},
-            "days": daily,
+            "days": daily_f,
         }
     return out
 

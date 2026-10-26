@@ -1255,7 +1255,7 @@ function switchTab(name) {
   document.querySelector('.stage').classList.toggle('hidden', curateMode || fullMode);
   $('#curateStage').classList.toggle('hidden', !curateMode);
   if (name === 'dl') dlLoad();
-  if (name === 'hist') histLoad(true);
+  if (name === 'hist') hqEnter();
   if (name === 'curate') {
     cuLoad();
     const qc = (new URLSearchParams(location.search).get('code') || '').trim().toUpperCase();
@@ -3076,158 +3076,88 @@ async function dlAct(act, date) {
 
 /* ============================================================
  * 历史数据（已落库，长期保留）
+ * 车次开行日历 / 大类按日统计，数据全部来自本地 rail.db
  * ============================================================ */
-const HT = { dates: [], sel: null, q: '', items: [], total: 0, limit: 60, loading: false };
-
-async function histLoad(keepSel) {
-  if (HT.loading) return;
-  HT.loading = true;
+async function hqMetaLoad() {
   try {
     const d = await api('/api/history');
-    HT.dates = d.dates || [];
-    if (HT.dates.length) {
-      const ds = HT.dates.map(x => x.date).sort();
-      hqInitRange(ds[0], ds[ds.length - 1]);
-    }
-    const sumRoutes = HT.dates.reduce((a, x) => a + (x.routes || 0), 0);
-    if (!HT.dates.length) {
-      $('#histDates').innerHTML = '';
-      $('#histSum').textContent = '暂无数据';
-      $('#histList').innerHTML = `<div class="empty">本地库还没有已下载的数据。<br><br>
-        先到「数据下载」选一个日期开始下载，<br>下载过的日期会自动出现在这里。</div>`;
-      $('#histFoot').innerHTML = '';
-      return;
-    }
-    $('#histSum').textContent = `${HT.dates.length} 个日期 · ${nfmt(sumRoutes)} 趟已存`;
-    if (!keepSel || !HT.dates.some(x => x.date === HT.sel)) {
-      // 默认选最近一个「有经停站」的日期，避免打开就是空列表
-      HT.sel = (HT.dates.find(x => x.routes > 0) || HT.dates[0]).date;
-    }
-    histRenderDates();
-    await histLoadTrains(false);
+    const ds = (d.dates || []).map(x => x.date).sort();
+    const routes = (d.dates || []).reduce((a, x) => a + (x.routes || 0), 0);
+    HQ.meta = { from: ds[0] || '', to: ds[ds.length - 1] || '', days: ds.length };
+    $('#histSum').textContent = ds.length
+      ? `库里 ${ds.length} 天有数据 · ${ds[0]} ~ ${ds[ds.length - 1]} · ${nfmt(routes)} 趟已存停站`
+      : '暂无数据，先到「数据下载」下一天';
   } catch (e) {
-    $('#histList').innerHTML = `<div class="empty">加载失败：${e.message}</div>`;
-  } finally {
-    HT.loading = false;
+    $('#histSum').textContent = '读取失败：' + e.message;
   }
-}
-
-function histRenderDates() {
-  const box = $('#histDates');
-  box.innerHTML = HT.dates.map(d => `
-    <button class="hchip${d.date === HT.sel ? ' active' : ''}${d.isPast ? ' past' : ''}${d.routes ? '' : ' nodata'}"
-            data-date="${d.date}" title="${d.date} ${d.weekday} · 已存 ${nfmt(d.routes)} 趟 / ${nfmt(d.stops)} 条停站记录">
-      ${d.date.slice(5)} <span class="c">${d.weekday.replace('周', '')} · ${
-        d.routes ? nfmt(d.routes) : '无停站'}</span>
-    </button>`).join('');
-  $$('#histDates .hchip').forEach(b => b.addEventListener('click', () => {
-    HT.sel = b.dataset.date;
-    histRenderDates();
-    histLoadTrains(false);
-  }));
-}
-
-async function histLoadTrains(append) {
-  if (!HT.sel) return;
-  const offset = append ? HT.items.length : 0;
-  const box = $('#histList');
-  if (!append) box.innerHTML = `<div class="empty">读取 ${HT.sel} 的车次…</div>`;
-  try {
-    const d = await api('/api/history/trains', {
-      date: HT.sel, q: HT.q, limit: HT.limit, offset,
-    });
-    HT.total = d.total;
-    HT.items = append ? HT.items.concat(d.items) : d.items;
-    histRenderList();
-  } catch (e) {
-    box.innerHTML = `<div class="empty">读取失败：${e.message}</div>`;
-  }
-}
-
-function histRenderList() {
-  const box = $('#histList');
-  const day = HT.dates.find(x => x.date === HT.sel) || {};
-  if (!HT.items.length) {
-    box.innerHTML = `<div class="empty">${HT.q ? `该日没有匹配「${HT.q}」的车次` : '该日没有车次记录'}</div>`;
-  } else {
-    box.innerHTML = `<div class="listhdr">${HT.sel} ${day.weekday || ''}${
-      day.isPast ? ' · 历史' : ''}${day.isToday ? ' · 今天' : ''} · ${
-      HT.q ? `匹配 ${nfmt(HT.total)} 条` : `共 ${nfmt(HT.total)} 趟`}</div>` +
-      HT.items.map(t => `<div class="hrow" data-code="${t.code}">
-        <div class="h1"><span class="code">${t.code}</span>
-          <span class="od">${t.start_sta || '?'} → ${t.end_sta || '?'}</span></div>
-        <div class="h2">${t.type || ''}${t.type ? ' · ' : ''}${
-          t.stops ? `${t.stops} 站` : (t.stop_count ? `${t.stop_count} 站` : '站数未知')}</div>
-        <span class="st ${t.has_route ? 'ok' : 'no'}">${t.has_route ? '已下载' : '未下载'}</span>
-      </div>`).join('');
-    $$('#histList .hrow').forEach(r => r.addEventListener('click', () => {
-      openTrain(r.dataset.code, HT.sel, { cacheOnly: true });
-      switchTab('train');
-      $$('#histList .hrow').forEach(x => x.classList.remove('active'));
-      r.classList.add('active');
-    }));
-  }
-
-  const rest = HT.total - HT.items.length;
-  $('#histFoot').innerHTML = `
-    <button class="btn sm" data-act="json">⬇ JSON</button>
-    <button class="btn sm" data-act="csv">⬇ CSV</button>
-    ${rest > 0 ? `<button class="btn sm" data-act="more">加载更多（剩 ${nfmt(rest)}）</button>` : ''}
-    <span style="margin-left:auto">导出目录 <code class="inline">webapp\\data\\exports</code></span>`;
-  $$('#histFoot [data-act]').forEach(b => b.addEventListener('click', () => {
-    if (b.dataset.act === 'more') return histLoadTrains(true);
-    location.href = `/api/collect/download?date=${HT.sel}&fmt=${b.dataset.act}`;
-  }));
 }
 
 
 /* ============================================================
- * 历史查询：车次开行日历 / 大类统计
+ * 历史查询：车次开行日历 / 大类按日统计
  * 数据来自已落库的 trains（某日枚举到的车次）、routes（停站）、day_skip（明确不开行）
  * ============================================================ */
 const HQ = {
-  mode: 'day', range: null,
+  mode: 'train', meta: null, inited: false,
   code: '', from: '', to: '', cal: null, selDate: '',
-  tfrom: '', tto: '', type: '', types: null,
+  tfrom: '', tto: '', types: null,
 };
 
 const hqYmd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
-function hqSetMode(mode) {
-  HQ.mode = mode;
-  $$('.hq-tab').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
-  $('#hqDay').classList.toggle('hidden', mode !== 'day');
-  $('#hqTrain').classList.toggle('hidden', mode !== 'train');
-  $('#hqType').classList.toggle('hidden', mode !== 'type');
-  if (mode === 'train' && !HQ.cal) hqQueryTrain();
-  if (mode === 'type' && !HQ.types) hqQueryTypes();
+/* 默认时段：今天前后各 7 天 */
+function hqDefaultRange(days) {
+  const n = days == null ? 7 : days;
+  const t = new Date(`${todayStr()}T00:00:00`);
+  const a = new Date(t); a.setDate(a.getDate() - n);
+  const b = new Date(t); b.setDate(b.getDate() + n);
+  return { from: hqYmd(a), to: hqYmd(b) };
 }
 
-function hqInitRange(from, to) {
-  if (!from || !to) return;
-  HQ.range = { from, to };
-  [['#hqFrom', from], ['#hqTo', to], ['#hqTFrom', from], ['#hqTTo', to]].forEach(([id, v]) => {
+function hqSetMode(mode, force) {
+  HQ.mode = mode;
+  $$('.hq-tab').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+  $('#hqTrain').classList.toggle('hidden', mode !== 'train');
+  $('#hqType').classList.toggle('hidden', mode !== 'type');
+  if (mode === 'train' && (force || !HQ.cal)) hqQueryTrain();
+  if (mode === 'type' && (force || !HQ.types)) hqQueryTypes();
+}
+
+/* 日期框留空就填默认时段（今天±7天）；不再用库区间限制 min/max，
+   因为未来几天本来就没有数据，限制反而让人选不到 */
+function hqInitRange() {
+  const def = hqDefaultRange(7);
+  [['#hqFrom', def.from], ['#hqTo', def.to],
+   ['#hqTFrom', def.from], ['#hqTTo', def.to]].forEach(([id, v]) => {
     const el = $(id);
-    if (!el) return;
-    el.min = from;
-    el.max = to;
-    if (!el.value) el.value = v;
+    if (el && !el.value) el.value = v;
   });
   const c = $('#hqCode');
   if (c && !c.value) c.value = 'G1';
 }
 
 function hqRangeBtns(kind, days) {
-  const end = HQ.range ? HQ.range.to : todayStr();
-  let from = HQ.range ? HQ.range.from : end;
+  let from, to;
   if (days > 0) {
-    const d = new Date(end + 'T00:00:00');
-    d.setDate(d.getDate() - days + 1);
-    from = hqYmd(d);
-    if (HQ.range && from < HQ.range.from) from = HQ.range.from;
+    const r = hqDefaultRange(days);
+    from = r.from; to = r.to;
+  } else if (HQ.meta && HQ.meta.from) {
+    from = HQ.meta.from; to = HQ.meta.to;      // 全部 = 库里现有的全部区间
+  } else {
+    const r = hqDefaultRange(7);
+    from = r.from; to = r.to;
   }
-  if (kind === 'train') { $('#hqFrom').value = from; $('#hqTo').value = end; }
-  else { $('#hqTFrom').value = from; $('#hqTTo').value = end; }
+  if (kind === 'train') { $('#hqFrom').value = from; $('#hqTo').value = to; }  else { $('#hqTFrom').value = from; $('#hqTTo').value = to; }
+}
+
+/* 进入历史页：补默认日期 + 读一次库概况 + 跑当前视图 */
+function hqEnter() {
+  if (!HQ.inited) {
+    HQ.inited = true;
+    hqInitRange();
+    hqMetaLoad();
+  }
+  hqSetMode(HQ.mode, false);
 }
 
 /* ---------- 车次日历 ---------- */
@@ -3349,7 +3279,7 @@ async function hqLoadStops(code, date) {
   }
 }
 
-/* ---------- 大类统计 ---------- */
+/* ---------- 大类 · 按日统计 ---------- */
 async function hqQueryTypes() {
   HQ.tfrom = $('#hqTFrom').value;
   HQ.tto = $('#hqTTo').value;
@@ -3359,7 +3289,7 @@ async function hqQueryTypes() {
   }
   $('#hqTypeSum').innerHTML = '统计中…';
   try {
-    const d = await api('/api/history/types', { from: HQ.tfrom, to: HQ.tto, type: HQ.type });
+    const d = await api('/api/history/types', { from: HQ.tfrom, to: HQ.tto });
     HQ.types = d;
     hqRenderTypes();
   } catch (e) {
@@ -3371,50 +3301,70 @@ async function hqQueryTypes() {
 function hqRenderTypes() {
   const d = HQ.types;
   if (!d) return;
-  const part = d.days.filter(x => x.partial).map(x => x.date.slice(5));
-  $('#hqTypeSum').innerHTML = `${d.from} ~ ${d.to}（${d.span} 天，有数据 <b>${d.coveredDays}</b> 天）
-    · 全库登记 <b>${nfmt(d.poolTotal)}</b> 趟车${part.length
-      ? ` <span class="warn">· ${part.join('、')} 数据不全，不开行数偏高</span>` : ''}`;
-  $('#hqTypeTable').innerHTML = `
-    <table class="hq-tbl">
-      <thead><tr><th>大类</th><th>名称</th><th>全库车次</th><th>段内出现</th>
-        <th>开行趟次</th><th>不开行趟次</th><th>日均开行</th><th>开行天数</th></tr></thead>
-      <tbody>${d.types.map(x => `<tr data-type="${esc(x.type)}" class="${HQ.type === x.type ? 'on' : ''}">
-        <td><span class="tp">${esc(x.type)}</span></td>
-        <td>${esc(x.label)}</td>
-        <td>${nfmt(x.pool)}</td>
-        <td>${nfmt(x.unionInRange)}</td>
-        <td>${nfmt(x.openTimes)}</td>
-        <td class="sk">${nfmt(x.skipTimes)}</td>
-        <td>${x.avgOpen}</td>
-        <td>${x.openDays}/${x.coveredDays}</td>
-      </tr>`).join('')}</tbody>
-    </table>`;
-  $$('#hqTypeTable tbody tr').forEach(tr => tr.addEventListener('click', () => {
-    HQ.type = (HQ.type === tr.dataset.type) ? '' : tr.dataset.type;
-    hqQueryTypes();
-  }));
-  hqRenderTypeDays();
-}
+  const days = d.daily || [];
+  const types = (d.types || []).filter(x => x.pool > 0);
+  const cov = days.filter(x => x.covered);
+  const part = days.filter(x => x.partial).map(x => x.date.slice(5));
+  const totOpen = cov.reduce((a, x) => a + (x.open || 0), 0);
+  const totSkip = cov.reduce((a, x) => a + (x.skip || 0), 0);
 
-function hqRenderTypeDays() {
-  const box = $('#hqTypeDays');
-  const f = HQ.types && HQ.types.focus;
-  if (!f) { box.innerHTML = ''; return; }
-  const has = f.days.filter(x => x.covered);
-  const max = Math.max(1, ...has.map(x => x.open + x.skip));
-  box.innerHTML = `<div class="hq-sum" style="border:0;background:transparent;padding:10px 0 4px">
-      <b>${esc(f.type)}</b> ${esc(f.label)} · 开行 ${nfmt(f.summary.openTimes)} 趟次 / 不开行 ${nfmt(f.summary.skipTimes)} 趟次
-      <span style="color:#94a3b8">（蓝＝开行，灰＝不开行）</span>
-    </div>` + f.days.map(x => `
-      <div class="hq-day${x.partial ? ' part' : ''}">
-        <span>${x.date.slice(5)} ${x.weekday.slice(1)}</span>
-        <span class="b">${x.covered
-          ? `<i class="o" style="width:${(x.open / max * 100).toFixed(2)}%"></i>` +
-            `<i class="s" style="width:${(x.skip / max * 100).toFixed(2)}%"></i>`
-          : ''}</span>
-        <span class="n">${x.covered ? `${nfmt(x.open)} / ${nfmt(x.skip)}` : '无数据'}</span>
-      </div>`).join('');
+  $('#hqTypeSum').innerHTML = `${d.from} ~ ${d.to}（${d.span} 天，有数据 <b>${d.coveredDays}</b> 天）
+    · 全库登记 <b>${nfmt(d.poolTotal)}</b> 趟 · 段内开行 <b>${nfmt(totOpen)}</b> 趟次 · 不开行 <b>${nfmt(totSkip)}</b> 趟次${
+      part.length ? `<br><span class="warn">${part.join('、')} 当天枚举不全，「不开行」会偏高</span>` : ''}
+    <br><span style="color:#94a3b8">每格上排＝当日开行趟次，下排灰字＝不开行趟次（全库该类登记数 − 当日开行）；
+      「不全」＝那天枚举没跑完，「仅停站」＝那天只下了停站没枚举车次，都不参与统计</span>`;
+
+  if (!days.length || !types.length) {
+    $('#hqTypeTable').innerHTML = '<div class="hq-empty">这段时间库里还没有数据</div>';
+    $('#hqTypeDays').innerHTML = '';
+    return;
+  }
+
+  const maxBy = {};
+  types.forEach(t => {
+    maxBy[t.type] = Math.max(1, ...days.map(x => (x.types || {})[t.type] || 0));
+  });
+  const nOpen = (x, t) => (x.types || {})[t] || 0;
+  const nSkip = (x, t, pool) => (x.covered ? Math.max(0, pool - nOpen(x, t)) : 0);
+
+  const head = types.map(t => `<th><span class="tp">${esc(t.type)}</span>
+      <small>${esc(t.label)} · ${nfmt(t.pool)}</small></th>`).join('');
+
+  const body = days.map(x => {
+    const cells = types.map(t => {
+      const o = nOpen(x, t.type);
+      const sk = nSkip(x, t.type, t.pool);
+      const a = (x.covered && o) ? (o / maxBy[t.type] * 0.34).toFixed(3) : 0;
+      return `<td style="background:rgba(31,111,235,${a})"
+        title="${x.date} ${esc(t.type)}${esc(t.label)}：开行 ${nfmt(o)} 趟 · 不开行 ${nfmt(sk)} 趟">${
+        x.covered ? `${nfmt(o)}<span class="sk">${nfmt(sk)}</span>` : '<span class="nil">—</span>'}</td>`;
+    }).join('');
+    return `<tr class="${x.covered ? '' : 'nodata'}">
+      <td class="dt">${x.date.slice(5)}<span class="w">${x.weekday.replace('周', '')}</span>${
+        x.partial ? '<span class="tag">不全</span>'
+          : (x.routesOnly ? '<span class="tag">仅停站</span>' : '')}</td>
+      ${cells}
+      <td class="sum">${x.covered ? nfmt(x.open) : '—'}</td>
+      <td class="sum sk2">${x.covered ? nfmt(x.skip) : '—'}</td>
+    </tr>`;
+  }).join('');
+
+  const footCells = types.map(t => {
+    const o = cov.reduce((a, x) => a + nOpen(x, t.type), 0);
+    const sk = cov.reduce((a, x) => a + nSkip(x, t.type, t.pool), 0);
+    return `<td>${nfmt(o)}<span class="sk">${nfmt(sk)}</span></td>`;
+  }).join('');
+
+  $('#hqTypeTable').innerHTML = `
+    <table class="hq-mx">
+      <thead><tr><th class="dt">日期</th>${head}
+        <th>开行合计<small>趟次</small></th><th>不开行<small>趟次</small></th></tr></thead>
+      <tbody>${body}</tbody>
+      <tfoot><tr><td class="dt">合计</td>${footCells}
+        <td class="sum">${nfmt(totOpen)}</td>
+        <td class="sum sk2">${nfmt(totSkip)}</td></tr></tfoot>
+    </table>`;
+  $('#hqTypeDays').innerHTML = '';
 }
 
 async function boot() {
@@ -3597,31 +3547,22 @@ async function boot() {
   });
 
   // 历史数据页
-  $('#histRefresh').addEventListener('click', () => histLoad(true));
-  $('#histGo').addEventListener('click', () => {
-    HT.q = $('#histQ').value.trim();
-    histLoadTrains(false);
-  });
-  $('#histQ').addEventListener('keydown', e => {
-    if (e.key === 'Enter') {
-      HT.q = e.target.value.trim();
-      histLoadTrains(false);
-    }
-    if (e.key === 'Escape') { e.target.value = ''; HT.q = ''; histLoadTrains(false); }
+  $('#histRefresh').addEventListener('click', () => {
+    hqMetaLoad();
+    hqSetMode(HQ.mode, true);
   });
 
-  // 历史查询：车次日历 / 大类统计
+  // 历史查询：车次日历 / 大类按日统计
   $$('.hq-tab').forEach(b => b.addEventListener('click', () => hqSetMode(b.dataset.mode)));
   $('#hqGo').addEventListener('click', hqQueryTrain);
   $('#hqCode').addEventListener('keydown', e => { if (e.key === 'Enter') hqQueryTrain(); });
-  $('#hqTGo').addEventListener('click', () => { HQ.type = ''; hqQueryTypes(); });
+  $('#hqTGo').addEventListener('click', hqQueryTypes);
   $$('.hq-bar [data-range]').forEach(b => b.addEventListener('click', () => {
     hqRangeBtns('train', b.dataset.range === 'all' ? 0 : Number(b.dataset.range));
     hqQueryTrain();
   }));
   $$('.hq-bar [data-trange]').forEach(b => b.addEventListener('click', () => {
     hqRangeBtns('type', b.dataset.trange === 'all' ? 0 : Number(b.dataset.trange));
-    HQ.type = '';
     hqQueryTypes();
   }));
 
@@ -3643,7 +3584,7 @@ async function boot() {
   const h = (location.hash || '').replace('#', '');
   if (['train', 'od', 'net', 'dl', 'hist', 'curate'].includes(h)) switchTab(h);
 
-  // 历史查询深链：?hq=train&hqcode=G1&hqfrom=…&hqto=… / ?hq=type&hqtype=G
+  // 历史查询深链：?hq=train&hqcode=G1&hqfrom=…&hqto=… / ?hq=type&hqtfrom=…&hqtto=…
   const hp = new URLSearchParams(location.search);
   const hqMode = (hp.get('hq') || '').toLowerCase();
   if (hqMode === 'train' || hqMode === 'type') {
@@ -3654,8 +3595,7 @@ async function boot() {
       if (hp.get('hqto')) $('#hqTo').value = hp.get('hqto');
       if (hp.get('hqtfrom')) $('#hqTFrom').value = hp.get('hqtfrom');
       if (hp.get('hqtto')) $('#hqTTo').value = hp.get('hqtto');
-      if (hqMode === 'type' && hp.get('hqtype')) HQ.type = hp.get('hqtype').toUpperCase();
-      hqSetMode(hqMode);
+      hqSetMode(hqMode, true);
       const sel = hp.get('hqsel');
       if (sel) {
         setTimeout(() => {

@@ -562,10 +562,12 @@ def line_detail(name: str) -> Optional[dict]:
     pts = []
     for p in ln["stations"]:
         c = coord(p["name"])
+        st = station(p["name"]) or {}
         pts.append({"name": _key(p["name"]), "km": p["km"],
                     "kmBase": p.get("kmBase", p["km"]),
                     "kmSrc": p.get("kmSrc"),
-                    "lat": c[0] if c else None, "lon": c[1] if c else None})
+                    "lat": c[0] if c else None, "lon": c[1] if c else None,
+                    "coordSrc": st.get("coordSrc") or ""})
     n = len(pts)
     seg = ln.get("segKm")
     if not isinstance(seg, list) or len(seg) != max(n - 1, 0):

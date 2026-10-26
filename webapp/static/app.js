@@ -1770,6 +1770,14 @@ const LN = { data: null, segKm: {}, staKm: {}, totalKm: '', editing: false, busy
 
 const lnKmText = v => (v == null ? '-' : `${v} km`);
 
+/** 线路站点列表里悬停看坐标：人工改过的标出来，省得对着地图猜生效没生效 */
+function lnStopTip(p) {
+  if (p.lat == null || p.lon == null) return `${p.name}：坐标缺失（点它可在车站详情里补）`;
+  const src = p.coordSrc === 'manual' ? '人工'
+    : p.coordSrc === 'osm' ? 'OSM' : '档案';
+  return `${p.name}\n纬度 ${fmtDeg(p.lat)} · 经度 ${fmtDeg(p.lon)}（${src}）`;
+}
+
 /** 「不详」记号：填这些等于把这一段（或这一站）标成明确不详（存 null，跟"没填"不一样） */
 const LN_NA_RE = /^(?:-+|—+|–+|~+|～+|\?+|？+|不详|未知|没有|无|unknown|n\/?a)$/i;
 const lnIsNA = s => LN_NA_RE.test(String(s == null ? '' : s).trim());
@@ -2555,7 +2563,7 @@ async function showLine(q) {
         ${d.stations.map((p, i) => `<li class="stop${i === 0 ? ' start' : ''}${i === d.stations.length - 1 ? ' end' : ''}" data-i="${i}">
           <div class="t"><div class="arr">${i + 1}</div></div>
           <div class="rail"><span class="dot"></span></div>
-          <div class="name"><span class="n">${esc(p.name)}</span>${p.lat == null ? '<span class="s">缺坐标</span>' : ''}</div>
+          <div class="name"><span class="n" title="${lnStopTip(p)}">${esc(p.name)}</span>${p.lat == null ? '<span class="s">缺坐标</span>' : ''}</div>
           <div class="km">${lnKmText(p.km)}</div>
         </li>`).join('')}
       </ul>`;
@@ -3364,9 +3372,13 @@ async function boot() {
   const qs = new URLSearchParams(location.search);
   const qCode = (qs.get('code') || '').trim().toUpperCase();
   const qDate = (qs.get('date') || '').trim();
+  const qLine = (qs.get('line') || '').trim();
   if (qCode) {
     if (qDate) { S.date = qDate; $('#date').value = qDate; }
     openTrain(qCode, S.date, { cacheOnly: qs.get('cache') === '1' });
+  } else if (qLine) {
+    switchTab('net');                     // ?line=浑白线 直接看这条线
+    showLine(qLine);
   } else {
     openTrain('G1');
   }

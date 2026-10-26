@@ -215,7 +215,7 @@ G1 北京南→上海虹桥 因此从「直线 1176 km」修正为 **1318 km**�
 | 表 | 内容 |
 |---|---|
 | `train_override` | `code`（主键，按车次不按日期）、`via_json`、`total_km`、`seg_km_json`、`note`、`updated_at` |
-| `coord_override` | `name`、`lat`、`lon` —— 车站坐标人工修正（**任何站都能改**，不限于缺坐标的） |
+| `coord_override` | `name`、`lat`、`lon` —— 车站坐标人工修正（**任何站都能改**，不限于缺坐标的）。改完会套进 `cnrail` 车站表，线路页地图、站间里程、资料库线路图一起生效，不用重启 |
 | `line_override` | `name`（主键，线路名）、`seg_km_json`、`total_km`、`note`、`updated_at` —— 线路里程人工校正 |
 | `line_custom` | `name`、`stations_json`、`note` —— 用户新增的线路（档案里没有的） |
 | `station_custom` | `name`、`lat`、`lon`、`lines_json`、`tele`、`bureau`、`note`、`type`（车站/线路所）、`source`（manual 自建 / line-fill 线路补全）、`alias`（线路里的原写法）、`coord_src`（osm/manual）—— 用户新增 + 线路补全的车站 |

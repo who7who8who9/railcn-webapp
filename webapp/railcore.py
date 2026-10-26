@@ -862,6 +862,35 @@ def add_catalog_line(lid: str) -> dict:
     return cnrail.line_detail(ln["name"]) or ln
 
 
+def _apply_coord_overrides() -> int:
+    """
+    把人工补录的坐标（coord_override）套进 cnrail 车站表。
+
+    之前只有车站详情（station_detail）读 coord_override，线路页 / 地图 / 站间里程
+    走的是 cnrail.station() 里的经纬度，还是档案或 OSM 的原值 —— 于是改完坐标
+    详情里是新值、地图上还是旧位置。这里统一成一处生效。
+
+    必须在 _apply_custom() 之后调用：那边重建 _STATIONS 会把人工值冲掉。
+    """
+    try:
+        with db() as conn:
+            rows = conn.execute("SELECT name, lat, lon FROM coord_override").fetchall()
+    except sqlite3.Error:
+        return 0
+    hit = 0
+    for r in rows:
+        if r["lat"] is None or r["lon"] is None:
+            continue
+        st = cnrail.station(r["name"])
+        if not st:
+            continue
+        st["lat"] = float(r["lat"])
+        st["lon"] = float(r["lon"])
+        st["coordSrc"] = "manual"
+        hit += 1
+    return hit
+
+
 def _apply_custom() -> None:
     """把库里新增的线路 / 车站合并进 cnrail"""
     lines: Dict[str, dict] = {}
@@ -892,6 +921,7 @@ def _apply_custom() -> None:
                 "note": it.get("note") or "",
             }
     cnrail.set_custom(lines, sts)
+    _apply_coord_overrides()     # 人工补录的坐标盖在档案 / OSM 之上
 
 
 def get_line_override(name: str) -> Optional[dict]:
@@ -1113,6 +1143,7 @@ def set_coord(name: str, lat, lon, coord=None) -> dict:
                ON CONFLICT(name) DO UPDATE SET lat=excluded.lat, lon=excluded.lon""",
             (name, lat, lon),
         )
+    _apply_coord_overrides()          # 线路页 / 地图读的是 cnrail 那份，一起更新
     stations.reload_coords()
     return {"name": name, "lat": lat, "lon": lon, **stations.coord_info(name)}
 
@@ -1126,7 +1157,9 @@ def clear_coord(name: str) -> dict:
         removed = conn.execute(
             "DELETE FROM coord_override WHERE name=?", (name,)
         ).rowcount > 0
-    stations.reload_coords()
+    if removed:
+        _apply_custom()               # 重建 _STATIONS，把这站的人工值抹掉
+        stations.reload_coords()
     info = stations.coord_info(name)
     return {"name": name, "removed": removed, **info}
 

@@ -376,6 +376,10 @@ python scripts\import_crtrain.py     :: 归集成 data\crtrain\lines.json + geom
 
 - **新增线路**：填线路名 + 沿线站序，每站可选填「自起点累计公里数」，不详就留空（存成 `null`，界面仍是 `-`）。
   校验：至少两站、站序不重复、累计里程必须严格递增、不能与档案线路重名
+- **给只有 OSM 几何的线路补车站**：线路库和资料库都查不到、只在 OSM 里有走向的线（联络线、支线最多见），
+  搜出来点进详情后有个「添加车站」——按走向反查车站库，把候选站连同沿线里程预填进「新增线路」弹窗，
+  删掉不在线上的、补上空缺的，保存就成正式线路（之后能进车次经由与里程推断）。
+  自建线路的详情里有「改站表」，走同一个弹窗，保存整体替换站表
 - **新增车站**：填站名 + 经纬度（可直接粘贴「经度,纬度」或「经度:126.576636,纬度:42.038926」，
   复用校对页的拆分规则），可选填所属线路 / 电报码 / 路局。
   已在站库里的站会被拒绝，避免与 `coord_override` 两套坐标打架
@@ -392,6 +396,23 @@ python scripts\import_crtrain.py     :: 归集成 data\crtrain\lines.json + geom
 
 新增线路的里程若还想改，照旧用「编辑里程」，覆盖值存在 `line_override`，与自定义线路的数据分开；
 删除自定义线路时会连带清掉它的 `line_override`，免得以后重建同名线路套到旧值。
+
+### 只有 OSM 几何的线路：怎么把车站补上
+
+这类线（联络线最多）在线路库、资料库里都没有，只有 OSM 的一段轨道。`GET /api/line/osm/stations`
+按走向反查车站库，给「新增线路」弹窗预填一份站表：
+
+- **候选来源三路**：① 距轨道 1.2 km 以内的站；② 车站档案 `lines` 里直接写着属于这条线的站
+  （几何截断也不漏）；③ 两端 3 km 以内的站（几何没画到头时补终点，这种站里程留空，由人填）
+- **先说单线**：OSM 一条线常被拆成上下行两段。`railgeom.chain_parts()` 从最长的一段起头，
+  往两头挑端点最近的段接上（必要时反向），接上去只是原路折回的段判为上下行复线、直接丢掉；
+  端点离得太远（`gap_m`）也不再硬接，免得把两条不相干的线拼成一条
+- **里程按单线折算**：源数据的 `km` 是各要素里程相加，上下行分开建要素时会各算一遍
+  （赵甸联络线 10.5 km，实际单线 5.9 km）。所以补站里程和「几何比档案」的差异都用单线里程；
+  `chain_info()` 同时给出 `dupKm`（判复线丢掉的）和 `dropKm`（接不上丢掉的），
+  **只有 `dropKm < 0.5` 时单线里程才可信** —— 走向有缺口时页面退回源数据里程，不拿它去比档案
+- 排序按沿线累计里程；同位置压着几个站时按 0.1 km 错开，免得撞上「累计里程要递增」的校验
+- 站名不在车站库里的照样能填，但要去车站页补坐标才会画到地图上
 
 ### 地图：经由线路上的全部车站
 
@@ -466,6 +487,7 @@ python scripts\import_crtrain.py     :: 归集成 data\crtrain\lines.json + geom
 | `GET /api/line` | `q` | 线路详情（有序站点 + 累计里程 + 坐标，可直接画线）；另带 `kmBase`（档案原值）、`segKm`（各段生效里程，不详为 `null`）、`override`、`osm`（OSM 线名 / 几何里程 / 桥隧） |
 | `GET /api/line/osm` | `q`、`km` | 线路的 OSM 几何（`parts` = WGS-84 折线数组，可直接画）；`km` 给已知里程时挡掉同名残段 |
 | `GET /api/line/osm/list` | `q`、`limit` | 搜 OSM 线路（线名 / 里程 / 桥隧 / 段数），附全库统计 |
+| `GET /api/line/osm/stations` | `q`、`radius`、`extend` | 按 OSM 走向反查沿线车站，返回候选站（`km` / `dist` / `side`）、单线里程 `spineKm`、已有同名自建线路的站表 |
 | `GET /api/dates` | — | 含当日共 15 天，每天的下载状态 / 已确认开行数 / 待处理数，另带 `chain`（一键连跑进度） |
 | `GET /api/history` | — | 已有数据的全部日期（车次数 / 停站记录数 / 导出文件） |
 | `GET /api/history/trains` | `date`、`q`、`limit`、`offset` | 某日车次清单（含「是否已下载经停站」标记），可检索分页 |
@@ -489,7 +511,7 @@ python scripts\import_crtrain.py     :: 归集成 data\crtrain\lines.json + geom
 | `POST /api/override` | `code`、`via[]`、`totalKm`、`segKm`、`note` | 保存人工校正；`segKm` 形如 `{"0":205,"2":230}`（键是区间序号）；全为空即撤销 |
 | `POST /api/line/km` | `name`、`segKm`、`totalKm`、`note` | 保存线路里程人工校正，返回最新线路详情；全为空即撤销 |
 | `POST /api/line/km/clear` | `name` | 线路里程恢复档案值 |
-| `POST /api/line/new` | `name`、`stations[]`（`{name, km}`，km 可空）、`note` | 新增线路，返回线路详情 |
+| `POST /api/line/new` | `name`、`stations[]`（`{name, km}`，km 可空）、`note`、`replace` | 新增线路，返回线路详情；`replace=1` 允许覆盖同名**自建**线路（改站表用） |
 | `POST /api/line/delete` | `name` | 删除自建线路（连带清掉它的里程校正） |
 | `POST /api/station/new` | `name`、`lat`、`lon`、`lines[]`、`tele`、`bureau`、`note` | 新增车站 |
 | `POST /api/station/delete` | `name` | 删除自建车站 |

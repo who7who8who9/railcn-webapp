@@ -168,7 +168,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/line/new":
                 ln = railcore.save_custom_line(
                     payload.get("name"), payload.get("stations") or [],
-                    payload.get("note") or "",
+                    payload.get("note") or "", bool(payload.get("replace")),
                 )
                 return self.json({"ok": True, "line": ln})
 
@@ -275,11 +275,16 @@ class Handler(BaseHTTPRequestHandler):
                 if target:
                     d = cnrail.line_detail(target)
                     if d:
-                        return self.json({**d, "aliasOf": q,
-                                          "osm": (railgeom.meta(q, d.get("totalKm"))
-                                                  or railgeom.meta(target, d.get("totalKm")))})
+                        m = (railgeom.meta(q, d.get("totalKm"))
+                             or railgeom.meta(target, d.get("totalKm")))
+                        if m:
+                            m["kmChain"] = railgeom.spine_km(m["name"], d.get("totalKm"))
+                        return self.json({**d, "aliasOf": q, "osm": m})
                 return self.err("未找到线路: " + q, 404)
-            return self.json({**d, "osm": railgeom.meta(d.get("name") or q, d.get("totalKm"))})
+            m = railgeom.meta(d.get("name") or q, d.get("totalKm"))
+            if m:
+                m["kmChain"] = railgeom.spine_km(m["name"], d.get("totalKm"))
+            return self.json({**d, "osm": m})
 
         # OSM 线路几何（CRTrainRoute 整理）：真实走向 + 几何里程 + 桥隧统计
         if path == "/api/line/osm":
@@ -293,6 +298,14 @@ class Handler(BaseHTTPRequestHandler):
             kw = one("q")
             return self.json({"items": railgeom.search(kw, int(one("limit", "30"))),
                               "stats": railgeom.stats()})
+
+        # OSM-only 线路补站：按走向反查车站库，给「新增线路」弹窗预填站点与里程
+        if path == "/api/line/osm/stations":
+            return self.json(railcore.osm_line_stations(
+                one("q") or one("name"),
+                int(one("radius", "1200") or 1200),
+                int(one("extend", "3000") or 3000),
+            ))
 
         if path == "/api/line/catalog":
             items = railcore.catalog_search(one("q"), int(one("limit", "20")))

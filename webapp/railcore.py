@@ -661,9 +661,15 @@ def list_custom_lines() -> List[dict]:
     return out
 
 
-def save_custom_line(name: str, stations, note: str = "") -> dict:
+def save_custom_line(name: str, stations, note: str = "", replace: bool = False) -> dict:
+    """新增 / 覆盖一条自建线路
+
+    replace=True 时允许覆盖「自己建的」同名线路（补站、改站序），档案线路与
+    资料库带进来的线路仍然拒绝 —— 那些的站表不归这里管。
+    """
     ln = _build_custom_line(name, stations, note)
-    if cnrail.line(ln["name"]):
+    cur = cnrail.line(ln["name"])
+    if cur and not (replace and cur.get("custom")):
         raise ValueError(f"线路库里已经有「{ln['name']}」，改里程请用「编辑里程」")
     now = time.time()
     with _db_lock, db() as conn:
@@ -860,6 +866,63 @@ def add_catalog_line(lid: str) -> dict:
     _apply_catalog()
     _apply_custom()
     return cnrail.line_detail(ln["name"]) or ln
+
+
+_OSM_STOP_TYPES = {"火车站", "线路所", "车站(仅线路表)", "铁路站场"}
+
+
+def osm_line_stations(name: str, radius_m: int = 1200, extend_m: int = 3000) -> dict:
+    """
+    OSM-only 线路的候选站表：按几何反查车站库，加上「档案里注明属于这条线」的站。
+
+    线路库里没有、只有 OSM 几何的线（联络线 / 支线最多见）没有站表，也就没法进
+    车次经由与里程推断。这里给「新增线路」弹窗预填一份站点序列：里程按 OSM 走向
+    折算，人只删减补漏，不用从空白开始一站站敲。
+    """
+    nm = _norm_line_name(name)
+    if not nm:
+        raise ValueError("缺少线路名")
+    g = railgeom.geom(nm)
+    if not g:
+        raise ValueError(f"OSM 数据里没有这条线路：{nm}")
+    cur = cnrail.line(nm)
+    if cur and not cur.get("custom"):
+        raise ValueError(f"线路库里已经有「{nm}」了，加站请走「编辑里程 / 站表」")
+
+    pool, hint = [], []
+    for st in cnrail.stations_all().values():
+        if st.get("type") not in _OSM_STOP_TYPES:
+            continue                        # 城市 / 地级行政区 / 地铁站不算线路上的站
+        if st.get("lat") is None or st.get("lon") is None:
+            continue
+        sn = st.get("name") or ""
+        if nm in (st.get("lines") or []):
+            hint.append(sn)                 # 站表里直接写着属于这条线
+        pool.append({"name": sn, "lat": st["lat"], "lon": st["lon"],
+                     "type": st.get("type") or "", "tele": st.get("tele") or ""})
+
+    rows = railgeom.stations_along(g.get("parts") or [], pool,
+                                   radius_m=radius_m, extend_m=extend_m, must=hint)
+    sp = railgeom.chain_info(g.get("parts") or [])
+    # 丢掉的段长度会把复线也数进去，给用户看时按「源数据里程 − 串上的里程」封顶
+    drop = min(sp["dropKm"], max(0.0, (g.get("km") or 0) - sp["km"]))
+    existing = next((x for x in list_custom_lines() if x["name"] == nm), None)
+    return {
+        "name": nm,
+        "osmKm": g.get("km"),
+        "spineKm": sp["km"],
+        "spineComplete": sp["complete"],
+        "dupKm": sp["dupKm"],
+        "dropKm": round(drop, 1),
+        "nPart": g.get("nPart"),
+        "nFrag": len(g.get("parts") or []),
+        "radius": radius_m,
+        "stations": rows,
+        "hint": sorted(set(hint)),
+        "existing": (existing or {}).get("stations") or [],
+        "editable": bool(cur and cur.get("custom")),
+        "note": (existing or {}).get("note") or "",
+    }
 
 
 def _apply_coord_overrides() -> int:

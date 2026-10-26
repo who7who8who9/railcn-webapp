@@ -500,6 +500,12 @@ def station(name: str) -> Optional[dict]:
             or _STATIONS.get(_norm(name) + "站"))
 
 
+def stations_all() -> Dict[str, dict]:
+    """全部车站档案（含自建）。只给「按几何反查沿线车站」这类全量比对用，别拿去遍历渲染"""
+    _ensure()
+    return _STATIONS or {}
+
+
 def coord(name: str) -> Optional[Tuple[float, float]]:
     st = station(name)
     if st and st.get("lat") is not None and st.get("lon") is not None:

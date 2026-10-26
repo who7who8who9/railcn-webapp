@@ -1286,7 +1286,7 @@ let netKind = 'station';
 let netTimer = 0;
 
 /* ---------- 新增线路 / 车站 ---------- */
-const NM = { kind: 'line', rows: [], busy: false, stations: null };
+const NM = { kind: 'line', rows: [], busy: false, stations: null, preset: null, replace: false };
 
 function nmClose() {
   cbClose();
@@ -1302,17 +1302,38 @@ function nmSetMsg(text, bad) {
   el.className = 'nm-msg' + (bad ? ' bad' : '');
 }
 
-function nmOpen(kind) {
+/**
+ * preset（新增线路用）：
+ *   name   线路名预填
+ *   rows   [{name, km}] 预填站表
+ *   note   备注预填
+ *   hint   站表上方的说明（HTML）
+ *   title  弹窗标题
+ *   replace 保存时允许覆盖同名自建线路
+ */
+function nmOpen(kind, preset) {
   NM.kind = kind;
   NM.busy = false;
-  NM.rows = kind === 'line' ? [{ name: '', km: '' }, { name: '', km: '' }] : [];
-  $('#nmTitle').textContent = kind === 'line' ? '新增线路' : '新增车站';
+  NM.preset = preset || null;
+  NM.replace = !!(preset && preset.replace);
+  const rows = (preset && preset.rows) || [];
+  NM.rows = kind === 'line'
+    ? (rows.length ? rows.map(r => ({
+        name: r.name || '',
+        km: r.km == null || r.km === '' ? '' : String(r.km),
+      })) : [{ name: '', km: '' }, { name: '', km: '' }])
+    : [];
+  $('#nmTitle').textContent = (preset && preset.title)
+    || (kind === 'line' ? '新增线路' : '新增车站');
   nmSetMsg('');
   nmRender();
   $('#newModal').classList.remove('hidden');
   document.body.classList.add('modal-open');   // 弹窗期间地图区不接指针事件，避免点穿
   if (kind === 'line') nmLoadStations();
-  setTimeout(() => { const el = $('#nmName'); if (el) el.focus(); }, 40);
+  setTimeout(() => {
+    const el = kind === 'line' && !(preset && rows.length) ? $('#nmName') : null;
+    if (el) el.focus();
+  }, 40);
 }
 
 /** 站名库（一次加载 7579 个站名，供新增线路时自绘下拉联想） */
@@ -1329,12 +1350,16 @@ function nmRender() {
   if (!body) return;
 
   if (NM.kind === 'line') {
+    const p = NM.preset || {};
     body.innerHTML = `
       <div class="nm-field">
         <label>线路名</label>
-        <input id="nmName" placeholder="比如 沪宁沿江高速线" autocomplete="off">
-        <span class="nm-tip">档案里已有的线路不能重名；重名会提示改用「编辑里程」</span>
+        <input id="nmName" placeholder="比如 沪宁沿江高速线" autocomplete="off" value="${esc(p.name || '')}">
+        <span class="nm-tip">${p.replace
+          ? '这是自建线路，保存会用下面这份站表整体替换现有的'
+          : '档案里已有的线路不能重名；重名会提示改用「编辑里程」'}</span>
       </div>
+      ${p.hint ? `<div class="nm-auto">${p.hint}</div>` : ''}
       <div class="nm-sec">
         <div class="nm-sec-h"><b>沿线车站</b>
           <span class="nm-tip">按从上到下的顺序；站名可打字联想或点 ▾ 选择，回车跳下一格；里程填「自起点起算的累计公里数」，不详就留空</span>
@@ -1344,7 +1369,7 @@ function nmRender() {
       </div>
       <div class="nm-field">
         <label>备注</label>
-        <input id="nmNote" placeholder="可空，比如：2026 年调图新增">
+        <input id="nmNote" placeholder="可空，比如：2026 年调图新增" value="${esc(p.note || '')}">
       </div>`;
     nmRenderRows();
     $('#nmAddRow').addEventListener('click', () => {
@@ -1598,6 +1623,7 @@ async function nmSave() {
         .filter(r => r.name);
       const r = await postJSON('/api/line/new', {
         name, stations, note: ($('#nmNote').value || '').trim(),
+        replace: !!NM.replace,
       });
       nmClose();
       switchTab('net');
@@ -2253,12 +2279,16 @@ function lnRenderHead() {
       ${d.source === 'huirui' ? '<span class="tag manual">资料库</span>' : ''}
       ${d.custom ? '<span class="tag manual">自建</span>' : ''}
       <span class="ln-acts">
+        ${d.custom ? '<button class="btn sm" id="lnStopsBtn">改站表</button>' : ''}
         ${d.custom || d.source === 'huirui' ? '<button class="btn sm ghost" id="lnDel">删除</button>' : ''}
         <button class="btn sm${LN.editing ? ' on' : ''}" id="lnEditBtn">${LN.editing ? '收起编辑' : '编辑里程'}</button>
       </span>
     </div>
     <div class="l2">${d.aliasOf ? `「${esc(d.aliasOf)}」在资料库里对应这条线 · ` : ''}坐标覆盖 ${d.coordCoverage}% · 点击站点查看所属线路 · <span id="lnFoot"></span></div>`;
   lnRenderInfo();
+  const stopsBtn = $('#lnStopsBtn');
+  if (stopsBtn) stopsBtn.addEventListener('click', () => osmAddStations(
+    d.name, (d.stations || []).map(s => ({ name: s.name, km: s.km }))));
   $('#lnEditBtn').addEventListener('click', () => {
     LN.editing = !LN.editing;
     lnWide(LN.editing);
@@ -2510,10 +2540,13 @@ function lnOsmBlock(d) {
       <div class="ln-osm-none">OSM 数据里没有能对上这条线的线名，地图只能画站点直连</div></div>`;
   }
   const fam = o.match === 'family' ? `　<span class="ln-osm-tag">同族匹配</span>` : '';
-  const diff = (d.totalKm != null && o.km) ? Math.round(o.km - d.totalKm) : null;
+  // kmChain 是把上下行复线并掉的单线里程；源数据的 km 会把复线各算一遍
+  const geomKm = (o.kmChain && o.km && Math.abs(o.kmChain - o.km) > 0.5) ? o.kmChain : o.km;
+  const diff = (d.totalKm != null && geomKm) ? Math.round(geomKm - d.totalKm) : null;
   const rows = [
     ['OSM 线名', o.name],
-    ['几何里程', `${o.km} km${o.kmMain && o.kmMain < o.km ? `（最长一段 ${o.kmMain}）` : ''}`],
+    ['几何里程', `${o.km} km${o.kmChain && o.kmChain !== o.km ? `（单线 ${o.kmChain}）`
+      : (o.kmMain && o.kmMain < o.km ? `（最长一段 ${o.kmMain}）` : '')}`],
     ['连通段', `${o.nPart} 段 · ${o.nFrag} 节折线`],
     ['桥 / 隧', `${o.nBridge} / ${o.nTunnel} 处`],
   ];
@@ -2639,12 +2672,16 @@ async function showOsmLine(name) {
       </div>
       <div class="lninfo">
         <div class="ln-i-head"><b>几何信息</b><span class="ln-i-src">OSM</span>
+          <button class="btn sm primary" id="osmAdd">添加车站</button>
           <button class="btn sm ghost" id="osmBack">返回</button></div>
         <div class="ln-i-grid">${rows.map(([k, v]) =>
           `<div><span>${k}</span><em>${esc(v)}</em></div>`).join('')}</div>
-        <div class="ln-osm-none">这条线只有 OSM 的轨道几何，没有线路参数与站表。要完整资料可以补进线路库后再编辑里程。</div>
+        <div class="ln-osm-none">这条线只有 OSM 的轨道几何，没有线路参数与站表。
+          点「添加车站」会按走向反查车站库，预填一份站表 —— 补完就成正式线路，
+          能进车次经由与里程推断。</div>
       </div>`;
     det.classList.add('show');
+    $('#osmAdd').addEventListener('click', () => osmAddStations(g.name));
     $('#osmBack').addEventListener('click', () => {
       det.classList.remove('show');
       $('#paneNet').classList.remove('line-only');
@@ -2655,8 +2692,78 @@ async function showOsmLine(name) {
   }
 }
 
-/* ---------- 线路资料库（线路库里还没有的线路） ---------- */
-async function showCatalogList(q, box) {
+/**
+ * 给只有 OSM 几何的线路补站：按走向反查车站库，把候选站预填进「新增线路」弹窗。
+ * 已有同名自建线路时，预填的是现有站表（保存走覆盖）。
+ */
+async function osmAddStations(name, fallback) {
+  if (!name) return;
+  nmOpen('line', {
+    title: `补车站 · ${name}`,
+    name,
+    hint: '<span class="nm-wait">正在按 OSM 走向反查车站库…</span>',
+  });
+  try {
+    const d = await api('/api/line/osm/stations', { q: name });
+    const have = d.existing || [];
+    const rows = have.length ? have : (d.stations || []).map(s => ({ name: s.name, km: s.km }));
+    const bits = [];
+    if (have.length) {
+      bits.push(`<b>${esc(d.name)}</b> 已有 ${have.length} 站，下面是现有站表；改完保存会整体替换`);
+    } else if (rows.length) {
+      let t = `按 OSM 走向在车站库里找出 <b>${rows.length}</b> 个站`
+        + `（距轨迹 ≤ ${(d.radius / 1000).toFixed(1)} km）`;
+      if (d.spineComplete) {
+        t += (d.dupKm && d.dupKm > Math.max(1, d.osmKm * 0.05))
+          ? `，里程按单线走向折算（源数据 ${d.osmKm} km 把上下行复线各算了一遍，单线约 ${d.spineKm} km）`
+          : `，里程按走向折算（约 ${d.spineKm} km）`;
+      } else {
+        t += `；这段走向有约 ${d.dropKm} km 接不上（同名线在 OSM 里可能是两条走法），`
+          + `只有串起来的 ${d.spineKm} km 能折算里程，其余站先留空`;
+      }
+      t += '。不在线上的删掉、漏掉的补上即可；库外的站名也能直接输入，'
+        + '之后到车站页补坐标才会画到地图上';
+      bits.push(t);
+    } else {
+      bits.push('这条线附近 1 km 内没有车站，站表只能手填 —— 站名可打字联想');
+    }
+    if ((d.hint || []).length) {
+      bits.push(`车站档案里注明属于这条线的：${d.hint.map(esc).join('、')}`);
+    }
+    const blank = rows.filter(r => r.km == null || r.km === '').length;
+    if (blank) {
+      bits.push(`其中 <b>${blank}</b> 个站落在几何没覆盖到的地段（或线名在 OSM 里对应了两条走法），`
+        + '里程先留空，按实际里程补上即可');
+    }
+    if (rows.length === 1 && !have.length) {
+      bits.push('只找到 1 个站 —— 一条线路至少要两个，先点「+ 加一站」把另一头补上');
+    }
+    nmOpen('line', {
+      title: `补车站 · ${d.name}`,
+      name: d.name,
+      rows,
+      note: d.note || `按 OSM 走向补站（${d.spineComplete
+        ? `约 ${d.spineKm} km` : `OSM ${d.osmKm} km`}）`,
+      replace: !!d.editable,
+      hint: bits.join('<br>'),
+    });
+  } catch (e) {
+    if (fallback && fallback.length) {
+      // 自建线路在 OSM 里没有几何（纯手填的线），退回「只改现有站表」
+      nmOpen('line', {
+        title: `改站表 · ${name}`,
+        name,
+        rows: fallback,
+        replace: true,
+        hint: `OSM 里找不到 <b>${esc(name)}</b> 的几何（纯手填的线），下面是现有站表；改完保存会整体替换`,
+      });
+    } else {
+      nmSetMsg(e.message, true);
+    }
+  }
+}
+
+/* ---------- 线路资料库（线路库里还没有的线路） ---------- */async function showCatalogList(q, box) {
   try {
     const d = await api('/api/line/catalog', { q, limit: 20 });
     if (!d.items || !d.items.length) return false;

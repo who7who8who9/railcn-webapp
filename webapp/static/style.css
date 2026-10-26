@@ -741,6 +741,10 @@ a{color:var(--accent)}
   padding:0 9px;font:inherit;font-size:12px;outline:none;background:#fff;box-sizing:border-box}
 .modal-card .nm-body input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
 .nm-tip{font-size:10.5px;color:var(--muted);line-height:1.5}
+.nm-auto{padding:8px 10px;border-radius:9px;background:#f2f7ff;border:1px solid #dbe7f7;
+  color:#33507a;font-size:11px;line-height:1.7}
+.nm-auto b{color:#1a4c97}
+.nm-wait{color:#64748b}
 .nm-two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .nm-pair{display:flex;align-items:center;gap:7px;margin-top:2px}
 .nm-pair span{font-size:11px;color:#5a6884;flex:0 0 auto}

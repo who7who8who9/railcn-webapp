@@ -1271,6 +1271,10 @@ def osm_line_stations(name: str, radius_m: int = 1200, extend_m: int = 3000) -> 
 
     rows = railgeom.stations_along(g.get("parts") or [], pool,
                                    radius_m=radius_m, extend_m=extend_m, must=hint)
+    # 站名按 12306 口径归一（霸州西站 → 霸州西）：预填进「新增线路」后直接保存，
+    # 名称带「站」会再次造出一批和车次经停站对不上的重名站
+    for r in rows:
+        r["name"] = _entry_name(r.get("name") or "")
     sp = railgeom.chain_info(g.get("parts") or [])
     # 丢掉的段长度会把复线也数进去，给用户看时按「源数据里程 − 串上的里程」封顶
     drop = min(sp["dropKm"], max(0.0, (g.get("km") or 0) - sp["km"]))
@@ -1324,6 +1328,8 @@ def _apply_coord_overrides() -> int:
 
 def _apply_custom() -> None:
     """把库里新增的线路 / 车站合并进 cnrail"""
+    global _LIB_IDX
+    _LIB_IDX = None                      # 库变了，OSM 占用表跟着作废（osm_extras 用）
     lines: Dict[str, dict] = {}
     for it in list_custom_lines():
         try:
@@ -1355,6 +1361,134 @@ def _apply_custom() -> None:
     _apply_coord_overrides()     # 人工补录的坐标盖在档案 / OSM 之上
 
 
+# --------------------------------------------------------------------------
+# 线路库没收录、但 OSM 里有几何的线
+# --------------------------------------------------------------------------
+_LINE_TAIL_Q = re.compile(r"(高速铁路|高速线|客运专线|客专线|客专|城际铁路|城际线|高铁|普速线|铁路|线)$")
+
+#: 派生线名（某某联络线 / 疏解线 / 第三线）：OSM 里是独立要素，但不是一条「线路」
+_SIDING = re.compile(r"(联线|绕行线|进站线|站线|走行线|三线|四线|III线|Ⅱ线|I线|货线|大桥)")
+
+
+def _core_key(name: str) -> str:
+    """去掉「高速 / 客专 / 高铁 / 城际 / 铁路 / 线」这类后缀，得到「这是哪条线」的键。
+
+    比 `railgeom._family()` 更宽：它把「京沪高铁」「京沪高速线」当两条，
+    这里都归成「京沪」，用来判「同一条线的分段残片」。口径差异（客专 vs 普速）
+    由 `_lib_index()` 里按名字本身判断，不靠这个键。
+    """
+    n = re.sub(r"\s+", "", str(name or ""))
+    prev = None
+    while prev != n:                     # 「京沪高铁线」要去两次：线 → 高铁
+        prev = n
+        n = _LINE_TAIL_Q.sub("", n)
+    return n or str(name or "")
+
+#: (OSM 线名 -> 占用它的库线名, 族键 -> 库线名列表, 库线名 -> 里程)；线路库一变就作废
+_LIB_IDX: Optional[Tuple[Dict[str, str], Dict[str, List[str]], Dict[str, float]]] = None
+
+
+def _lib_index() -> Tuple[Dict[str, str], Dict[str, List[str]], Dict[str, float]]:
+    """
+    线路库当前「占用」了哪些 OSM 线名。
+
+    两边不是一一对应（库里叫「兰新客运专线」，OSM 里叫「兰新客专线」），
+    所以按 `railgeom.match()` 反查一遍，把每条库线真正对上的那条 OSM 线记下来。
+    名字像但口径不同的不算占用 —— 「津霸客运专线」是客专（72 km），
+    「津霸线」是普速既有线（83 km），本来就是两条，客专收录了不代表普速线收录了。
+    """
+    global _LIB_IDX
+    if _LIB_IDX is not None:
+        return _LIB_IDX
+    used: Dict[str, str] = {}
+    fam: Dict[str, List[str]] = {}
+    km: Dict[str, float] = {}
+    try:
+        lines = cnrail.search_line("", 100000)
+    except Exception:                            # noqa: BLE001
+        lines = []
+    for ln in lines or []:
+        nm = (ln.get("name") or "").strip()
+        if not nm:
+            continue
+        used.setdefault(nm, nm)                  # 同名一定算收录（哪怕几何对不上）
+        fam.setdefault(railgeom._family(nm), []).append(nm)
+        try:
+            km[nm] = float(ln.get("totalKm") or 0)
+        except (TypeError, ValueError):
+            km[nm] = 0.0
+        try:
+            hit = railgeom.match(nm, ln.get("totalKm"))
+        except Exception:                        # noqa: BLE001
+            hit = None
+        if hit:
+            used.setdefault(hit[0], nm)
+    _LIB_IDX = (used, fam, km)
+    return _LIB_IDX
+
+
+def _lib_same_family(name: str) -> List[str]:
+    """库里和它「同族不同口径」的线（津霸线 ↔ 津霸客运专线），界面用来说明不是同一条"""
+    _used, fam, _km = _lib_index()
+    return [x for x in fam.get(railgeom._family(name), []) if x != name]
+
+
+def osm_extras(q: str, limit: int = 8, min_km: float = 5.0) -> List[dict]:
+    """
+    线路查询的「顺带提示」：和查询词相关、但线路库还没收录的 OSM 线路。
+
+    为什么需要：搜「津霸」时线路库里的「津霸客运专线」直接命中，页面就停在这一条上，
+    根本不会落到「查不到 → 去 OSM 找」那条兜底路径，于是 OSM 里同一前缀下的
+    「津霸线」永远看不见。这类「被同名前缀挡住」的线不止一条（同类 400 多条 ≥20 km），
+    所以在命中结果里附一份差集，点开就能看走向、补站、收进线路库。
+
+    滤掉两类噪声：
+      * 短于 min_km 的（疏解线、站线、分段残片，用户查线路时不需要）
+      * 同族里已有更长一条被收录的（京沪高速线 1296 km 收录了，
+        「京沪高速铁路」9 km 这种 OSM 残段就不必再提）
+    """
+    q = (q or "").strip()
+    if not q:
+        return []
+    used, _fam, lib_km = _lib_index()
+    used_km: Dict[str, float] = {}
+    for osm_nm, lib_nm in used.items():
+        a = float((railgeom._META.get(osm_nm) or {}).get("km") or 0)
+        used_km[osm_nm] = max(a, float(lib_km.get(lib_nm) or 0))
+    used_core: Dict[str, List[float]] = {}
+    for nm, km in used_km.items():
+        used_core.setdefault(_core_key(nm), []).append(km)
+    core = _LINE_TAIL_Q.sub("", q) or q        # 「津霸客运专线」也按「津霸」去对 OSM
+    out: List[dict] = []
+    seen = set()
+    cands = railgeom.search(q, 300)
+    if core != q:
+        cands += railgeom.search(core, 300)
+    for it in cands:
+        nm = (it.get("name") or "").strip()
+        if not nm or nm in seen or nm in used:
+            continue
+        seen.add(nm)
+        if _SIDING.search(nm):
+            continue                           # 联络线 / 疏解线 / 第三线：不是一条独立线路
+        km = float(it.get("km") or 0)
+        if km < min_km:
+            continue
+        sib = used_core.get(_core_key(nm)) or []
+        if sib and km < max(sib) * 0.35:
+            continue                           # 同族的长线已收录，这是它的残段
+        out.append({
+            "name": nm, "km": round(km, 1),
+            "nPart": it.get("nPart"), "nBridge": it.get("nBridge"),
+            "nTunnel": it.get("nTunnel"), "nFeat": it.get("nFeat"),
+            "bbox": it.get("bbox"), "inLib": False,
+            "libSame": _lib_same_family(nm),
+        })
+    # 和查询词同前缀的排前面（「津霸线」在「津霸上行疏解线」之前），同档按里程
+    out.sort(key=lambda r: (0 if r["name"].startswith(core) else 1, -(r["km"] or 0)))
+    return out[:limit]
+
+
 def cand_lines(a: str, b: str) -> List[dict]:
     """两站之间的候选线路（转发 cnrail.cand_lines，供校对页点选）"""
     return cnrail.cand_lines(a, b)
@@ -1373,8 +1507,10 @@ def reload_library() -> dict:
     前端又缓存着线路名清单 —— 线路库改过之后要有个明确的「重算」入口，
     让自动经由按新线路重新推一遍（页面上的按钮就走这里）。
     """
+    global _LIB_IDX
     stations.reload_coords()
     _apply_custom()
+    _LIB_IDX = None                      # 新加的线可能正好对上 OSM 里的某条，占用表要重算
     return {"lines": len(cnrail.search_line("", 20000)),
             "customLines": len(list_custom_lines()),
             "stations": len(cnrail._STATIONS or {})}
@@ -1834,6 +1970,11 @@ class StationRegistry:
             b = _bare(nm)
             if not b:
                 continue
+            # 同一个站按去掉末尾「站」的名字归并，写法取短的（「唐山站」和「唐山」只留
+            # 「唐山」）。档案里有的站只写了长写法（「唐山东站」），照样留着 ——
+            # 不能一律截成「唐山东」：「九站」这种地名去掉「站」就成了另一个站。
+            # 输入「唐山东」也能搜到它（前端 nmBare 按同一口径比对），落库仍按
+            # _entry_name 归一，所以不会造出重复的站。
             old = seen.get(b)
             if old is None or len(nm) < len(old):
                 seen[b] = nm

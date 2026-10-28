@@ -4,6 +4,8 @@ webapp/data/rail.db-wal
 webapp/data/rail.db-shm
 # 迁移前的自动备份
 webapp/data/rail.db.bak-*
+# 数据清洗 / 去重脚本导出的备份（按需自行保留，不进仓库）
+webapp/data/backup/
 webapp/data/railcn.db
 webapp/data/exports/
 

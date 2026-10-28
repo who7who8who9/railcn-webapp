@@ -2858,6 +2858,7 @@ async function showLine(q) {
     LN.totalKm = d.override && d.override.totalKm != null ? String(d.override.totalKm) : '';
     det.innerHTML = `
       <div class="dhead" id="lnHead"></div>
+      <div class="lnosm" id="lnOsmOther" hidden></div>
       <div class="lninfo" id="lnInfo" hidden></div>
       <div class="lnkm" id="lnKmBox" hidden></div>
       <ul class="stops" id="lnStops">
@@ -2871,6 +2872,7 @@ async function showLine(q) {
     det.classList.add('show');
     $('#paneNet').classList.add('line-only');   // 线路详情独占侧栏高度
     lnRenderHead();
+    lnRenderOsmOther(d.osmOther);               // 同名前缀下、线路库没收的 OSM 线
     $$('#netDetail .stop').forEach(li => li.addEventListener('click', () => {
       MapView.focusStop(Number(li.dataset.i));
     }));
@@ -2882,6 +2884,33 @@ async function showLine(q) {
       if (!hit2) box.innerHTML = `<div class="empty">${e.message}</div>`;
     }
   }
+}
+
+/**
+ * 线路库命中之后：OSM 里名字相近、但线路库没收录的线。
+ *
+ * 典型是「津霸客运专线」收录了、「津霸线」（普速既有线，83 km）没有 —— 搜「津霸」
+ * 时库里的那条直接命中，页面就停在这儿，OSM 里的另一条永远看不到。
+ * 这里把差集摆出来，点开能看走向、补站、收进线路库。
+ */
+function lnRenderOsmOther(list) {
+  const box = $('#lnOsmOther');
+  if (!box) return;
+  const items = (list || []).filter(x => x && x.name);
+  if (!items.length) { box.hidden = true; box.innerHTML = ''; return; }
+  box.hidden = false;
+  box.innerHTML = `
+    <div class="lo-h">OSM 里另有 ${items.length} 条相关线路，线路库还没收录
+      <em>点一下看走向，可补站收进库</em></div>
+    <div class="lo-list">${items.map(x => `
+      <button type="button" class="lo-item" data-nm="${esc(x.name)}">
+        <span class="lo-n">${esc(x.name)}</span>
+        <span class="lo-k">${esc(String(x.km))} km</span>
+        ${(x.libSame || []).length
+          ? `<span class="lo-t">与「${esc(x.libSame[0])}」不是同一条</span>` : ''}
+      </button>`).join('')}</div>`;
+  $$('#lnOsmOther .lo-item').forEach(el =>
+    el.addEventListener('click', () => showOsmLine(el.dataset.nm)));
 }
 
 /* ---------- OSM 线路（CRTrainRoute 数据里有、线路库里没有的） ---------- */
@@ -3154,17 +3183,25 @@ async function suggestNet() {
   try {
     const d = netKind === 'station'
       ? await api('/api/stations', { q, limit: 10 })
-      : await api('/api/lines', { q, limit: 10 });
-    const items = netKind === 'station' ? d.items : d.items;
+      : await api('/api/lines', { q, limit: 8 });
+    // 线路：库里命中之外，再带上 OSM 里有、线路库没收的（「津霸」→ 津霸客运专线 + 津霸线）
+    const items = netKind === 'station'
+      ? (d.items || [])
+      : [...(d.items || []).map(x => ({ ...x, lib: true })),
+         ...(d.osm || []).map(x => ({ ...x, lib: false }))].slice(0, 12);
     if (!items.length) { box.classList.add('hidden'); return; }
-    box.innerHTML = items.map(it =>
-      `<div class="sug-item" data-v="${it.name}">${it.name} <i>${netKind === 'station'
-        ? '' : `${it.n} 站 · ${lnKmText(it.totalKm)}`}</i></div>`).join('');
+    box.innerHTML = items.map(it => netKind === 'station'
+      ? `<div class="sug-item" data-v="${esc(it.name)}">${esc(it.name)} <i>${esc(it.city || '')}</i></div>`
+      : `<div class="sug-item" data-v="${esc(it.name)}" data-osm="${it.lib ? 0 : 1}">
+           ${esc(it.name)}
+           <i>${it.lib ? `${it.n} 站 · ${lnKmText(it.totalKm)}`
+                       : `${it.km} km · OSM 未收录`}</i></div>`).join('');
     box.classList.remove('hidden');
     $$('#sugNet .sug-item').forEach(el => el.addEventListener('click', () => {
       $('#netQ').value = el.dataset.v;
       box.classList.add('hidden');
-      searchNet();
+      if (el.dataset.osm === '1') showOsmLine(el.dataset.v);   // 库里没有，直接看 OSM 走向
+      else searchNet();
     }));
   } catch (_) { box.classList.add('hidden'); }
 }

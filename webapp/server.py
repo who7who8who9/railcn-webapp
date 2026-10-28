@@ -279,7 +279,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.json(railcore.station_detail(one("q")))
 
         if path == "/api/lines":
-            return self.json({"items": cnrail.search_line(one("q"), int(one("limit", "24")))})
+            kw = one("q")
+            return self.json({"items": cnrail.search_line(kw, int(one("limit", "24"))),
+                              "osm": railcore.osm_extras(kw, int(one("osmLimit", "6") or 6))})
 
         if path == "/api/line/stops":
             nm = one("q") or one("name")
@@ -288,25 +290,27 @@ class Handler(BaseHTTPRequestHandler):
                               "items": items or [], "count": len(items or [])})
 
         if path == "/api/line":
-            q = one("q")
-            d = cnrail.line_detail(q)
+            kw = one("q")
+            d = cnrail.line_detail(kw)
             if not d:
                 # 资料库里另有叫法（京沪高铁 → 京沪高速线），指到库里对应的那条
-                alt = railcore.catalog_detail(q) or {}
+                alt = railcore.catalog_detail(kw) or {}
                 target = alt.get("line_name")
                 if target:
                     d = cnrail.line_detail(target)
                     if d:
-                        m = (railgeom.meta(q, d.get("totalKm"))
+                        m = (railgeom.meta(kw, d.get("totalKm"))
                              or railgeom.meta(target, d.get("totalKm")))
                         if m:
                             m["kmChain"] = railgeom.spine_km(m["name"], d.get("totalKm"))
-                        return self.json({**d, "aliasOf": q, "osm": m})
-                return self.err("未找到线路: " + q, 404)
-            m = railgeom.meta(d.get("name") or q, d.get("totalKm"))
+                        return self.json({**d, "aliasOf": kw, "osm": m,
+                                          "osmOther": railcore.osm_extras(kw, 6)})
+                return self.err("未找到线路: " + kw, 404)
+            m = railgeom.meta(d.get("name") or kw, d.get("totalKm"))
             if m:
                 m["kmChain"] = railgeom.spine_km(m["name"], d.get("totalKm"))
-            return self.json({**d, "osm": m})
+            # 同名前缀下、线路库没收录的 OSM 线（「津霸线」之于「津霸客运专线」）
+            return self.json({**d, "osm": m, "osmOther": railcore.osm_extras(kw, 6)})
 
         # OSM 线路几何（CRTrainRoute 整理）：真实走向 + 几何里程 + 桥隧统计
         if path == "/api/line/osm":
@@ -318,8 +322,12 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/line/osm/list":
             kw = one("q")
-            return self.json({"items": railgeom.search(kw, int(one("limit", "30"))),
-                              "stats": railgeom.stats()})
+            used, _fam, _km = railcore._lib_index()
+            items = railgeom.search(kw, int(one("limit", "30")))
+            for it in items:
+                it["inLib"] = it["name"] in used
+                it["libName"] = used.get(it["name"]) if it["name"] in used else None
+            return self.json({"items": items, "stats": railgeom.stats()})
 
         # OSM-only 线路补站：按走向反查车站库，给「新增线路」弹窗预填站点与里程
         if path == "/api/line/osm/stations":

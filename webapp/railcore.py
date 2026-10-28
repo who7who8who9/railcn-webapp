@@ -865,6 +865,19 @@ def _norm_line_name(name: str) -> str:
     return re.sub(r"\s+", "", str(name or ""))
 
 
+def _entry_name(name: str) -> str:
+    """录入用的站名口径：自建线路要和库内线路、车次站名对得上
+
+    先按档案口径（cnrail.station_name，去「站」但保住「十八站」这种地名）；
+    档案里还没收的站（唐海南、曹妃甸港这批）它判不出来，再问一次 12306 站表，
+    输入「唐海南站」也存成「唐海南」。
+    """
+    sn = cnrail.station_name(_norm_line_name(name))
+    if sn.endswith("站") and stations.telecode(sn):
+        return stations.canonical(sn) or sn
+    return sn
+
+
 def _build_custom_line(name: str, stations, note: str = "") -> dict:
     """校验并整理一条新增线路：站序 + 每站「自起点累计里程」（可空）"""
     nm = _norm_line_name(name)
@@ -878,7 +891,7 @@ def _build_custom_line(name: str, stations, note: str = "") -> dict:
     for it in stations or []:
         # 站名统一成 12306 口径（去掉「站」后缀）：自建线路要和库内线路、
         # 车次站名对得上，否则「天津站」和「天津」会被当成两个站
-        sn = cnrail.station_name(_norm_line_name(it.get("name") if isinstance(it, dict) else it))
+        sn = _entry_name(it.get("name") if isinstance(it, dict) else it)
         if not sn:
             continue
         if sn in seen:
@@ -1696,6 +1709,28 @@ class StationRegistry:
              "hasCoord": x["hasCoord"], "archive": x["archive"]}
             for x in out[:limit]
         ]
+
+    def all_names(self) -> List[str]:
+        """全部站名（12306 站表 + 线路档案），给「新增线路」的站名下拉一次取全
+
+        和 suggest() 用同一套来源：唐海南 / 曹妃甸港这类只在 12306 站表里、
+        线路档案还没收的站，搜索框能搜到、下拉里却没有，只因为下拉原来只读
+        档案那一半。这里取并集，同一个站按去掉末尾「站」的名字归并，
+        写法取短的（「唐山站」和「唐山」只留「唐山」）。
+        """
+        self.ensure()
+        seen: Dict[str, str] = {}
+        names = list(self.by_name)
+        names += [st.get("name") or k for k, st in (cnrail._STATIONS or {}).items()]
+        for name in names:
+            nm = _norm(name)
+            b = _bare(nm)
+            if not b:
+                continue
+            old = seen.get(b)
+            if old is None or len(nm) < len(old):
+                seen[b] = nm
+        return sorted(seen.values())
 
 
 stations = StationRegistry()

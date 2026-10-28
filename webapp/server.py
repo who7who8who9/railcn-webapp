@@ -434,8 +434,7 @@ class Handler(BaseHTTPRequestHandler):
                               "stations": railcore.list_custom_stations()})
 
         if path == "/api/stations/names":
-            names = sorted({v.get("name") for v in (cnrail._STATIONS or {}).values()
-                            if v.get("name")})
+            names = railcore.stations.all_names()
             return self.json({"items": names, "count": len(names)})
 
         if path == "/api/curate/lineNames":

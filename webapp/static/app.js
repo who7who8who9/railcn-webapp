@@ -1547,7 +1547,7 @@ function nmOpen(kind, preset) {
   }, 40);
 }
 
-/** 站名库（一次加载 7579 个站名，供新增线路时自绘下拉联想） */
+/** 站名库（一次加载 9548 个站名：车站档案 + 12306 站表的并集，供新增线路时自绘下拉联想） */
 async function nmLoadStations() {
   if (NM.stations) return;
   try {
@@ -1670,12 +1670,19 @@ function nmUnKick() {
   }
 }
 
+/** 站名库统一存不带的写法：输入「唐海南站」也按「唐海南」找 */
+function nmBare(v) {
+  const s = (v || '').trim();
+  return (s.length > 1 && s.endsWith('站')) ? s.slice(0, -1) : s;
+}
+
 function nmStaMatches(q) {
   const all = NM.stations || [];
   const v = (q || '').trim();
   if (!v) return all.slice(0, 200);
-  const hits = all.filter(s => s.includes(v));
-  hits.sort((a, b) => (b.startsWith(v) - a.startsWith(v)) || a.length - b.length);
+  const bv = nmBare(v);
+  const hits = all.filter(s => s.includes(v) || s.includes(bv));
+  hits.sort((a, b) => (b.startsWith(bv) - a.startsWith(bv)) || a.length - b.length);
   return hits.slice(0, 200);
 }
 
@@ -1689,12 +1696,14 @@ function nmStaPaint(box, q) {
     return;
   }
   const v = (q || '').trim();
+  const bv = nmBare(v);
   const list = nmStaMatches(v);
-  const exact = v && list.includes(v);
+  // 库里存的是「唐海南」，输入「唐海南站」也算命中，别再追加一条库外站名
+  const exact = v && list.some(n => n === v || n === bv);
   const rows = list.map(n => ({ name: n }));
   if (v && !exact) rows.push({ name: v, custom: true });   // 库外站名也能用
   CB.items = rows;
-  const hit = rows.findIndex(r => !r.custom && r.name === v);
+  const hit = rows.findIndex(r => !r.custom && (r.name === v || r.name === bv));
   CB.idx = hit >= 0 ? hit : (rows.length ? 0 : -1);
   pop.innerHTML = rows.length
     ? rows.map((r, k) => `

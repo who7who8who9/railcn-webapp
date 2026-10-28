@@ -119,6 +119,7 @@ const S = {
   lastTick: 0,
   nowStopIdx: -1,
   staleCode: null,      // 校对页改了坐标，切回车次详情时需要重新拉一次
+  geoOn: false,         // 地图上画的是不是「沿真实线路」那版
 };
 
 const mapKey = () => localStorage.getItem('railcn.mapkey') || '';
@@ -823,6 +824,7 @@ function renderDetail(route) {
         <span>历时 ${fmtDur(route.durationMin)}</span>
         <span>${stops.length} 站 · ${route.totalKm} km${kmBadge(route)}</span>
         ${over ? `<span>${route.startDate} → ${route.endDate}，跨 ${span} 个自然日</span>` : ''}
+        <span class="geo-sw"><button class="linkbtn" id="geoBtn">按真实走向</button><em id="geoNote" class="geo-note"></em></span>
       </div>
       ${viaHtml}
       ${gapsHtml}
@@ -874,6 +876,9 @@ function renderDetail(route) {
     cuOpen(route.code);
   }));
 
+  const gb = $('#geoBtn');
+  if (gb) gb.addEventListener('click', () => toggleGeo(route));
+
   $$('#detail .stop').forEach(li => {
     li.addEventListener('click', () => {
       const i = Number(li.dataset.i);
@@ -887,6 +892,64 @@ function highlightStop(i) {
   $$('#detail .stop').forEach(el => el.classList.toggle('isnow', Number(el.dataset.i) === i));
   const el = $(`#detail .stop[data-i="${i}"]`);
   if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
+/* ============================================================
+ * 地图路线：站点直连 ⇄ 沿真实线路（OSM）
+ * ============================================================ */
+function geoNoteText(d) {
+  if (!d) return '';
+  const gaps = (d.gaps || []).length;
+  if (!gaps) return '全程沿真实线路';
+  return `${gaps} 处缺口 · ${Math.round(d.gapKm || 0)} km 走站间直线`;
+}
+
+function setGeoNote(txt) {
+  const n = $('#geoNote');
+  if (!n) return;
+  n.textContent = txt || '';
+  n.title = txt || '';
+}
+
+function applyGeo(route, on) {
+  route.path = on ? route.geoData.path : route.pathBase;
+  S.geoOn = on;
+  MapView.setRoute(route);
+  const pos = posAt(route, S.simT);
+  if (pos.point) MapView.setTrain(pos.point);
+  const b = $('#geoBtn');
+  if (b) b.textContent = on ? '回到站点直连' : '按真实走向';
+  setGeoNote(on ? geoNoteText(route.geoData) : '');
+}
+
+async function toggleGeo(route) {
+  if (!route) return;
+  const btn = $('#geoBtn');
+  if (!route.pathBase) route.pathBase = route.path;
+  if (S.geoOn) { applyGeo(route, false); return; }
+
+  if (!route.geoData) {
+    const old = btn.textContent;
+    btn.textContent = '正在拼线路…';
+    btn.disabled = true;
+    try {
+      const d = await api('/api/route/osm', { code: route.code, date: route.date });
+      if (!d.ok) {
+        btn.textContent = old;
+        btn.disabled = false;
+        setGeoNote(d.error || '拼不出真实走向');
+        return;
+      }
+      route.geoData = d;
+    } catch (e) {
+      btn.textContent = old;
+      btn.disabled = false;
+      setGeoNote(`失败：${e.message}`);
+      return;
+    }
+    btn.disabled = false;
+  }
+  applyGeo(route, true);
 }
 
 /* ============================================================
@@ -1283,6 +1346,7 @@ async function openTrain(code, date, opts = {}) {
   try {
     const route = await api('/api/route', { code, date: useDate, cache: cacheOnly ? 1 : '' });
     S.route = route;
+    S.geoOn = false;                  // 每换一趟车都从「站点直连」开始
     S.followNow = true;
     S.simT = clamp(Date.now(), Date.parse(route.startIso), Date.parse(route.endIso));
     S.nowStopIdx = -1;

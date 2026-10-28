@@ -37,6 +37,7 @@ import config as rail_config            # noqa: E402
 import trainclaw                        # noqa: E402
 import cnrail                            # noqa: E402   cnrail_data_v2 静态知识库
 import railgeom                          # noqa: E402   OSM 线路几何 / 12306 站资料
+import railosm                           # noqa: E402   车次路线的 OSM 版
 
 # ---------------------------------------------------------------------------
 # 基础设施
@@ -1878,6 +1879,43 @@ def build_route_payload(code: str, date: str, force: bool = False,
         "coverage": round((len(stops) - len(missing)) / max(len(stops), 1) * 100, 1),
         "source": "cache" if from_cache else "live",
     }
+
+
+# ---------------------------------------------------------------------------
+# 车次路线的 OSM 真实走向
+# ---------------------------------------------------------------------------
+
+_OSM_CACHE: Dict[Tuple[str, str], dict] = {}
+_OSM_LOCK = threading.Lock()
+
+
+def route_osm(code: str, date: str) -> dict:
+    """
+    把这条车次的折线换成「沿真实线路」的版本（带里程，缺口用直线跳过去）。
+    只读本地缓存，不联网 —— 能点这个按钮时车次详情早已加载过。
+    """
+    key = ((code or "").strip().upper(), date or "")
+    with _OSM_LOCK:
+        hit = _OSM_CACHE.get(key)
+    if hit:
+        return hit
+
+    try:
+        payload = build_route_payload(code, date, cache_only=True)
+    except Exception as exc:                                     # noqa: BLE001
+        return {"ok": False, "error": f"取不到这趟车的本地缓存：{exc}"}
+
+    pts, info = railosm.build(payload)
+    if not pts:
+        return {"ok": False, "error": info.get("err") or "这段路线拼不出真实走向", **info}
+
+    out = {"ok": True, "path": pts, "code": payload.get("code"),
+           "total": payload.get("totalKm"), **info}
+    with _OSM_LOCK:
+        _OSM_CACHE[key] = out
+        if len(_OSM_CACHE) > 300:                # 只是本地进程缓存，满了丢最早的
+            _OSM_CACHE.pop(next(iter(_OSM_CACHE)))
+    return out
 
 
 _DAY_LABELS = {0: "", 1: "次日", 2: "第三日", 3: "第四日", 4: "第五日"}

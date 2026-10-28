@@ -240,6 +240,12 @@ class Handler(BaseHTTPRequestHandler):
                 railcore.build_route_payload(code, date, force=force, cache_only=cache_only)
             )
 
+        if path == "/api/route/osm":
+            code = one("code").strip().upper()
+            if not code:
+                return self.err("缺少车次号")
+            return self.json(railcore.route_osm(code, one("date") or today()))
+
         if path == "/api/tickets":
             return self.json(
                 railcore.query_tickets(one("from"), one("to"), one("date") or today())

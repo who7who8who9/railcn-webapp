@@ -144,6 +144,9 @@ main{flex:1;display:flex;min-height:0}
 .dhead .tag.type{background:#fff4ec;color:var(--train)}
 .dhead .l2{margin-top:6px;font-size:13px;color:#3a465c}
 .dhead .l3{margin-top:6px;font-size:11.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+/* 地图走向开关：站点直连 ⇄ 沿真实线路 */
+.dhead .l3 .geo-sw{display:inline-flex;align-items:center;gap:7px}
+.geo-note{font-style:normal;font-size:10.5px;color:#8493a8;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dhead .tag.warn{background:#fff7ed;color:#b45309}
 .dhead .l3.chips{gap:6px;align-items:center}
 /* 车站详情：一行文本补坐标 */

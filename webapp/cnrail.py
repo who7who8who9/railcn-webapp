@@ -656,6 +656,68 @@ def _cand_lines(a: str, b: str) -> List[Tuple[str, str]]:
     return out
 
 
+def _lines_at(name: str) -> List[str]:
+    """某站所在的全部线路：先列站序里确有这一站的（可信），再列档案里标了这条线的"""
+    _ensure()
+    out: List[str] = []
+    k = _key(name)
+    for li, _pi in (_POSALL or {}).get(k) or []:
+        nm = _LINES[li]["name"]
+        if nm not in out:
+            out.append(nm)
+    for nm in (station(name) or {}).get("lines") or []:
+        ln = line(nm)
+        nm2 = ln["name"] if ln else _norm(nm)
+        if nm2 and nm2 not in out:
+            out.append(nm2)
+    return out
+
+
+def cand_lines(a: str, b: str, relax: bool = True) -> List[dict]:
+    """
+    两站之间的候选线路（校对页「点选候选段」用）。
+
+    公开入口包一层 `_cand_lines`：站名按 12306 口径归一，并带上「依据」的
+    中文说明，界面直接显示，不用再猜 km/pos/lines 是什么意思。
+
+    `relax=True` 时再补上「起点站 / 终点站自己所在的线路」—— 自动推断认不出
+    的区间，多半正是因为线路表里缺了连接段（唐曹线的站序从七道桥起，唐山站
+    就不在线上了），这时两站永远不会共线，只报共线结果等于什么都不给。
+    这类候选标 `src='from'/'to'`，点进去还得把起止站改一下。
+    """
+    src_cn = {"km": "里程表", "pos": "站序", "lines": "档案共线",
+              "from": "起点站所在线", "to": "终点站所在线"}
+    pairs = list(_cand_lines(a, b))
+    seen = {n for n, _s in pairs}
+    if relax:
+        for side, nm in (("from", a), ("to", b)):
+            cnt = 0
+            for name in _lines_at(nm):
+                if name in seen:
+                    continue
+                seen.add(name)
+                pairs.append((name, side))
+                cnt += 1
+                if cnt >= 6:                 # 枢纽站挂十几条线；多给几条，最终排序交给调用方
+                    break
+    out = []
+    for name, src in pairs[:20]:
+        ln = line(name) or {}
+        out.append({"line": name, "src": src, "srcCn": src_cn.get(src, src),
+                    "n": ln.get("n"), "totalKm": ln.get("totalKm"),
+                    "custom": bool(ln.get("custom"))})
+    return out
+
+
+def line_cover(name: str, stops: Sequence[str]) -> int:
+    """这条线路覆盖了这趟车多少个经停站（挑候选线路时按它排序）"""
+    names = line_station_names(name) or []
+    if not names:
+        return 0
+    keys = {_key(n) for n in names}
+    return sum(1 for s in stops or [] if _key(s) in keys)
+
+
 def infer_via(stops: Sequence[dict]) -> dict:
     """
     推断一列车经由哪些线路，输出**结构化区间**，供界面展示与人工校对。

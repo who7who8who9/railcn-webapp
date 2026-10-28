@@ -1355,6 +1355,31 @@ def _apply_custom() -> None:
     _apply_coord_overrides()     # 人工补录的坐标盖在档案 / OSM 之上
 
 
+def cand_lines(a: str, b: str) -> List[dict]:
+    """两站之间的候选线路（转发 cnrail.cand_lines，供校对页点选）"""
+    return cnrail.cand_lines(a, b)
+
+
+def line_cover(name: str, stops) -> int:
+    """这条线覆盖了这趟车多少个经停站（候选线路排序用）"""
+    return cnrail.line_cover(name, list(stops or []))
+
+
+def reload_library() -> dict:
+    """
+    把库里的自建线路 / 车站 / 人工坐标重新灌进 cnrail，返回线路库概况。
+
+    「新增线路」保存时本来就会 `_apply_custom()`，但校对页可能开着编辑面板、
+    前端又缓存着线路名清单 —— 线路库改过之后要有个明确的「重算」入口，
+    让自动经由按新线路重新推一遍（页面上的按钮就走这里）。
+    """
+    stations.reload_coords()
+    _apply_custom()
+    return {"lines": len(cnrail.search_line("", 20000)),
+            "customLines": len(list_custom_lines()),
+            "stations": len(cnrail._STATIONS or {})}
+
+
 def get_line_override(name: str) -> Optional[dict]:
     ln = cnrail.line(name)
     if not ln:

@@ -213,6 +213,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/curate/scan":
                 return self.json(curate.start())
 
+            if path == "/api/curate/refresh":
+                # 线路库动过之后按新线路重算这趟车的自动经由（校对页「重算」）
+                return self.json(curate.refresh(payload.get("code") or ""))
+
             if path == "/api/curate/stop":
                 return self.json(curate.stop())
 
@@ -427,6 +431,11 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/curate/detail":
             return self.json(curate.detail(one("code")))
+
+        if path == "/api/curate/cands":
+            a, b = one("from"), one("to")
+            items = railcore.cand_lines(a, b) if (a and b) else []
+            return self.json({"from": a, "to": b, "items": items, "count": len(items)})
 
         # ---- 用户新增的线路 / 车站 ----
         if path == "/api/custom":

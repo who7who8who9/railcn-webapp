@@ -30,9 +30,25 @@ def post(path, body):
     return json.load(urllib.request.urlopen(req, timeout=90))
 
 
+#: 挑测试站用的候选池：只有 OSM 坐标、既没有车站档案也没有 12306 站表条目的
+#: 站名（淮南矿区的支线站），line-fill 才会真的补它们
+POOL = ("蔡家岗", "望峰岗", "毕家岗", "田家庵", "潘一矿", "田集", "戴楼")
+
+
+def pick_pair():
+    """找两个「没有档案、但有坐标」的站：只有这种站才会被 line-fill 补进去。
+    已经挂在别的线路上的站不能动，所以先排掉 station_custom 里有的。"""
+    custom = {s["name"] for s in get("/api/custom")["stations"]}
+    return [n for n in POOL if n not in custom][:2]
+
+
 def check_save_path():
     """存一条临时线路，看沿线站有没有当场补进车站库；跑完全部撤掉"""
-    a, b = "南堡北", "曹妃甸东"          # 两个都还没档案（唐曹线 / 疏港线上的站）
+    pair = pick_pair()
+    if len(pair) < 2:
+        print("  跳过：找不到「档案里没有但坐标有」的测试站（库里的这类站已被线路占用）")
+        return
+    a, b = pair
     name = "回归测试疏港线"
     # 先把可能残留的同名线路 / 车站清掉，保证测的是这次保存的效果
     post("/api/line/delete", {"name": name})
@@ -44,7 +60,7 @@ def check_save_path():
         r = post("/api/line/new", {"name": name, "note": "回归测试，会自动删掉",
                                   "stations": [{"name": a, "km": 0}, {"name": b, "km": 30}]})
         filled = r["line"].get("filledStations") or []
-        print(f"  新建「{name}」→ 补进车站库 {filled}")
+        print(f"  新建「{name}」（{a} / {b}）→ 补进车站库 {filled}")
         assert set(filled) == {a, b}, f"没把沿线站补进车站库：{filled}"
         d = get("/api/line?q=" + urllib.parse.quote(name))
         assert d.get("coordCoverage") == 100.0, "新建线路的坐标覆盖不是 100%"

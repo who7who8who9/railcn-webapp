@@ -145,6 +145,76 @@ def refresh_one(code: str) -> Optional[dict]:
         return s
 
 
+def refresh(code: str) -> dict:
+    """
+    线路库动过（新增 / 改了站序里程）以后，按新线路重算一趟车的自动经由。
+
+    页面上的「重算自动经由」按钮走这里：
+      1. railcore.reload_library() 把自建线路 / 车站重新灌进 cnrail（含坐标）
+      2. detail() 重算自动基线 —— 新线路会立刻参与「里程配对 / 站序」的判定
+      3. 顺手把 curate 表里这趟车的摘要刷新掉，清单上不再是旧结果
+    """
+    lib = railcore.reload_library()
+    code = (code or "").strip().upper()
+    out = detail(code)
+    if out.get("exists"):
+        try:
+            s = refresh_one(code)
+            if s:
+                out["summary"] = s
+        except Exception:                            # noqa: BLE001
+            pass
+    out["library"] = lib
+    out["refreshedAt"] = time.time()
+    return out
+
+
+#: 一个缺口最多给几条候选线路
+MAX_GAP_CANDS = 8
+
+
+def gap_candidates(stops: List[str], gaps: List[dict], segs: List[dict]) -> List[dict]:
+    """
+    每个缺口「点选加入」用的候选线路。
+
+    排序有讲究：先说缺口**前后已识别段**用的线路（缺口多半就是这条线中间断了
+    一段，接着填最常见的答案），再补缺口两端车站自己所在的线路（线路表里缺了
+    连接段的时候，两站永远不共线，只报共线等于什么都不给）。
+    """
+    gaps = gaps or []
+    segs = segs or []
+    out: List[dict] = []
+    for g in gaps:
+        a, b = g.get("from"), g.get("to")
+        cands: List[dict] = []
+        seen = set()
+
+        def push(item: dict) -> None:
+            nm = item.get("line")
+            if not nm or nm in seen:
+                return
+            seen.add(nm)
+            cands.append(item)
+
+        for s in segs:                       # 与缺口首尾相接的已识别段
+            if s.get("to") == a or s.get("from") == b:
+                push({"line": s.get("line"), "src": "neighbor", "srcCn": "相邻段同线",
+                      "custom": None, "totalKm": None})
+        try:
+            for l in railcore.cand_lines(a or "", b or ""):
+                # 覆盖这趟车经停站越多的线，越可能就是这一段该走的线
+                l["cover"] = railcore.line_cover(l["line"], stops)
+                push(l)
+        except Exception:                    # noqa: BLE001
+            pass
+        # 「相邻段同线」永远最先（缺口就是那条线中间断的），其余按覆盖站数排
+        cands.sort(key=lambda x: (x.get("src") != "neighbor", -(x.get("cover") or 0)))
+        out.append({"from": a, "to": b, "i0": g.get("i0"),
+                    "lines": cands[:MAX_GAP_CANDS]})
+    return out
+
+
+
 def _sibling_codes(from_sta: str, to_sta: str, code: str,
                    exclude_manual: bool = False) -> List[str]:
     """同起讫站 + 同车种的车次（不含自己）：人工校正经由后它们会自动沿用"""
@@ -475,6 +545,10 @@ def detail(code: str) -> dict:
         "totalKm": d.get("totalKm") or 0.0,
     }
     out["stations"] = [s["name"] for s in d.get("stops") or []]
+    # 缺口里的候选线路（人工「点选加入」用）：自动认不出来的区间，给出最可能的那几条线
+    out["gapCands"] = gap_candidates(out["stations"],
+                                     out["auto"].get("viaUnknown") or [],
+                                     out["auto"].get("viaSegs") or [])
     stop_rows: List[dict] = []
     for s in d.get("stops") or []:
         ci = railcore.stations.coord_info(s["name"])

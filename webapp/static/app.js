@@ -1469,6 +1469,12 @@ function switchTab(name) {
   if (name === 'hist') hqEnter();
   if (name === 'curate') {
     cuLoad();
+    if (CU.linesStale) {                 // 别处刚加过线路：把线路名清单补上，已开的编辑器重画一遍
+      CU.linesStale = false;
+      cuLoadLineNames().then(() => {
+        $$('#ceViaRows .ve-row').forEach((row, i) => cuSyncRowCands(i));
+      });
+    }
     const qc = (new URLSearchParams(location.search).get('code') || '').trim().toUpperCase();
     if (qc && qc !== CU.sel) cuOpen(qc);
   }
@@ -1540,20 +1546,24 @@ function nmOpen(kind, preset) {
   nmRender();
   $('#newModal').classList.remove('hidden');
   document.body.classList.add('modal-open');   // 弹窗期间地图区不接指针事件，避免点穿
-  if (kind === 'line') nmLoadStations();
+  if (kind === 'line') nmLoadStations(true);
   setTimeout(() => {
     const el = kind === 'line' && !(preset && rows.length) ? $('#nmName') : null;
     if (el) el.focus();
   }, 40);
 }
 
-/** 站名库（一次加载 9548 个站名：车站档案 + 12306 站表的并集，供新增线路时自绘下拉联想） */
-async function nmLoadStations() {
-  if (NM.stations) return;
+/** 站名库（一次加载 9548 个站名：车站档案 + 12306 站表的并集，供新增线路时自绘下拉联想）
+ *  每次打开「新增线路」都重拉一遍（force）：刚补进去的站马上就能选中，
+ *  重拉期间先留着旧清单，免得下拉里空空一片 */
+async function nmLoadStations(force) {
+  if (NM.stations && !force) return;
   try {
     const d = await api('/api/stations/names');
     NM.stations = d.items || [];
-  } catch (e) { NM.stations = []; }
+  } catch (e) {
+    if (!NM.stations) NM.stations = [];
+  }
 }
 
 function nmRender() {
@@ -1815,6 +1825,15 @@ function nmStaBind(box, i) {
   });
 }
 
+/** 线路库动过（新增 / 覆盖线路、新增车站）之后：校对页的线路名与车站候选缓存标脏，
+ *  切回校对页时补拉一次，这样刚加的线路和车站马上能搜到，又不用刷新整页 */
+function dropLibCaches() {
+  CU.linesStale = true;                   // 保留旧清单先用着，切回校对页再补拉
+  CUSTA.cache.clear();
+  CUSTA.pending.clear();
+  NM.stations = null;                     // 站名库下次打开重拉（建线会顺带补车站）
+}
+
 async function nmSave() {
   if (NM.busy) return;
   const name = ($('#nmName').value || '').trim();
@@ -1845,6 +1864,7 @@ async function nmSave() {
         name, stations, note: ($('#nmNote').value || '').trim(),
         replace: !!NM.replace,
       });
+      dropLibCaches();                     // 新线路马上要能在校对页的下拉里搜到
       nmClose();
       switchTab('net');
       netKind = 'line';
@@ -1860,6 +1880,7 @@ async function nmSave() {
         bureau: ($('#nmBureau').value || '').trim(),
         note: ($('#nmNote').value || '').trim(),
       });
+      dropLibCaches();                     // 新车站马上要能在经停站候选里搜到
       nmClose();
       switchTab('net');
       netKind = 'station';
@@ -4018,7 +4039,7 @@ const CU_FILTERS = [
 const CU = {
   filter: 'todo', q: '', items: [], total: 0, limit: 60,
   sel: null, detail: null, via: [], segKm: {}, lines: null, poll: null,
-  coordQ: '', coordOnlyMiss: false, mode: 'seg',
+  coordQ: '', coordOnlyMiss: false, mode: 'seg', linesStale: false,
 };
 
 const esc = s => String(s == null ? '' : s)
@@ -4166,27 +4187,77 @@ async function cuOpen(code) {
       $('#cuEditor').innerHTML = `<div class="cu-empty">${esc(d.error || '这趟车在本地库里没有数据')}</div>`;
       return;
     }
-    if (!CU.lines) cuLoadLineNames();
-    const ovVia = (d.override && d.override.via) || [];
-    const eff = d.effective || {};
-    if (ovVia.length) {
-      CU.via = ovVia.map(x => ({ line: x.line || '', from: x.from || '', to: x.to || '', src: 'manual' }));
-    } else if (eff.viaSource === 'class' && (eff.viaSegs || []).length) {
-      // 这趟车的经由是「沿用同类车次」来的：照原样摆出来，标「同类」，保存时不写入
-      CU.via = eff.viaSegs.map(x => ({ line: x.line || '', from: x.from || '', to: x.to || '', src: 'class' }));
-    } else {
-      CU.via = cuRowsFromAuto(d.auto || {});
-    }
-    CU.segKm = {};
-    const ovSeg = (d.override && d.override.segKm) || {};
-    Object.keys(ovSeg).forEach(k => {
-      const i = Number(k);
-      const v = Number(ovSeg[k]);
-      if (Number.isFinite(i) && i >= 0 && Number.isFinite(v) && v > 0) CU.segKm[i] = v;
-    });
+    await cuLoadLineNames();          // 每次打开都重拉：刚加进线路库的线路要立刻能选到
+    CU.via = cuInitVia(d);
+    CU.segKm = cuInitSegKm(d);
     cuRenderEditor();
   } catch (e) {
     $('#cuEditor').innerHTML = `<div class="cu-empty">载入失败：${esc(e.message)}</div>`;
+  }
+}
+
+/** 编辑器里的经由初始值：有人工校正照抄；没有就用「同类沿用」或自动结果（都只是虚拟段） */
+function cuInitVia(d) {
+  const ovVia = (d.override && d.override.via) || [];
+  const eff = d.effective || {};
+  if (ovVia.length) {
+    return ovVia.map(x => ({ line: x.line || '', from: x.from || '', to: x.to || '', src: 'manual' }));
+  }
+  if (eff.viaSource === 'class' && (eff.viaSegs || []).length) {
+    // 这趟车的经由是「沿用同类车次」来的：照原样摆出来，标「同类」，保存时不写入
+    return eff.viaSegs.map(x => ({ line: x.line || '', from: x.from || '', to: x.to || '', src: 'class' }));
+  }
+  return cuRowsFromAuto(d.auto || {});
+}
+
+/** 手工站间里程的初始值（来自人工校正） */
+function cuInitSegKm(d) {
+  const out = {};
+  const ovSeg = (d.override && d.override.segKm) || {};
+  Object.keys(ovSeg).forEach(k => {
+    const i = Number(k);
+    const v = Number(ovSeg[k]);
+    if (Number.isFinite(i) && i >= 0 && Number.isFinite(v) && v > 0) out[i] = v;
+  });
+  return out;
+}
+
+/**
+ * 「重算自动经由」：按**当前**线路库（含刚加的线路）重新推断一遍。
+ *
+ * 自动经由是读的时候算的，但页面上的清单摘要、线路名下拉、线路站表都是缓存的，
+ * 所以在别处加完线路回来，这里可能还是旧结果。这个按钮一次性做三件事：
+ * 重载线路库 → 重算这趟车的自动基线 → 同步刷新清单摘要；缓存一并清掉。
+ */
+async function cuRefreshAuto() {
+  const d = CU.detail;
+  if (!d) return;
+  const btn = $('#ceRefresh');
+  const dirty = CU.via.some(r => !isVirtual(r)
+    && ((r.line || '').trim() || (r.from || '').trim() || (r.to || '').trim()))
+    || (($('#ceKm') || {}).value || '').trim()
+    || (($('#ceNote') || {}).value || '').trim()
+    || Object.keys(CU.segKm || {}).length;
+  if (dirty && !window.confirm('重算会按线路库重新推断，当前未保存的手工填写会丢失。继续？')) return;
+
+  if (btn) { btn.disabled = true; btn.textContent = '重算中…'; }
+  try {
+    const nd = await postJSON('/api/curate/refresh', { code: d.code });
+    if (!nd || !nd.exists) throw new Error((nd && nd.error) || '这趟车在本地库里没有数据');
+    CUSTA.cache.clear();                 // 线路站表可能刚改过，候选站名要重拉
+    await cuLoadLineNames();             // 刚加进线路库的线路要能选到
+    CU.detail = nd;
+    CU.via = cuInitVia(nd);
+    CU.segKm = cuInitSegKm(nd);
+    cuRenderEditor();
+    const nseg = (nd.auto.viaSegs || []).length;
+    const ngap = (nd.auto.viaUnknown || []).length;
+    const lib = nd.library ? `线路库 ${nd.library.lines} 条（自建 ${nd.library.customLines}）` : '当前线路库';
+    cuMsg('ok', `已按${lib}重算：识别 ${nseg} 段、缺口 ${ngap} 段，覆盖 ${nd.auto.viaCoverage}%`);
+    cuLoad();                            // 清单里的经由与标记跟着更新
+  } catch (e) {
+    cuMsg('bad', '重算失败：' + e.message);
+    if (btn) { btn.disabled = false; btn.textContent = '重算自动经由'; }
   }
 }
 
@@ -4210,14 +4281,120 @@ function cuChainHtml(segs, gaps) {
     if (i) parts.push('<span class="varrow">→</span>');
     if (it.seg) {
       const span = [it.seg.from, it.seg.to].filter(Boolean).join('–');
-      const cls = it.seg.src === 'manual' ? 'manual' : '';
-      parts.push(`<span class="vseg ${cls}">${esc(it.seg.line)}<em>${esc(span)}</em></span>`);
+      // 每段都能点：点一下把这一段「加入手工列表」（成为人工段），再点一下撤回
+      const picked = cuSegPicked(it.seg);
+      const inList = cuSegInList(it.seg);
+      const cls = ['pickable', picked ? 'picked' : '', (!picked && inList) ? 'inlist' : '']
+        .filter(Boolean).join(' ');
+      parts.push(`<button type="button" class="vseg ${cls}"
+        data-line="${esc(it.seg.line)}" data-from="${esc(it.seg.from)}" data-to="${esc(it.seg.to)}"
+        title="${picked ? '已在手工列表里（人工段）—— 点一下撤回'
+          : '点一下把这一段加入手工列表，保存时作为人工经由写入'}">${
+        esc(it.seg.line)}<em>${esc(span)}</em>${picked ? '<i class="pick">✓</i>' : ''}</button>`);
     } else {
       parts.push(`<span class="vseg gap">未识别 <em>${esc(it.gap.from)} → ${esc(it.gap.to)}</em></span>`);
     }
   });
   return parts.length ? parts.join('') : '<span class="ve-note">— 没有推断出任何线路 —</span>';
 }
+
+/** 这一段是不是已经手工列表里的「人工段」（线路名 + 起止站都一样才算） */
+function cuSegPicked(seg) {
+  const line = (seg.line || '').trim();
+  return CU.via.some(r => !isVirtual(r) && (r.line || '').trim() === line
+    && (r.from || '') === (seg.from || '') && (r.to || '') === (seg.to || ''));
+}
+
+/** 列表里有同一条线+同一区间的段（不管人工还是虚拟），用来提示「已加入」 */
+function cuSegInList(seg) {
+  const line = (seg.line || '').trim();
+  return CU.via.some(r => (r.line || '').trim() === line
+    && (r.from || '') === (seg.from || '') && (r.to || '') === (seg.to || ''));
+}
+
+/**
+ * 点自动链上的某一段：没在列表里就加进去（人工段），已经在列表里的再点就撤回。
+ * 相当于「自动推断里正确的那几段，点选着收进手工列表」，不用整趟照抄。
+ */
+function cuToggleSeg(line, from, to) {
+  const i = CU.via.findIndex(r => (r.line || '').trim() === (line || '').trim()
+    && (r.from || '') === (from || '') && (r.to || '') === (to || ''));
+  if (i >= 0) {
+    const wasVirtual = isVirtual(CU.via[i]);
+    if (wasVirtual) {                       // 虚拟段：点一下就转成人工，不删
+      CU.via[i].src = 'manual';
+    } else {
+      const rm = CU.via.splice(i, 1)[0];
+      cuRenderViaRows();
+      cuMarkChain();
+      cuMsg('', `已从手工列表撤回「${rm.line}」`);
+      return;
+    }
+  } else {
+    cuAddSeg(line, from, to, true);
+  }
+  cuRenderViaRows();
+  cuMarkChain();
+  cuMsg('', `「${line}」${from}–${to} 已加入手工列表（保存后写入正式经由）`);
+}
+
+/** 往手工列表插一段：按经停站顺序插到合适位置，而不是一律追加到末尾 */
+function cuAddSeg(line, from, to, quiet) {
+  const same = CU.via.findIndex(r => (r.line || '').trim() === (line || '').trim()
+    && (r.from || '') === (from || '') && (r.to || '') === (to || ''));
+  if (same >= 0) {
+    CU.via[same].src = 'manual';
+    return same;
+  }
+  const order = new Map(((CU.detail && CU.detail.stations) || []).map((n, i) => [n, i]));
+  const rank = n => (order.has(n) ? order.get(n) : 9999);
+  const row = { line, from, to, src: 'manual' };
+  const at = CU.via.findIndex(r => rank((r.from || '').trim()) > rank(from));
+  CU.via.splice(at < 0 ? CU.via.length : at, 0, row);
+  if (!quiet) {
+    cuRenderViaRows();
+    cuMarkChain();
+  }
+  return at < 0 ? CU.via.length - 1 : at;
+}
+
+/** 只改链上的「已加入」标记，不重建整块（保住输入焦点） */
+function cuMarkChain() {
+  $$('#ceViaChain .vseg[data-line]').forEach(el => {
+    const seg = { line: el.dataset.line, from: el.dataset.from, to: el.dataset.to };
+    const picked = cuSegPicked(seg);
+    const inList = cuSegInList(seg);
+    el.classList.toggle('picked', picked);
+    el.classList.toggle('inlist', !picked && inList);
+    el.title = picked ? '已在手工列表里（人工段）—— 点一下撤回'
+      : '点一下把这一段加入手工列表，保存时作为人工经由写入';
+    let mark = el.querySelector('.pick');
+    if (picked && !mark) el.insertAdjacentHTML('beforeend', '<i class="pick">✓</i>');
+    else if (!picked && mark) mark.remove();
+  });
+  $$('#ceGapCands .gc-line').forEach(el => {
+    const seg = { line: el.dataset.line, from: el.dataset.from, to: el.dataset.to };
+    el.classList.toggle('on', cuSegPicked(seg));
+  });
+}
+
+/** 缺口里的候选段：点一下填进手工列表（缺口前后同线的最可能，排在最前） */
+function cuGapCandsHtml(gapCands) {
+  const gaps = (gapCands || []).filter(g => (g.lines || []).length);
+  if (!gaps.length) return '';
+  return `<div class="gapcands" id="ceGapCands">
+      <div class="gc-h">缺口里的候选线路 <em>点一下加进下面手工列表；标「起点/终点站所在线」的填进去后，起止站可能要改一下</em></div>
+      ${gaps.map(g => `
+        <div class="gc-row">
+          <span class="gc-od">${esc(g.from)} → ${esc(g.to)}</span>
+          ${(g.lines || []).map(l => `<button type="button" class="gc-line${l.src === 'neighbor' ? ' near' : ''}"
+             data-line="${esc(l.line)}" data-from="${esc(g.from)}" data-to="${esc(g.to)}"
+             title="${esc(l.srcCn || '')}${l.totalKm ? ' · 全长 ' + l.totalKm + ' km' : ''}${
+               l.custom ? ' · 自建线路' : ''}">${esc(l.line)}<em>${esc(l.srcCn || '')}</em></button>`).join('')}
+        </div>`).join('')}
+    </div>`;
+}
+
 
 /** 自动结果 → 编辑行；缺口变成「线路名留空」的行，用户只需补线路名 */
 function cuRowsFromAuto(auto) {
@@ -4262,6 +4439,10 @@ function cuRenderEditor() {
     manual: stops.filter(s => s.coordSource === 'manual').length,
   };
   const coordSum = `共 ${coord.total} 站 · 缺坐标 ${coord.missing} · 已人工修正 ${coord.manual}`;
+  const gapHtml = cuGapCandsHtml(d.gapCands);
+  const chainTip = gapHtml
+    ? '点上面任意一段 = 把这一段收进下面手工列表（成为人工段）；缺口处会列出最可能的几条线，同样点一下就能填入。'
+    : '点上面任意一段 = 把这一段收进下面手工列表（成为人工段）；缺口里没有可点的候选，直接在下面手填线路名。';
 
   $('#cuEditor').innerHTML = `
     <div class="ce-head">
@@ -4290,13 +4471,21 @@ function cuRenderEditor() {
       <h4>自动推断的经由 <span class="hint">（虚拟经由，仅供参考，不会保存）</span>
         <span class="hint">${covText} · 总里程 ${a.totalKm} km（${kmModeCn}）· 线路里程配对 ${esc(a.kmMatched)}</span>
         ${clsApplied ? `<span class="hint cls">这趟车实际用的是同类校正${clsSrc ? '（学自 ' + esc(clsSrc) + '）' : ''}，见下方手工填写</span>` : ''}
+        <span class="right">
+          <span class="hint" id="ceLibInfo">${d.library
+            ? `线路库 ${d.library.lines} 条（自建 ${d.library.customLines}）` : ''}</span>
+          <button id="ceRefresh" class="btn sm ghost"
+            title="按当前线路库重新推断（新加的线路会立刻参与计算）；未保存的手工填写会先问你">重算自动经由</button>
+        </span>
       </h4>
-      <div class="via-chain">${cuChainHtml(a.viaSegs, a.viaUnknown)}</div>
+      <div class="via-chain" id="ceViaChain">${cuChainHtml(a.viaSegs, a.viaUnknown)}</div>
+      <div class="ve-note">${chainTip}</div>
+      ${gapHtml}
     </div>
 
     <div class="ce-card">
       <h4>手工填写经由
-        <span class="hint">按运行顺序；标「人工」的段会存为正式经由，标「自动」的段只作参考、不保存</span>
+        <span class="hint">按运行顺序；标「人工」的段会存为正式经由，标「自动 / 同类」的段只作参考、不保存</span>
         <span class="right">
           <button id="ceFill" class="btn sm ghost">按自动结果填充</button>
           <button id="ceAllManual" class="btn sm ghost">全部定为人工</button>
@@ -4366,6 +4555,28 @@ function cuRenderEditor() {
   cuRenderViaRows();
   cuRenderSegKm();
   cuRenderStops();
+
+  // 线路库变了以后按新线路重算（自动经由 / 里程都跟着变）
+  $('#ceRefresh').addEventListener('click', cuRefreshAuto);
+  const chainEl = $('#ceViaChain');
+  if (chainEl) {
+    chainEl.addEventListener('click', e => {
+      const el = e.target.closest('.vseg[data-line]');
+      if (!el) return;
+      cuToggleSeg(el.dataset.line, el.dataset.from, el.dataset.to);
+    });
+  }
+  const gcEl = $('#ceGapCands');
+  if (gcEl) {
+    gcEl.addEventListener('click', e => {
+      const el = e.target.closest('.gc-line');
+      if (!el) return;
+      cuAddSeg(el.dataset.line, el.dataset.from, el.dataset.to, true);
+      cuRenderViaRows();
+      cuMarkChain();
+      cuMsg('', `「${el.dataset.line}」${el.dataset.from}–${el.dataset.to} 已加入手工列表`);
+    });
+  }
 
   $('#ceGoTrain').addEventListener('click', () => {
     S.date = d.date || S.date;
@@ -4638,15 +4849,62 @@ function cbLineList(q) {
   return hits.slice(0, 200);
 }
 
-/** 车站候选：该行线路在库里的全部车站；线路不在库里就退回这趟车的经停站 */
+/** 车站候选：该行线路在库里的全部车站；线路不在库里就退回这趟车的经停站。
+ *  `box._ext` 是打车站名时从车站库现查的联想结果（最新补录的车站也能搜到），
+ *  排在本地候选后面，去重后一起返回。 */
 function cbStaList(box, q) {
-  const all = box._cands || [];
   const v = (q || '').trim();
-  if (!v) return all;
-  const hits = all.filter(n => n.includes(v));
-  hits.sort((a, b) => (b.startsWith(v) ? 1 : 0) - (a.startsWith(v) ? 1 : 0)
-    || a.length - b.length);
-  return hits;
+  const seen = new Set();
+  const out = [];
+  const sortHits = arr => {
+    if (!v) return arr.slice();
+    const hits = arr.filter(n => n.includes(v));
+    hits.sort((a, b) => (b.startsWith(v) ? 1 : 0) - (a.startsWith(v) ? 1 : 0)
+      || a.length - b.length);
+    return hits;
+  };
+  [box._cands || [], box._ext || []].forEach(arr => {
+    sortHits(arr).forEach(n => {
+      if (!n || seen.has(n)) return;
+      seen.add(n);
+      out.push(n);
+    });
+  });
+  return out;
+}
+
+/** 本地候选 + 现查结果的并集（判断「当前值在不在名单里」用，不排序） */
+function cbStaAll(box) {
+  const out = [];
+  const seen = new Set();
+  [(box._cands || []), (box._ext || [])].forEach(arr => arr.forEach(n => {
+    if (n && !seen.has(n)) { seen.add(n); out.push(n); }
+  }));
+  return out;
+}
+
+/** 打字时向车站库问一嘴（去抖 160ms）：新建的车站、档案里没有的站也能选到 */
+const SUGCACHE = new Map();
+function cuStaSuggest(box, q) {
+  const v = (q || '').trim();
+  if (box._extQ === v) return;
+  box._extQ = v;
+  if (box._timer) { clearTimeout(box._timer); box._timer = null; }
+  if (!v) { box._ext = []; return; }
+  const cached = SUGCACHE.get(v);
+  if (cached) { box._ext = cached; cuRepaintOpen([box]); return; }
+  box._timer = setTimeout(async () => {
+    box._timer = null;
+    let names = [];
+    try {
+      const d = await api('/api/stations', { q: v, limit: 20 });
+      names = (d.items || []).map(x => x.name).filter(Boolean);
+      SUGCACHE.set(v, names);
+    } catch (e) { names = []; }
+    if (box._extQ !== v) return;              // 期间又改了输入，结果作废
+    box._ext = names;
+    cuRepaintOpen([box]);
+  }, 160);
 }
 
 function cbUnkick() {
@@ -4750,7 +5008,7 @@ function cbPaintList(box, q, noHilite) {
 
 /** 车站下拉内容：候选取自该行线路在库里的站名（按站序），库外站名也能填 */
 function cbPaintSta(box, pop, v, noHilite) {
-  const all = box._cands || [];
+  const all = cbStaAll(box);
   if (!all.length) {
     pop.innerHTML = box._loading
       ? '<div class="cb-empty">正在读取这条线路的车站…</div>'
@@ -4766,9 +5024,11 @@ function cbPaintSta(box, pop, v, noHilite) {
   CB.items = rows;
   const hit = list.indexOf(v);
   CB.idx = noHilite ? -1 : (hit >= 0 ? hit : (rows.length ? 0 : -1));
+  const base = new Set(box._cands || []);
   pop.innerHTML = rows.map((r, k) => {
     const mt = r.custom ? '用这个名称'
-      : (box._candsKind === 'line' ? '' : '本次经停');
+      : (!base.has(r.name) ? '车站库'
+        : (box._candsKind === 'line' ? '' : '本次经停'));
     return `<div class="cb-item${k === CB.idx ? ' active' : ''}${r.custom ? ' custom' : ''}"
       data-k="${k}"><span class="nm">${esc(r.name)}</span><span class="mt">${esc(mt)}</span></div>`;
   }).join('');
@@ -4783,7 +5043,7 @@ function cbOpen(box, i, all) {
   if (cbKind(box) === 'sta' && !(box._cands || []).length && box._load) box._load();
   // 车站框里的旧值可能不属于新线路：这时先列出全部候选，别只留一个「用这个名称」
   const val = inp.value.trim();
-  const miss = cbKind(box) === 'sta' && val && (box._cands || []).indexOf(val) < 0;
+  const miss = cbKind(box) === 'sta' && val && cbStaAll(box).indexOf(val) < 0;
   if (miss && !all) {
     cbPaintList(box, '', true);               // 不预先高亮，回车不会误改
   } else {
@@ -4846,6 +5106,7 @@ function cbBind(box, i) {
     cbPaintList(box, inp.value);
     cbPlace(box);
     cbKick();
+    if (kind === 'sta') cuStaSuggest(box, inp.value);   // 车站库现查（新加的站也能选到）
     cuCheck();
   });
   inp.addEventListener('keydown', e => {
@@ -4911,7 +5172,7 @@ function cuRepaintOpen(boxes) {
   const inp = cbInput(CB.box);
   const val = inp.value.trim();
   const miss = cbKind(CB.box) === 'sta' && val
-    && (CB.box._cands || []).indexOf(val) < 0;
+    && cbStaAll(CB.box).indexOf(val) < 0;
   cbPaintList(CB.box, miss ? '' : val, !!miss);
   cbPlace(CB.box);
 }
@@ -4934,7 +5195,10 @@ async function cuSyncRowCands(i) {
   const inLib = !!(lineName && CU.lineMap && CU.lineMap.has(lineName));
 
   const apply = (names, kind, loading) => {
-    boxes.forEach(b => { b._cands = names; b._candsKind = kind; b._loading = !!loading; });
+    boxes.forEach(b => {
+      b._cands = names; b._candsKind = kind; b._loading = !!loading;
+      b._ext = []; b._extQ = '';              // 换了线路，现查的车站结果作废
+    });
     cuRepaintOpen(boxes);
   };
 
@@ -5006,6 +5270,7 @@ function cuRenderViaRows() {
     cuSyncRowCands(i);                        // 异步补上这一行的车站候选
   });
   cbClose();
+  cuMarkChain();                              // 链上「已加入」的勾选状态跟着变
   cuCheck();
 }
 

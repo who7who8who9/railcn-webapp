@@ -2170,28 +2170,157 @@ def search_trains(q: str, limit: int = 40, date: Optional[str] = None) -> List[d
     q = (q or "").strip()
     if not q:
         return []
+    # 取每个车次号「最近一天」的那一行：MAX() 分开聚合会把站数/起讫取到不同日期上，
+    # 同一趟车的两个号就会因为站数对不上而合不到一起
     stmt = """
-        SELECT code, MAX(train_no) AS train_no, MAX(type) AS type,
-               MAX(start_sta) AS start_sta, MAX(end_sta) AS end_sta,
-               MAX(stop_count) AS stop_count, MAX(date) AS date
-        FROM trains
-        WHERE code LIKE ? OR start_sta LIKE ? OR end_sta LIKE ?
-        GROUP BY code
+        SELECT t.code, t.train_no, t.type, t.start_sta, t.end_sta, t.stop_count, t.date
+        FROM trains t
+        JOIN (SELECT code, MAX(date) AS md FROM trains GROUP BY code) m
+          ON m.code = t.code AND m.md = t.date
+        WHERE t.code LIKE ? OR t.start_sta LIKE ? OR t.end_sta LIKE ?
+        GROUP BY t.code
         ORDER BY
-          CASE WHEN code = ? THEN 0
-               WHEN code LIKE ? THEN 1
-               WHEN start_sta = ? THEN 2
-               WHEN end_sta = ? THEN 3
+          CASE WHEN t.code = ? THEN 0
+               WHEN t.code LIKE ? THEN 1
+               WHEN t.start_sta = ? THEN 2
+               WHEN t.end_sta = ? THEN 3
                ELSE 4 END,
-          LENGTH(code), code
+          LENGTH(t.code), t.code
         LIMIT ?
     """
     with db() as conn:
-        rows = conn.execute(
+        rows = [dict(r) for r in conn.execute(
             stmt,
-            (q + "%", q + "%", q + "%", q.upper(), q.upper() + "%", q, q, limit),
-        ).fetchall()
-    return [dict(r) for r in rows]
+            (q + "%", q + "%", q + "%", q.upper(), q.upper() + "%", q, q, limit * 3),
+        ).fetchall()]
+        # 同一 train_no 的另一个车次号未必命中 LIKE（搜 4358 时 4355 那行不在结果里），
+        # 单独捞一遍，才能合并成「4355/8」
+        pairs = {(r["train_no"], r["date"]) for r in rows if r.get("train_no")}
+        extra: List[dict] = []
+        for tn, d in pairs:
+            extra.extend(dict(r) for r in conn.execute(
+                "SELECT code, train_no, type, start_sta, end_sta, stop_count, date "
+                "FROM trains WHERE train_no=? AND date=? GROUP BY code", (tn, d)).fetchall())
+        items = _merge_train_rows(rows + extra, conn)
+    return items[:limit]
+
+
+def code_label(codes, primary: Optional[str] = None) -> str:
+    """同一趟车的多个车次号按铁路写法合并：4355 + 4358 → 4355/8，K545 + K548 → K545/8
+
+    只在「末一两位不同」时缩写（那是同一趟车换向换号的典型写头），差得远就写全。
+    """
+    cs = [str(c).strip().upper() for c in (codes or []) if str(c or "").strip()]
+    cs = list(dict.fromkeys(cs))
+    if not cs:
+        return ""
+    if len(cs) == 1:
+        return cs[0]
+    main = primary if primary in cs else sorted(cs, key=lambda c: (len(c), c))[0]
+    outs = []
+    for c in cs:
+        if c == main:
+            continue
+        i = 0
+        while i < min(len(main), len(c)) and main[i] == c[i]:
+            i += 1
+        tail = c[i:]
+        outs.append(tail if 0 < len(tail) <= 2 and i >= len(main) - 2 else c)
+    return main + "/" + "/".join(outs)
+
+
+def _origin_code(train_no: str, date: Optional[str], conn) -> Optional[str]:
+    """这趟车在始发站用的车次号（routes 缓存里第一站的 station_train_code）"""
+    if not train_no:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT raw FROM routes WHERE train_no=? AND date=? AND raw IS NOT NULL",
+            (train_no, date or ""),
+        ).fetchone()
+        if not row:
+            row = conn.execute(
+                "SELECT raw FROM routes WHERE train_no=? AND raw IS NOT NULL "
+                "ORDER BY date DESC LIMIT 1", (train_no,)).fetchone()
+        if not row:
+            return None
+        raw = json.loads(row["raw"] or "[]")
+        return (raw[0].get("station_train_code") or "").strip() or None if raw else None
+    except (sqlite3.Error, TypeError, ValueError):
+        return None
+
+
+def _merge_train_rows(rows: List[dict], conn=None) -> List[dict]:
+    """把「同一趟车的两个车次号」合成一行
+
+    4355 与 4358 在 `trains` 里是两行、在 12306 上也是两条搜索结果，其实是同一趟车
+    （双辽换向，车次号从 4355 变 4358）。同一个 `train_no` + 同一天 + 起讫站和站数都
+    一样，就是同一趟车的两个号，列表里该显示成「4355/8」一行。
+    """
+    out: List[dict] = []
+    seen: Dict[tuple, dict] = {}
+    for r in rows:
+        tn = (r.get("train_no") or "").strip()
+        if not tn:
+            out.append({**r, "codes": [r["code"]], "codeLabel": r["code"]})
+            continue
+        key = (tn, r.get("date") or "", r.get("start_sta") or "",
+               r.get("end_sta") or "", r.get("stop_count") or 0)
+        hit = seen.get(key)
+        if hit is not None:
+            if r["code"] not in hit["codes"]:
+                hit["codes"].append(r["code"])
+            continue
+        it = {**r, "codes": [r["code"]], "codeLabel": r["code"]}
+        seen[key] = it
+        out.append(it)
+
+    for it in out:
+        if len(it["codes"]) < 2:
+            continue
+        origin = _origin_code(it.get("train_no"), it.get("date"), conn) if conn else None
+        label = code_label(it["codes"], origin)
+        it["codeLabel"] = label
+        it["code"] = label.split("/")[0]
+    return out
+
+
+def code_infos(codes) -> Dict[str, dict]:
+    """一批车次号的「合并写法」信息：{4355: {codes:[4355,4358], codeLabel:'4355/8'}, ...}
+
+    给校对页这类按车次逐行列出的地方用：两行都挂上同一个写法，一眼看出是同一趟车。
+    """
+    codes = [str(c or "").strip().upper() for c in (codes or [])]
+    codes = [c for c in dict.fromkeys(codes) if c]
+    out = {c: {"codes": [c], "codeLabel": c} for c in codes}
+    if not codes:
+        return out
+    try:
+        with db() as conn:
+            marks = ",".join("?" * len(codes))
+            rows = conn.execute(
+                f"""SELECT t.code, t.train_no, t.date FROM trains t
+                    JOIN (SELECT code, MAX(date) AS md FROM trains GROUP BY code) m
+                      ON m.code = t.code AND m.md = t.date
+                    WHERE t.code IN ({marks}) GROUP BY t.code""", codes).fetchall()
+            pairs = {(r["train_no"], r["date"]) for r in rows if r["train_no"]}
+            for tn, d in pairs:
+                full = [x["code"] for x in conn.execute(
+                    "SELECT DISTINCT code FROM trains WHERE train_no=? AND date=?",
+                    (tn, d)).fetchall()]
+                if len(full) < 2:
+                    continue
+                label = code_label(full, _origin_code(tn, d, conn))
+                for c in full:
+                    out[c] = {"codes": full, "codeLabel": label}
+    except sqlite3.Error:
+        pass
+    return out
+
+
+def code_info(code: str) -> dict:
+    code = (code or "").strip().upper()
+    return code_infos([code]).get(code, {"codes": [code], "codeLabel": code})
 
 
 def lookup_train(code: str, date: Optional[str] = None) -> Optional[dict]:
@@ -2378,6 +2507,7 @@ def build_route_payload(code: str, date: str, force: bool = False,
                 "km": 0.0,
                 "lat": coord[0] if coord else None,
                 "lon": coord[1] if coord else None,
+                "trainCode": (item.get("station_train_code") or "").strip() or None,
             }
         )
 
@@ -2572,8 +2702,26 @@ def build_route_payload(code: str, date: str, force: bool = False,
     end_dt = start_dt + dt.timedelta(minutes=duration)
     day_span = (end_dt.date() - start_dt.date()).days + 1          # 占用的自然日天数
 
+    # ---- 中途换向会换车次号（4355 → 4358）：按站表里 station_train_code 的出现顺序收 ----
+    codes: List[str] = []
+    switches: List[dict] = []
+    prev_code = None
+    for s in stops:
+        c = s.get("trainCode")
+        if not c:
+            continue
+        if c not in codes:
+            codes.append(c)
+        if prev_code and c != prev_code:
+            switches.append({"i": s["i"], "at": s["name"], "from": prev_code, "to": c})
+        prev_code = c
+    main_code = item_code(raw) or code
+
     return {
-        "code": item_code(raw) or code,
+        "code": main_code,
+        "codes": codes or [main_code],
+        "codeLabel": code_label(codes or [main_code], main_code),
+        "codeSwitches": switches,
         "trainNo": info.get("train_no"),
         "date": date,
         "trainClass": raw[0].get("train_class_name") or "",

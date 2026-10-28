@@ -234,6 +234,34 @@ G1 北京南→上海虹桥 因此从「直线 1176 km」修正为 **1318 km**�
 判定用两个指纹：版本指纹 `(train_no, start_sta, end_sta)`，停站指纹 `站名 + 到达 + 出发` 逐站串起来。
 两个都来自已落库的数据，不额外联网。
 
+### 同一趟车的两个车次号（换向换号）
+
+中途换向的列车会在换向站改车次号（上下行互换），12306 的经停站数据里**每一站都带自己的
+`station_train_code`**，所以一趟车会同时挂着两个号：`4355`（四平→双辽段）和 `4358`（双辽→通辽段）。
+车次清单里它们也是两行（`train_no` 相同、起讫与站数一样），以前当成两趟车，各点一次才发现是同一趟。
+
+现在三处都按「一趟车」显示：
+
+| 位置 | 显示 |
+|---|---|
+| 车次详情头部 | `4355/8` + 标签「中途换号」，下面一行写明「同一趟车 4355/8：双辽 起 4355→4358」 |
+| 站序表 | 换号那一站旁边挂 `4355→4358`（hover 有说明），一眼看出在哪换的 |
+| 车次列表 / 校对清单 | 两行合成一行，写 `4355/8`；校对页两行都挂同一个写法，免得当成两趟车各校一遍 |
+
+写法规则（`railcore.code_label()`）：主号取**始发站用的那个号**（`routes` 里第一站的
+`station_train_code`），其余号只差末一两位时按铁路惯例缩写 —— `4355+4358 → 4355/8`、
+`K545+K548 → K545/8`、`D7931+D7934 → D7931/4`；差得多就写全（`G1234+G5678 → G1234/G5678`）。
+
+判据用 `trains` 里**同一个 `train_no` + 同一天 + 起讫站与站数一致**，加上经停站的
+`station_train_code` 确实变了；只有 `train_no` 相同不算（上一节那种同号不同趟的情况，`train_no` 反而不同）。
+接口上：
+
+- `GET /api/route` 多返回 `codes`（按出现顺序）、`codeLabel`、`codeSwitches`（`{i, at, from, to}`），
+  每站多一个 `trainCode`
+- `GET /api/trains` 每项多 `codes` / `codeLabel`，同一趟车的两个号已合并（搜 `4358` 也能搜到 `4355/8`）
+- `GET /api/curate/list`、`/api/curate/detail` 多 `codeLabel` / `codes`
+- 历史数据页仍按**单个车次号**看（那页关心的是这个号在哪些日期开行、怎么变的）
+
 ### 大类统计的两个数
 
 明细是按日的：一行一天、一列一个大类，格子上排是当日开行趟次，下排灰字是不开行趟次；
@@ -604,8 +632,8 @@ python scripts\import_crtrain.py     :: 归集成 data\crtrain\lines.json + geom
 |---|---|---|
 | `GET /api/stats` | — | 车次库 / 缓存 / 坐标覆盖率 |
 | `GET /api/stations` | `q`、`limit` | 站名联想 |
-| `GET /api/trains` | `q`、`limit` | 本地车次检索（车次号 / 起终站） |
-| `GET /api/route` | `code`、`date`、`force`、`cache` | 经停站 + 坐标 + 绝对时刻（`cache=1` 只读本地库，历史数据页用） |
+| `GET /api/trains` | `q`、`limit` | 本地车次检索（车次号 / 起终站）；同一趟车的多个车次号已合成一项，带 `codes` / `codeLabel` |
+| `GET /api/route` | `code`、`date`、`force`、`cache` | 经停站 + 坐标 + 绝对时刻（`cache=1` 只读本地库，历史数据页用）；带 `codes` / `codeLabel` / `codeSwitches`，每站带 `trainCode` |
 | `GET /api/route/osm` | `code`、`date` | 同一趟车的「OSM 真实走向」折线（只读本地库）：`path[]` 带 `km`，另返 `total`/`covered`/`gapKm`/`cover`/`gaps[]`/`fill`/`lines[]`；拼不出来时 `ok=false` + `error` |
 | `GET /api/tickets` | `from`、`to`、`date` | 余票 |
 | `GET /api/transfer` | `from`、`to`、`date`、`middle` | 中转换乘 |
@@ -633,7 +661,7 @@ python scripts\import_crtrain.py     :: 归集成 data\crtrain\lines.json + geom
 | `GET /api/collect/download` | `date`、`fmt=json\|csv` | 导出并直接下载 |
 | `GET /api/collect/files` | — | 已导出的文件清单 |
 | `GET /api/curate/stats` | — | 校对统计（待补全 / 经由 / 里程 / 坐标 / 已校正）+ 扫描进度 |
-| `GET /api/curate/list` | `filter`、`q`、`limit`、`offset` | 校对清单，`filter=todo\|via\|km\|coord\|manual\|clean\|all` |
+| `GET /api/curate/list` | `filter`、`q`、`limit`、`offset` | 校对清单，`filter=todo\|via\|km\|coord\|manual\|clean\|all`；每项带 `codeLabel` / `codes` |
 | `GET /api/curate/detail` | `code` | 某车次的**自动推断基线**（绕开人工校正）+ 已有校正 + 经停站 + `gapCands`（每个缺口可点选的候选线路） |
 | `GET /api/curate/lineNames` | — | 全部线路（带站数 / 总里程，给编辑器下拉用；`items[]` 为对象，`names[]` 是纯名字） |
 | `POST /api/curate/refresh` | `code` | 线路库改过之后重算这趟车：重载线路库 → 重算自动基线 → 刷新清单摘要；返回详情 + `library`（线路库条数）+ `summary` |
@@ -655,13 +683,14 @@ python scripts\import_crtrain.py     :: 归集成 data\crtrain\lines.json + geom
 
 ```json
 {
-  "code": "G1", "from": "北京南", "to": "上海虹桥",
+  "code": "G1", "codes": ["G1"], "codeLabel": "G1", "codeSwitches": [],
+  "from": "北京南", "to": "上海虹桥",
   "startIso": "2026-10-21T06:30:00", "endIso": "2026-10-21T11:24:00",
   "durationMin": 294, "totalKm": 1318.0, "straightKm": 1176.4,
   "kmMode": "real", "kmFactor": 1.12, "kmMatched": "6/6",
   "viaLines": ["京沪高速线"],
   "stops": [
-    {"i":1,"name":"北京南","arr":null,"dep":"06:30","stayMin":0,
+    {"i":1,"name":"北京南","trainCode":"G1","arr":null,"dep":"06:30","stayMin":0,
      "runMin":0,"km":0.0,"lat":39.86333,"lon":116.37205,
      "bureau":"中国铁路北京局","tele":"VNP","lines":["京沪线","京沪高速","京津城际"],
      "iso":"2026-10-21T06:30:00","depIso":"2026-10-21T06:30:00"}

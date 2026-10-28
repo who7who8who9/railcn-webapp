@@ -317,14 +317,14 @@ const TMapView = {
     if (!st.stop) {
       return `<div class="iw"><b>${st.name}</b>
         <div class="g">通过 · 里程 ${Math.round(st.km)} km</div>
-        <div class="g">${route.code} ${route.from} → ${route.to}</div></div>`;
+        <div class="g">${route.codeLabel || route.code} ${route.from} → ${route.to}</div></div>`;
     }
     const arr = st.arr ? `${st.arr}${st.day > 0 ? `（${dayName(st.day)}）` : ''}` : '——';
     const dep = st.dep ? `${st.dep}${st.depDay > st.day ? `（${dayName(st.depDay)}）` : ''}` : '——';
     return `<div class="iw"><b>${st.name}</b>
       <div class="g">第 ${st.i} 站 · 里程 ${Math.round(st.km)} km</div>
       <div>到 ${arr} · 开 ${dep}${st.stayMin ? ` · 停 ${st.stayMin}分` : ''}</div>
-      <div class="g">${route.code} ${route.from} → ${route.to}</div></div>`;
+      <div class="g">${route.codeLabel || route.code} ${route.from} → ${route.to}</div></div>`;
   },
 
   setTrain(pt) {
@@ -787,6 +787,7 @@ function renderDetail(route) {
   const stops = route.stops;
   const segs = route.viaSegs || [];
   const gaps = route.viaUnknown || [];
+  const switches = route.codeSwitches || [];
   const viaHtml = segs.length
     ? `<div class="l3 chips">经由 ${segs.map(s => {
         const span = [s.from, s.to].filter(Boolean).join('–');
@@ -809,13 +810,17 @@ function renderDetail(route) {
   const head = `
     <div class="dhead">
       <div class="l1">
-        <span class="code">${route.code}</span>
+        <span class="code">${esc(route.codeLabel || route.code)}</span>
         <span class="tag type">${route.trainClass || type + ' 次'}</span>
+        ${switches.length ? `<span class="tag warn" title="${switches.map(w =>
+            `${w.at} 换向：${w.from} → ${w.to}`).join('；')}">中途换号</span>` : ''}
         <span class="tag">${route.date}</span>
         ${over ? `<span class="tag day">跨 ${span} 日</span>` : ''}
         ${route.source === 'cache' ? '<span class="tag">本地缓存</span>' : ''}
       </div>
-      <div class="l2">${route.from} → ${route.to}</div>
+      <div class="l2">${route.from} → ${route.to}${switches.length
+        ? ` · <span class="codesw-inline">同一趟车 ${route.codeLabel}：${switches.map(w =>
+            `${esc(w.at)} 起 ${esc(w.from)}→${esc(w.to)}`).join('，')}</span>` : ''}</div>
       <div class="journey">
         <div class="jcell"><span class="k">始发${over ? ' · 第 1 日' : ''}</span>
           <b>${fmtMD(startT)} ${fmtWD(startT)} ${firstDep}</b></div>
@@ -859,11 +864,16 @@ function renderDetail(route) {
       `<div class="arr"><i class="lbl">到</i>${s.arr || '——'}${arrBadge}</div>`;
     const depLine = i === stops.length - 1 ? '' :
       `<div class="dep"><i class="lbl">开</i>${s.dep || '——'}${depBadge}</div>`;
+    // 这一站换了车次号（换向）：站名下面标一下，不然「4355/8」看不出在哪换的
+    const sw = switches.find(x => x.i === s.i);
+    const swTag = sw
+      ? `<em class="codesw" title="在这里换向，车次号 ${sw.from} → ${sw.to}">${sw.from}→${sw.to}</em>`
+      : '';
 
     return `${sep}<li class="${cls.join(' ')}" data-i="${i}">
       <div class="t">${arrLine}${depLine}</div>
       <div class="rail"><span class="dot"></span></div>
-      <div class="name"><span class="n">${s.name}</span><span class="s">${stay}</span></div>
+      <div class="name"><span class="n">${s.name}</span><span class="s">${stay}${swTag}</span></div>
       <div class="km">${s.km ? Math.round(s.km) + ' km' : ''}</div>
     </li>`;
   }).join('');
@@ -1396,8 +1406,8 @@ function renderTrainList(items, title) {
   }
   list.innerHTML = `<div class="listhdr">${title || ''}</div>` +
     items.map(t => `
-      <div class="row" data-code="${t.code}">
-        <span class="tcode">${t.code}</span>
+      <div class="row" data-code="${esc(t.code)}">
+        <span class="tcode">${esc(t.codeLabel || t.code)}</span>
         <div class="main">
           <div class="od">${t.start_sta || '?'} → ${t.end_sta || '?'}</div>
           <div class="meta">${t.stop_count || '—'} 站 · ${t.date || ''}</div>
@@ -4268,7 +4278,7 @@ function cuRenderList() {
     const gap = it.gaps ? `<span class="warn"> · 缺 ${it.gaps} 段</span>` : '';
     const miss = it.missing ? ` · 缺 ${it.missing} 站坐标` : '';
     return `<div class="cu-row${it.code === CU.sel ? ' active' : ''}" data-code="${esc(it.code)}">
-      <div class="r1"><span class="code">${esc(it.code)}</span>
+      <div class="r1"><span class="code">${esc(it.codeLabel || it.code)}</span>
         <span class="od">${esc(it.from || '—')} → ${esc(it.to || '—')}</span></div>
       <div class="r2">${via}${cov}${gap} · ${it.totalKm} km${miss}</div>
       <div class="flags">${manual}${clsFlag}${flags}</div>
@@ -4554,8 +4564,11 @@ function cuRenderEditor() {
 
   $('#cuEditor').innerHTML = `
     <div class="ce-head">
-      <span class="ce-code">${esc(d.code)}</span>
+      <span class="ce-code">${esc(d.codeLabel || d.code)}</span>
       <span class="ce-od">${esc(d.from || '—')} → ${esc(d.to || '—')}</span>
+      ${(d.codeSwitches || []).length
+        ? `<span class="ce-badge warn" title="${esc((d.codeSwitches || []).map(w =>
+            `${w.at} 换向 ${w.from}→${w.to}`).join('；'))}">中途换号</span>` : ''}
       <span class="ce-badge">${esc(d.date || '')}</span>
       ${isManual ? '<span class="ce-badge manual">已人工校正</span>' : ''}
       ${clsApplied

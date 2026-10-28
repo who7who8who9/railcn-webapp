@@ -450,6 +450,8 @@ def listing(mode: str = "todo", q: str = "", limit: int = 60, offset: int = 0) -
             ).fetchall()
     except Exception:                                # noqa: BLE001
         return {"items": [], "total": 0, "mode": mode}
+    # 同一趟车换向会换车次号（4355/4358）：两行都挂同一个写法，免得当成两趟车各校一遍
+    labels = railcore.code_infos([r["code"] for r in rows])
     items = []
     for r in rows:
         issues = [x for x in (r["issues"] or "").split(",") if x]
@@ -457,8 +459,11 @@ def listing(mode: str = "todo", q: str = "", limit: int = 60, offset: int = 0) -
             gaps = len(json.loads(r["via_unknown"] or "[]"))
         except (TypeError, ValueError):
             gaps = 0
+        info = labels.get(r["code"]) or {}
         items.append({
             "code": r["code"], "date": r["date"],
+            "codeLabel": info.get("codeLabel") or r["code"],
+            "codes": info.get("codes") or [r["code"]],
             "from": r["from_sta"], "to": r["to_sta"], "stops": r["stops"],
             "via": r["via_text"], "viaSource": r["via_source"],
             "viaCoverage": r["via_cov"], "gaps": gaps,
@@ -545,6 +550,11 @@ def detail(code: str) -> dict:
         "totalKm": d.get("totalKm") or 0.0,
     }
     out["stations"] = [s["name"] for s in d.get("stops") or []]
+    # 同一趟车换向换号（4355/4358）：编辑器标题也用合并写法
+    info = railcore.code_info(code)
+    out["codeLabel"] = info.get("codeLabel") or code
+    out["codes"] = info.get("codes") or [code]
+    out["codeSwitches"] = d.get("codeSwitches") or []
     # 缺口里的候选线路（人工「点选加入」用）：自动认不出来的区间，给出最可能的那几条线
     out["gapCands"] = gap_candidates(out["stations"],
                                      out["auto"].get("viaUnknown") or [],

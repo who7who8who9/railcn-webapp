@@ -3,7 +3,8 @@
 fetch_geojson.py — 下载 HOT 官方中国铁路导出（含车站点 + 线路几何）
 
 数据来源：Humanitarian Data Exchange / OSM，OpenStreetMap ODbL 授权，仅用于数据匹配与绘图。
-下载后解压得到 data/railways.geojson（约 326MB），供 build_coords.py / railgraph.py 使用。
+下载后解压得到 data/railways.geojson（约 326MB），供 build_coords.py 建车站坐标库使用。
+（本项目的线路走向只用 data/crtrain/geoms.json.gz，不需要这份全量 geojson。）
 
 用法：
     python tools/fetch_geojson.py

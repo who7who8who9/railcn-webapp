@@ -10,10 +10,8 @@ webapp/data/exports/
 # ---------- 体积过大的生成物（可按 README 自行重建） ----------
 webapp/data/railways.geojson
 webapp/data/railways_geojson.zip
-webapp/data/rail_graph.pkl
 webapp/data/osm_stations.json
 *.geojson
-*.pkl
 
 # ---------- 可再抓取的中间缓存 ----------
 cache/

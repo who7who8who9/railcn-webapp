@@ -24,14 +24,12 @@ railcn/
    ├─ curate.py               数据校对：扫描全库标出经由/里程/坐标问题，落 curate 表供页面筛选
    ├─ railosm.py              拼「OSM 真实走向」折线（按线名几何 + 走廊投影 + 缺口报账）
    ├─ railgeom.py             线路几何的按名索引（data/crtrain/geoms.json.gz）
-   ├─ railgraph.py            （实验）OSM 铁路线几何路由，用于沿真实线路绘制
    ├─ start.bat               双击启动
    ├─ data\
    │   ├─ rail.db             车次清单 + 经停站缓存 + 坐标修正
    │   ├─ stations.json       12306 车站字典（3365 个）
    │   ├─ station_coords.json 车站坐标库（WGS-84）
-   │   ├─ coord_report.json   坐标覆盖率 / 缺失清单
-   │   └─ rail_graph.pkl      铁路线网格索引（railgraph 用）
+   │   └─ coord_report.json   坐标覆盖率 / 缺失清单
    ├─ tools\
    │   ├─ import_data.py      把已有 Excel 灌进 SQLite
    │   ├─ build_coords.py     OSM 车站 → 坐标库
@@ -577,11 +575,11 @@ python scripts\import_crtrain.py     :: 归集成 data\crtrain\lines.json + geom
 
 | 车次 | 区间 | 全程 | 折点数 | 缺口 | 缺口里程 | 覆盖率 |
 |---|---|---|---|---|---|---|
-| G1 | 北京南→上海虹桥 | 1302 km | 520 | 10 处 | 94 km | 93% |
-| G1033 | 北京南→上海虹桥 | 1446 km | 431 | 0 | 0 | 100% |
-| K8361 | 信阳→上海 | 792 km | 271 | 1 处 | 107 km | 86% |
-| D1 | 北京西→长沙 | 1579 km | 826 | 1 处 | 216 km | 86% |
-| D2290 | 深圳北→南通 | 1788 km | 670 | 3 处 | 660 km | 63% |
+| G1 | 北京南→上海虹桥 | 1302 km | 519 | 10 处 | 94 km | 93% |
+| G1033 | 北京南→上海虹桥 | 1446 km | 429 | 0 | 0 | 100% |
+| K8361 | 信阳→上海 | 792 km | 270 | 1 处 | 107 km | 86% |
+| D1 | 北京西→长沙 | 1579 km | 824 | 1 处 | 216 km | 86% |
+| D2290 | 深圳北→南通 | 1788 km | 669 | 3 处 | 660 km | 63% |
 
 **已知局限**：这份几何是按线名切碎的（一条 1300 km 的高铁被切成 55 段，总长还是上下行双算的 2437 km）。所以：
 
@@ -590,7 +588,10 @@ python scripts\import_crtrain.py     :: 归集成 data\crtrain\lines.json + geom
 - 想让某条线本身画得准，从车次的经由线路名点进「车站 / 线路」页看那条线。
 - 缺口只影响画得像不像，不影响里程、时刻和列车位置：位置一律按里程在折线上插值（`pointAtKm`），换哪套折线都对得上。
 
-> 也试过用 `railgraph.py`（`data/railways.geojson` 41 万条 way 建全量路网 + A*），寻路要 6~11 秒、部分 OD 直接不连通，不适合放在网页点一下就要出图的地方，暂时没接。
+> **本项目只用「线路 + 车站」两类数据**：线路一侧是 `data/crtrain/lines.json` 的站序与里程，
+> 车站一侧是 `stations.json` / `station_coords.json` 的坐标，走向靠 `geoms.json.gz` 里**按线名切好的**几何来对齐。
+> 「把 OSM 全部铁路 way 建成一张路网再 A\* 寻路」那条路试过（早先的 `railgraph.py`），单程 6~11 秒、部分 OD 直接不连通，
+> 还要背 300 MB+ 的 `railways.geojson`，和「按线名 + 走廊」比没有优势，**已从仓库移除，不再用这条路**。
 
 ## 关于「即时位置」
 
@@ -620,8 +621,8 @@ python scripts\import_crtrain.py     :: 归集成 data\crtrain\lines.json + geom
 
 ## 后续可以做的
 
-1. **沿真实线路绘制**：`railosm.py` 已接上（见上文「地图上的两种路线」），剩下的是把缺口补齐 ——
-   要么补线名几何，要么给缺口接一段走廊内的局部寻路；`railgraph.py` 的全量 A\* 因为太慢（6~11 秒）不适合网页端。
+1. **补齐真实走向的缺口**：`railosm.py` 已接上（见上文「地图上的两种路线」），剩下的是把缺口填掉 ——
+   补对应线名的几何是首选（往 `geoms.json.gz` 里加一条线即可），退回站点直连的里程会越来越少。
 2. **正晚点**：如能稳定拿到 12306 正晚点数据，位置可按实际晚点分钟偏移。
 3. **批量预热**：用 `collect_routes.py` 的产出直接导入，网页端即可离线全量查询（不依赖网络）。
 4. 打包成 exe（PyInstaller），双击即用，不要求装 Python。

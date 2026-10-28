@@ -165,7 +165,6 @@ railcn/
     ├─ curate.py              数据校对：全量扫描标出问题车次，人工补经由 / 里程 / 坐标
     ├─ railosm.py             拼「OSM 真实走向」折线（走廊投影 + 区间覆盖 + 缺口报账）
     ├─ railgeom.py            线路几何的按名索引（data/crtrain/geoms.json.gz）
-    ├─ railgraph.py           （实验）OSM 铁路几何 A* 路由
     ├─ data/                  stations.json、station_coords.json（rail.db 运行时生成）
     ├─ tools/                 坐标抓取、Excel 导入等一次性脚本
     └─ static/                index.html / style.css / app.js
@@ -181,11 +180,10 @@ railcn/
 |---|---|---|
 | `webapp/data/rail.db` | 数十 MB | 运行时自动创建；或 `python webapp/tools/import_data.py` 灌入已有 Excel |
 | `webapp/data/exports/` | — | 在「历史数据」页导出 |
-| `webapp/data/railways.geojson` | 326 MB | `python webapp/tools/fetch_geojson.py`（只有实验性的 A\* 路由用得上） |
-| `webapp/data/rail_graph.pkl` | 57 MB | 首次运行 `railgraph.py` 时生成 |
+| `webapp/data/railways.geojson` | 326 MB | `python webapp/tools/fetch_geojson.py`（只在想用 OSM 原始数据重建车站坐标时才需要） |
 | `rail.db` 里的线路资料库 | — | `python scripts/fetch_huirui.py && python scripts/import_huirui.py --apply --add-lines 0.8` |
 
-所以刚 clone 下来时**车次详情、站站查询、批量下载、历史数据、地图上的两种路线都能直接用**（`rail.db` 会自己建，线路几何 `data/crtrain/geoms.json.gz` 已随仓库提供），只有实验性的全量路网 A\* 需要下载那 326 MB 的 geojson。
+所以刚 clone 下来时**车次详情、站站查询、批量下载、历史数据、地图上的两种路线都能直接用**（`rail.db` 会自己建，线路几何 `data/crtrain/geoms.json.gz` 已随仓库提供）。本项目只用「线路 + 车站」两类数据，不需要另外下载任何全量地理数据。
 
 ## 几个实现上的坑（值得一看）
 

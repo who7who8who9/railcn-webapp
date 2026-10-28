@@ -15,7 +15,7 @@ Copyright 2026 The railcn Authors
 
   在此之上新增/改写的内容：
     webapp/         本地网页服务与前端（server.py / railcore.py / cnrail.py /
-                    collector.py / railgraph.py / static/*）
+                    collector.py / railosm.py / static/*）
     tools/          cnrail_data_v2.xlsx → JSON 的转换与坐标反解
     collect_*.py    批量采集脚本
 

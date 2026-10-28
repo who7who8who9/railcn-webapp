@@ -371,6 +371,30 @@ python scripts/fill_missing_stations.py --apply         # 写库（--report docs
   之后在车站详情里用「补坐标」框一行行补
 - 补进来的站在详情里带「线路补全」标记，站名联想（`/api/stations`）也能搜到
 
+### 12306 站表里有、线路库档案里没有的车站
+
+`唐海南` / `曹妃甸港` / `南堡北` 这类站（唐曹线、曹妃甸港线上的站）就落在这个夹缝里：
+12306 站表里有电报码（IEP / PGP / TLP）、经停缓存里也有它们（C248、C133 …），
+但它们所属的线**在源数据里没有站序**（辉睿的唐曹线 `stops` 是空的），因此收不进线路库，
+`cnrail` 也就没有档案 —— 以前的表现是「联想下拉能搜到、点进去却说『车站库里没有』」。
+
+现在 `railcore.station_detail()` 在档案查不到时走 `_station_detail_loose()` 兜底：
+
+| 字段 | 来源 |
+|---|---|
+| 站名 / 电报码 / 城市 / 地址 | 12306 站表（`stations.json` + `data/crtrain/data_stations.json`） |
+| 坐标 | `station_coords.json` / 人工补录（跟档案站一样可以直接在详情里改） |
+| 经停的车次 | `routes` 里最新一天的路由缓存，按 `"station_name": "站名"` 精确匹配（约 0.2 秒） |
+
+详情头带「仅 12306 站表」标记，并注明「线路库里没有这个站的档案」；因为取不到「连接线路」，
+改列当天经停的车次（点车次号直接跳车次详情）。站名联想同时改成**带去「站」字也能搜**
+（`唐海南站` → `唐海南`），并把「唐山」和「唐山站」这类同一站的两种写法并成一条，
+显示优先用 12306 的写法（不带「站」）。
+
+![车站兜底档案](../docs/station-loose.png)
+
+<sub>查「唐海南站」：档案里没有这个站，照样给出电报码 IEP、坐标、地址，以及当天经停的 5 趟 C 字头列车（点车次号可直接看这趟车）。</sub>
+
 ### 线路真实走向（OSM · CRTrainRoute）
 
 线路库里只有「站序 + 里程」，没有轨道走向，地图上一直是站点直连。接入
@@ -512,7 +536,7 @@ python scripts\import_crtrain.py     :: 归集成 data\crtrain\lines.json + geom
 | `GET /api/route/osm` | `code`、`date` | 同一趟车的「OSM 真实走向」折线（只读本地库）：`path[]` 带 `km`，另返 `total`/`covered`/`gapKm`/`cover`/`gaps[]`/`fill`/`lines[]`；拼不出来时 `ok=false` + `error` |
 | `GET /api/tickets` | `from`、`to`、`date` | 余票 |
 | `GET /api/transfer` | `from`、`to`、`date`、`middle` | 中转换乘 |
-| `GET /api/station` | `q` | 车站档案（路局 / 电报码 / 服务 / 连接线路 / 始发终到车次量） |
+| `GET /api/station` | `q` | 车站档案（路局 / 电报码 / 服务 / 连接线路 / 始发终到车次量）；档案里没有但 12306 站表有的站，返回最小档案（`archive=false` + 当天经停车次 `trainsVia`） |
 | `GET /api/lines` | `q`、`limit` | 线路名检索 |
 | `GET /api/custom` | — | 用户新增的线路与车站清单 |
 | `GET /api/stations/names` | — | 全部站名（7579 条，给新增线路时的站名补全） |

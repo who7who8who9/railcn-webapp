@@ -159,6 +159,13 @@ main{flex:1;display:flex;min-height:0}
 .st-coord-msg{font-size:11px;color:#0f7a45}
 .dhead .l3.st-note{color:#8b95a8;font-size:11px}
 .dhead .l3.st-addr{color:#6d7c93;font-size:11px}
+/* 没有线路档案的站：改列当天经停的车次 */
+.st-via{margin-top:12px;padding-top:10px;border-top:1px dashed var(--line)}
+.st-via-h{font-size:11.5px;color:#5a6b82;margin-bottom:7px}
+.st-via-h em{font-style:normal;color:#93a0b4;margin-left:6px}
+.st-via-chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip.code-chip{font-variant-numeric:tabular-nums;letter-spacing:.2px}
+.dhead .tag.warn{background:#fff2e6;color:#b45309}
 .chip{font:inherit;font-size:11.5px;padding:3px 9px;border-radius:999px;cursor:pointer;
   border:1px solid #d7e0ec;background:#f4f8fd;color:#2f5d99;transition:.15s}
 .chip:hover{background:#e4eefb;border-color:#9dbde3}

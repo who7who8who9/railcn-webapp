@@ -1884,12 +1884,25 @@ async function showStation(q) {
     if (!d.found) { box.innerHTML = `<div class="empty">车站库里没有「${q}」</div>`; return; }
     const chips = (d.lines || []).map(l => `<button class="chip" data-line="${l}">${l}</button>`).join('');
     const svc = (d.services || []).map(s => `<span class="chip flat">${s}</span>`).join('');
+    /* 档案里没有的站（货运支线 / 疏港线上的站）：没有「连接线路」，但能列出当天经停的车次 */
+    const viaCodes = d.trainsVia || [];
+    const viaHtml = d.archive === false
+      ? `<div class="st-via">
+           <div class="st-via-h">经停本站的车次
+             <em>${viaCodes.length
+               ? `${esc(d.viaDate || '')} 当天 ${viaCodes.length} 趟，点击查看`
+               : '本地库里还没有经停本站的车次缓存'}</em></div>
+           <div class="st-via-chips">${viaCodes.slice(0, 40).map(c =>
+             `<button class="chip code-chip" data-code="${esc(c)}">${esc(c)}</button>`).join('')}</div>
+         </div>`
+      : '';
     box.innerHTML = '';
     det.innerHTML = `
       <div class="dhead">
         <div class="l1"><span class="code">${d.name}</span>
           ${d.tele ? `<span class="tag">电报码 ${d.tele}</span>` : ''}
           ${d.type ? `<span class="tag">${d.type}</span>` : ''}
+          ${d.archive === false ? '<span class="tag warn" title="线路库还没收录这个站，资料来自 12306 站表">仅 12306 站表</span>' : ''}
           ${d.custom ? `<span class="tag manual">${d.source === 'line-fill' ? '线路补全' : '自建'}</span>`
             + '<button class="btn sm ghost ln-edit" id="stDel">删除</button>' : ''}</div>
         <div class="l2">${[d.province, d.city, d.district].filter(Boolean).join(' / ') || d.loc || ''}</div>
@@ -1909,8 +1922,8 @@ async function showStation(q) {
         ${stNote(d) ? `<div class="l3 st-note">${esc(stNote(d))}</div>` : ''}
         ${d.addr ? `<div class="l3 st-addr" title="来自 12306 站资料">${esc(d.addr)}</div>` : ''}
         ${svc ? `<div class="l3">${svc}</div>` : ''}
-        <div class="l3" style="margin-top:6px">连接线路 ${(d.lines || []).length} 条（点击可在地图查看）</div>
-        <div class="l3 chips">${chips || '<span style="color:#9aa6ba">无</span>'}</div>
+        ${d.archive === false ? '' : `<div class="l3" style="margin-top:6px">连接线路 ${(d.lines || []).length} 条（点击可在地图查看）</div>
+        <div class="l3 chips">${chips || '<span style="color:#9aa6ba">无</span>'}</div>`}
       </div>
       <ul class="stops">
         <li class="stop"><div class="t"></div><div class="rail"><span class="dot"></span></div>
@@ -1919,7 +1932,8 @@ async function showStation(q) {
         <li class="stop"><div class="t"></div><div class="rail"><span class="dot"></span></div>
           <div class="name"><span class="n">本站终到车次</span><span class="s">本地库 ${d.trainsTo} 条</span></div>
           <div class="km"></div></li>
-      </ul>`;
+      </ul>
+      ${viaHtml}`;
     det.classList.add('show');
     bindStationCoord(d);
     const stDel = $('#stDel');
@@ -1941,6 +1955,8 @@ async function showStation(q) {
     }
     $$('#netDetail .chip[data-line]').forEach(b =>
       b.addEventListener('click', () => showLine(b.dataset.line)));
+    $$('#netDetail .chip[data-code]').forEach(b =>
+      b.addEventListener('click', () => { switchTab('train'); openTrain(b.dataset.code); }));
     if (d.lat != null) {
       MapView.setRoute({ code: d.name, stops: [{ i: 1, name: d.name, lat: d.lat, lon: d.lon }] });
       MapView.fit();
@@ -3127,7 +3143,8 @@ function bindSuggest(inputSel, sugSel) {
         const d = await api('/api/stations', { q, limit: 10 });
         if (!d.items.length) { box.classList.add('hidden'); return; }
         box.innerHTML = d.items.map(it =>
-          `<div class="si${it.hasCoord ? '' : ' nocoord'}" data-v="${it.name}">
+          `<div class="si${it.hasCoord ? '' : ' nocoord'}" data-v="${it.name}"
+             title="${it.archive === false ? '线路库还没收录这个站，资料来自 12306 站表' : ''}">
              <span>${it.name}</span><span class="c">${it.city || ''}</span></div>`).join('');
         box.classList.remove('hidden');
         $$('.si', box).forEach(si => si.addEventListener('click', () => {

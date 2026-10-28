@@ -200,11 +200,17 @@ def init_db() -> None:
 # ---------------------------------------------------------------------------
 
 def _norm(name: str) -> str:
-    """站名归一化：去空白、去末尾'站'"""
+    """站名归一化：只去空白（末尾的「站」用 _bare 去，别在这里动，坐标表是按带「站」的键存的）"""
     if not name:
         return ""
     s = re.sub(r"\s+", "", str(name))
     return s
+
+
+def _bare(name: str) -> str:
+    """比对用的裸站名：唐海南站 → 唐海南（12306 站表不带「站」，线路档案多半带）"""
+    n = _norm(name)
+    return n[:-1] if n.endswith("站") and len(n) > 1 else n
 
 
 # ---------------------------------------------------------------------------
@@ -1631,50 +1637,64 @@ class StationRegistry:
         return _norm(name)
 
     def suggest(self, q: str, limit: int = 12) -> List[dict]:
-        """站名联想：12306 站表 + 车站档案（含自建 / 线路补全的车站）"""
+        """站名联想：12306 站表 + 车站档案（含自建 / 线路补全的车站）
+
+        两边叫法不统一 —— 12306 站表里是「唐海南」，线路档案里多半是「唐山站」——
+        所以查询词先去掉末尾的「站」，候选也按去掉「站」的名字归并，
+        同一个站只出现一次，显示优先用 12306 的写法。
+        """
         self.ensure()
         q = _norm(q)
         if not q:
             return []
-        out = []
-        seen = set()
+        bare_q = _bare(q)
         low = q.lower()
-        for name, code in self.by_name.items():
-            st = self.by_code.get(code, {})
-            hit = 0
-            if name == q:
+        cand: Dict[str, dict] = {}
+
+        def put(name: str, city: str, archived: bool,
+                pinyin: str = "", short: str = "") -> None:
+            nm = _norm(name)
+            b = _bare(nm)
+            if not b:
+                return
+            if b == bare_q:
                 hit = 0
-            elif name.startswith(q):
+            elif b.startswith(bare_q) or nm.startswith(q):
                 hit = 1
-            elif q in name:
+            elif bare_q in b:
                 hit = 2
-            elif st.get("station_pinyin", "").startswith(low) or st.get("station_short", "").startswith(low):
+            elif pinyin.startswith(low) or short.startswith(low):
                 hit = 3
             else:
-                continue
-            seen.add(name)
-            out.append((hit, len(name), name, st.get("city") or "", bool(self.coords.get(name))))
+                return
+            has = bool(self.coords.get(b) or self.coords.get(nm) or self.coords.get(b + "站"))
+            cur = cand.get(b)
+            if cur is None:
+                cand[b] = {"hit": hit, "name": nm, "city": city,
+                           "hasCoord": has, "archive": archived}
+                return
+            cur["hit"] = min(cur["hit"], hit)
+            cur["archive"] = cur["archive"] or archived
+            cur["hasCoord"] = cur["hasCoord"] or has
+            if not cur["city"] and city:
+                cur["city"] = city
+            if len(nm) < len(cur["name"]):          # 「唐山站」和「唐山」并成「唐山」
+                cur["name"] = nm
+
+        for name, code in self.by_name.items():
+            st = self.by_code.get(code, {})
+            put(name, st.get("city") or "", False,
+                st.get("station_pinyin") or "", st.get("station_short") or "")
 
         # 12306 站表里没有、但线路 / 档案里有的站（补全进来的那批就在这里）
         for key, st in (cnrail._STATIONS or {}).items():
-            nm = _norm(st.get("name") or key)
-            if not nm or nm in seen:
-                continue
-            if nm == q:
-                hit = 0
-            elif nm.startswith(q):
-                hit = 1
-            elif q in nm:
-                hit = 2
-            else:
-                continue
-            seen.add(nm)
-            out.append((hit, len(nm), nm, st.get("city") or "", bool(self.coords.get(nm))))
+            put(st.get("name") or key, st.get("city") or "", True)
 
-        out.sort(key=lambda x: x[:3])
+        out = sorted(cand.values(), key=lambda x: (x["hit"], len(x["name"]), x["name"]))
         return [
-            {"name": n, "city": city, "hasCoord": has}
-            for _, _, n, city, has in out[:limit]
+            {"name": x["name"], "city": x["city"],
+             "hasCoord": x["hasCoord"], "archive": x["archive"]}
+            for x in out[:limit]
         ]
 
 
@@ -2350,7 +2370,7 @@ def station_detail(q: str) -> dict:
     stations.ensure()
     st = cnrail.station(q)
     if not st:
-        return {"found": False, "query": q}
+        return _station_detail_loose(q)
     name = st.get("key") or q
     with db() as conn:
         as_start = conn.execute(
@@ -2379,6 +2399,54 @@ def station_detail(q: str) -> dict:
     if extra.get("addr"):
         out["addr"] = extra["addr"]
     return out
+
+
+def _station_detail_loose(q: str) -> dict:
+    """档案里没有的站：用 12306 站表 + OSM 站表兜一个最小档案
+
+    唐海南 / 曹妃甸港 就是这种情况：12306 有电报码（IEP / PGP）、经停缓存里也有它
+    （C248、C133 …），但它所属的唐曹线 / 曹妃甸港线还没收进线路库（源数据里站序是空的），
+    cnrail 自然没有档案 —— 联想下拉能搜到、点进去却说「没有」，这就很不合理。
+    这里把能拿到的都摆出来：站名、电报码、城市、地址、坐标、当天经停的车次。
+    """
+    name = stations.canonical(q)
+    code = stations.telecode(name)
+    raw = (stations.by_code.get(code) or {}) if code else {}
+    extra = railgeom.station_extra(name) or {}
+    if not raw and not extra:
+        return {"found": False, "query": q}
+    nm = _norm(raw.get("station_name") or extra.get("name") or name)
+    info = stations.coord_info(nm)
+    lat, lon = info.get("lat"), info.get("lon")
+    if lat is None and extra.get("lat") is not None:
+        lat, lon = extra.get("lat"), extra.get("lon")
+    with db() as conn:
+        as_start = conn.execute(
+            "SELECT COUNT(*) c FROM trains WHERE start_sta = ?", (nm,)).fetchone()["c"]
+        as_end = conn.execute(
+            "SELECT COUNT(*) c FROM trains WHERE end_sta = ?", (nm,)).fetchone()["c"]
+        # 哪些车经停这里：只扫最新一天的路由缓存（约 1 万行，0.2 秒），够说明问题
+        day = conn.execute("SELECT MAX(date) d FROM routes").fetchone()["d"]
+        rows = conn.execute(
+            "SELECT DISTINCT code FROM routes WHERE date = ? AND raw LIKE ? ORDER BY code",
+            (day, f'%"station_name": "{nm}"%')).fetchall()
+    return {
+        "found": True,
+        "name": nm, "key": nm,
+        "city": raw.get("city") or extra.get("city") or None,
+        "tele": raw.get("station_code") or extra.get("code") or None,
+        "addr": extra.get("addr") or None,
+        "lat": lat, "lon": lon,
+        "coordSource": info.get("source") or ("base" if lat is not None else "none"),
+        "lines": cnrail.lines_of(nm),
+        "services": [], "custom": False, "source": "12306", "archive": False,
+        "note": "线路库里没有这个站的档案（它所属的线路还没收进线路库），"
+                "站名、电报码、坐标来自 12306 站表",
+        "trainsFrom": as_start,
+        "trainsTo": as_end,
+        "viaDate": day,
+        "trainsVia": [r["code"] for r in rows],
+    }
 
 
 init_db()

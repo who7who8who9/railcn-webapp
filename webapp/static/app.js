@@ -791,7 +791,10 @@ function renderDetail(route) {
     ? `<div class="l3 chips">经由 ${segs.map(s => {
         const span = [s.from, s.to].filter(Boolean).join('–');
         return `<button class="chip" data-line="${esc(s.line)}" title="${esc(span)}">${esc(s.line)}</button>`;
-      }).join('')}${route.viaSource === 'manual' ? '<span class="tag manual">人工校正</span>' : ''}</div>`
+      }).join('')}${route.viaSource === 'manual' ? '<span class="tag manual">人工校正</span>'
+        : (route.viaSource === 'class'
+          ? `<span class="tag cls" title="同起讫站、同车种的车次已有校正，这趟车直接沿用${route.viaClass && route.viaClass.code ? '（学自 ' + esc(route.viaClass.code) + '）' : ''}">同类沿用</span>`
+          : '')}</div>`
     : '';
   const gapsHtml = gaps.length
     ? `<div class="l3 gap-line">⚠ 未认出线路：<b>${gaps.map(g => esc(`${g.from}→${g.to}`)).join('、')}</b>
@@ -4093,15 +4096,18 @@ function cuRenderList() {
     }).join('');
     const manual = (it.viaSource === 'manual' || it.kmMode === 'manual')
       ? '<span class="cu-flag manual">已校正</span>' : '';
+    const clsFlag = it.viaSource === 'class'
+      ? '<span class="cu-flag cls" title="经由沿用了同起讫站、同车种的人工校正">同类沿用</span>' : '';
     const via = it.via ? esc(it.via) : '<span class="warn">经由未识别</span>';
-    const cov = it.viaSource === 'manual' ? '' : ` · ${Math.round(it.viaCoverage || 0)}%`;
+    const cov = (it.viaSource === 'manual' || it.viaSource === 'class')
+      ? '' : ` · ${Math.round(it.viaCoverage || 0)}%`;
     const gap = it.gaps ? `<span class="warn"> · 缺 ${it.gaps} 段</span>` : '';
     const miss = it.missing ? ` · 缺 ${it.missing} 站坐标` : '';
     return `<div class="cu-row${it.code === CU.sel ? ' active' : ''}" data-code="${esc(it.code)}">
       <div class="r1"><span class="code">${esc(it.code)}</span>
         <span class="od">${esc(it.from || '—')} → ${esc(it.to || '—')}</span></div>
       <div class="r2">${via}${cov}${gap} · ${it.totalKm} km${miss}</div>
-      <div class="flags">${manual}${flags}</div>
+      <div class="flags">${manual}${clsFlag}${flags}</div>
     </div>`;
   }).join('');
 
@@ -4126,9 +4132,16 @@ async function cuOpen(code) {
       return;
     }
     if (!CU.lines) cuLoadLineNames();
-    CU.via = d.override
-      ? (d.override.via || []).map(x => ({ line: x.line || '', from: x.from || '', to: x.to || '', src: 'manual' }))
-      : cuRowsFromAuto(d.auto || {});
+    const ovVia = (d.override && d.override.via) || [];
+    const eff = d.effective || {};
+    if (ovVia.length) {
+      CU.via = ovVia.map(x => ({ line: x.line || '', from: x.from || '', to: x.to || '', src: 'manual' }));
+    } else if (eff.viaSource === 'class' && (eff.viaSegs || []).length) {
+      // 这趟车的经由是「沿用同类车次」来的：照原样摆出来，标「同类」，保存时不写入
+      CU.via = eff.viaSegs.map(x => ({ line: x.line || '', from: x.from || '', to: x.to || '', src: 'class' }));
+    } else {
+      CU.via = cuRowsFromAuto(d.auto || {});
+    }
     CU.segKm = {};
     const ovSeg = (d.override && d.override.segKm) || {};
     Object.keys(ovSeg).forEach(k => {
@@ -4185,6 +4198,13 @@ function cuRowsFromAuto(auto) {
   return items.map(x => ({ line: x.line, from: x.from, to: x.to, src: 'auto' }));
 }
 
+/** 同类车次沿用的经由 → 编辑行；同样是虚拟经由，保存时不写入 */
+function cuRowsFromClass(segs) {
+  return (segs || []).map(s => ({
+    line: s.line || '', from: s.from || '', to: s.to || '', src: 'class',
+  }));
+}
+
 function cuRenderEditor() {
   const d = CU.detail;
   const a = d.auto || {};
@@ -4196,6 +4216,11 @@ function cuRenderEditor() {
     ? '整趟都没认出线路'
     : `覆盖 ${a.viaCoverage}%（${(a.viaUnknown || []).length ? (a.viaUnknown || []).length + ' 段未识别' : '全部识别'}）`;
   const stops = d.stops || [];
+  const eff = d.effective || {};
+  const clsVia = d.classVia || null;
+  const clsApplied = eff.viaSource === 'class';
+  const clsOd = clsVia ? `${clsVia.from}→${clsVia.to}` : '';
+  const clsSrc = (eff.viaClass && eff.viaClass.code) || (clsVia && clsVia.srcCode) || '';
   const coord = d.coordSummary || {
     total: stops.length,
     missing: stops.filter(s => s.lat == null).length,
@@ -4209,6 +4234,9 @@ function cuRenderEditor() {
       <span class="ce-od">${esc(d.from || '—')} → ${esc(d.to || '—')}</span>
       <span class="ce-badge">${esc(d.date || '')}</span>
       ${isManual ? '<span class="ce-badge manual">已人工校正</span>' : ''}
+      ${clsApplied
+        ? `<span class="ce-badge class" title="同起讫站、同车种已有校正，这趟车直接沿用，不用再填">沿用同类${clsSrc ? ' · 学自 ' + esc(clsSrc) : ''}</span>`
+        : (clsVia ? `<span class="ce-badge class-dim" title="同起讫站、同车种已有校正（${esc(clsOd)}${clsSrc ? ' · 学自 ' + esc(clsSrc) : ''}），但没套到这趟车上：自动推断已整趟认全且线路对不上，可能真的不是同一条径路">同类有校正未套用</span>` : '')}
       ${(a.viaUnknown || []).length ? '<span class="ce-badge warn">经由有缺口</span>' : ''}
       ${d.variants > 1 ? `<span class="ce-badge warn" title="这个车次号在库里有 ${d.variants} 套不同走法（调图/缩线/改号）。校正按车次号保存，会同时作用到其它日期的运行">该号有 ${d.variants} 套走法</span>` : ''}
       <span class="ce-spacer"></span>
@@ -4218,12 +4246,15 @@ function cuRenderEditor() {
     <div class="ce-actions">
       <button id="ceSave" class="btn primary">保存校正</button>
       <button id="ceReset" class="btn ghost">撤销校正</button>
+      ${d.classCount > 0 ? `<label class="cu-mini ce-prop" title="同起讫站、同车种的车次，人工修正过一次后其余车次自动沿用；不勾选就只改这一趟">
+        <input type="checkbox" id="ceProp" checked> 同类 ${d.classCount} 趟一并沿用</label>` : ''}
       <span id="ceMsg" class="ce-msg"></span>
     </div>
 
     <div class="ce-card">
       <h4>自动推断的经由 <span class="hint">（虚拟经由，仅供参考，不会保存）</span>
         <span class="hint">${covText} · 总里程 ${a.totalKm} km（${kmModeCn}）· 线路里程配对 ${esc(a.kmMatched)}</span>
+        ${clsApplied ? `<span class="hint cls">这趟车实际用的是同类校正${clsSrc ? '（学自 ' + esc(clsSrc) + '）' : ''}，见下方手工填写</span>` : ''}
       </h4>
       <div class="via-chain">${cuChainHtml(a.viaSegs, a.viaUnknown)}</div>
     </div>
@@ -4320,11 +4351,11 @@ function cuRenderEditor() {
     cuMsg('', '已填入自动推断结果 —— 只作参考；改过或点了「自动」标签定为人工的段才会保存');
   });
   $('#ceAllManual').addEventListener('click', () => {
-    const n = CU.via.filter(r => r.src === 'auto').length;
-    if (!n) { cuMsg('', '当前列表里没有「自动」的段'); return; }
-    CU.via.forEach(r => { if (r.src === 'auto') r.src = 'manual'; });
+    const n = CU.via.filter(r => isVirtual(r)).length;
+    if (!n) { cuMsg('', '当前列表里没有「自动 / 同类」的段'); return; }
+    CU.via.forEach(r => { if (isVirtual(r)) r.src = 'manual'; });
     cuRenderViaRows();
-    cuMsg('', `${n} 段自动推断已全部定为人工，保存后写入正式经由`);
+    cuMsg('', `${n} 段推断结果已全部定为人工，保存后写入正式经由`);
   });
   $('#ceKm').addEventListener('input', () => {
     cuSegSummary();
@@ -4895,11 +4926,15 @@ function cuRenderViaRows() {
     return;
   }
   box.innerHTML = CU.via.map((r, i) => {
-    const auto = r.src === 'auto';
+    const virt = r.src === 'auto' || r.src === 'class';
+    const isCls = r.src === 'class';
+    const tagTitle = isCls
+      ? '沿用同类车次（同起讫站 · 同车种）的人工经由；保存时不会写入，点一下把它定为这趟车的人工段'
+      : '自动推断的段（虚拟经由），保存时不会写入正式经由；点一下把它定为人工';
     return `
-    <div class="ve-row${auto ? ' is-auto' : ' is-manual'}" data-i="${i}">
-      ${auto
-        ? `<button type="button" class="ve-src auto" title="自动推断的段（虚拟经由），保存时不会写入正式经由；点一下把它定为人工">自动</button>`
+    <div class="ve-row${virt ? ' is-auto' : ' is-manual'}${isCls ? ' is-class' : ''}" data-i="${i}">
+      ${virt
+        ? `<button type="button" class="ve-src ${isCls ? 'class' : 'auto'}" title="${tagTitle}">${isCls ? '同类' : '自动'}</button>`
         : `<span class="ve-src manual" title="人工确认的段，保存时写入正式经由">人工</span>`}
       <div class="combo" data-cbkind="line">
         <input class="line" value="${esc(r.line)}" placeholder="点这里选线路，或直接输入"
@@ -4931,7 +4966,7 @@ function cuRenderViaRows() {
       CU.via.splice(i, 1);
       cuRenderViaRows();
     });
-    const tag = row.querySelector('.ve-src.auto');
+    const tag = row.querySelector('.ve-src.auto, .ve-src.class');
     if (tag) tag.addEventListener('click', () => cuMarkManual(i));
     cuSyncRowCands(i);                        // 异步补上这一行的车站候选
   });
@@ -4939,31 +4974,40 @@ function cuRenderViaRows() {
   cuCheck();
 }
 
-/** 把某一段标成「人工」：自动推断的段被人工确认后才会写进正式经由 */
+/** 把某一段标成「人工」：自动推断 / 同类沿用的段被人工确认后才会写进正式经由 */
 function cuMarkManual(i, quiet) {
   const r = CU.via[i];
-  if (!r || r.src !== 'auto') return;
+  if (!r || (r.src !== 'auto' && r.src !== 'class')) return;
+  const wasClass = r.src === 'class';
   r.src = 'manual';
   cuRenderViaRows();
-  if (!quiet) cuMsg('', `第 ${i + 1} 段已定为人工，保存时会写入正式经由`);
+  if (!quiet) {
+    cuMsg('', wasClass
+      ? `第 ${i + 1} 段按同类校正定为人工，保存后就是这趟车自己的经由`
+      : `第 ${i + 1} 段已定为人工，保存时会写入正式经由`);
+  }
 }
 
-/** 只换某一行左边的「人工 / 自动」标签，不重建整行（输入时不丢焦点） */
+/** 只换某一行左边的「人工 / 自动 / 同类」标签，不重建整行（输入时不丢焦点） */
 function cuRefreshRowTag(i) {
   const row = $$('#ceViaRows .ve-row').find(el => Number(el.dataset.i) === i);
   const r = CU.via[i];
   if (!row || !r) return;
   const old = row.querySelector('.ve-src');
   if (!old) return;
-  const auto = r.src === 'auto';
-  row.classList.toggle('is-auto', auto);
-  row.classList.toggle('is-manual', !auto);
-  const el = document.createElement(auto ? 'button' : 'span');
-  el.className = 've-src ' + (auto ? 'auto' : 'manual');
-  el.textContent = auto ? '自动' : '人工';
-  if (auto) {
+  const virt = r.src === 'auto' || r.src === 'class';
+  const isCls = r.src === 'class';
+  row.classList.toggle('is-auto', virt);
+  row.classList.toggle('is-manual', !virt);
+  row.classList.toggle('is-class', isCls);
+  const el = document.createElement(virt ? 'button' : 'span');
+  el.className = 've-src ' + (isCls ? 'class' : (virt ? 'auto' : 'manual'));
+  el.textContent = isCls ? '同类' : (virt ? '自动' : '人工');
+  if (virt) {
     el.type = 'button';
-    el.title = '自动推断的段（虚拟经由），保存时不会写入正式经由；点一下把它定为人工';
+    el.title = isCls
+      ? '沿用同类车次（同起讫站 · 同车种）的人工经由；保存时不会写入，点一下把它定为这趟车的人工段'
+      : '自动推断的段（虚拟经由），保存时不会写入正式经由；点一下把它定为人工';
     el.addEventListener('click', () => cuMarkManual(i));
   } else {
     el.title = '人工确认的段，保存时写入正式经由';
@@ -5212,6 +5256,11 @@ function cuRenderStops() {
   }).join('');
 }
 
+/** 虚拟经由：自动推断（src=auto）或沿用同类车次（src=class），保存时都不写入 */
+function isVirtual(r) {
+  return !!r && (r.src === 'auto' || r.src === 'class');
+}
+
 function cuCheck() {
   const d = CU.detail;
   const el = $('#ceViaCheck');
@@ -5220,11 +5269,11 @@ function cuCheck() {
   const known = new Set(d.stations || []);
   const bad = [];
   const note = [];
-  const nAuto = rows.filter(r => r.src === 'auto').length;
-  const nManual = rows.length - nAuto;
+  const nVirt = rows.filter(r => isVirtual(r)).length;
+  const nManual = rows.length - nVirt;
 
   rows.forEach((r, i) => {
-    if (r.src === 'auto') return;                 // 自动段只作参考，不参与校验
+    if (isVirtual(r)) return;                     // 自动 / 同类段只作参考，不参与校验
     if (!(r.line || '').trim()) bad.push(`第 ${i + 1} 段没填线路名`);
     const ls = CUSTA.cache.get((r.line || '').trim());
     const lsSet = ls && ls.length ? new Set(ls) : null;   // 库里线路的站名（含通过站）
@@ -5239,14 +5288,14 @@ function cuCheck() {
     });
   });
   for (let i = 1; i < rows.length; i++) {
-    if (rows[i].src === 'auto' || rows[i - 1].src === 'auto') continue;
+    if (isVirtual(rows[i]) || isVirtual(rows[i - 1])) continue;
     const prev = (rows[i - 1].to || '').trim();
     const cur = (rows[i].from || '').trim();
     if (prev && cur && prev !== cur) bad.push(`第 ${i} 段到「${prev}」，第 ${i + 1} 段却从「${cur}」起，中间断开`);
   }
-  if (nAuto) note.push(`其中 ${nAuto} 段标「自动」的是推断结果，保存时不会写入正式经由`);
-  if (!nManual && nAuto) note.push('当前没有人工段 —— 改一下或点「自动」标签定为人工，才会保存');
-  const manRows = rows.filter(r => r.src !== 'auto');
+  if (nVirt) note.push(`其中 ${nVirt} 段标「自动 / 同类」的是推断结果，保存时不会写入正式经由`);
+  if (!nManual && nVirt) note.push('当前没有人工段 —— 改一下或点标签定为人工，才会保存');
+  const manRows = rows.filter(r => !isVirtual(r));
   const first = (manRows[0] || {}).from || '';
   const last = (manRows[manRows.length - 1] || {}).to || '';
   if (first && d.from && first.trim() !== d.from) note.push(`首段起点「${first}」≠ 始发站「${d.from}」`);
@@ -5274,7 +5323,7 @@ function cuCheck() {
   $$('#ceViaRows .ve-row').forEach((row, i) => {
     const r = rows[i];
     if (!r) return;
-    row.classList.toggle('invalid', r.src !== 'auto' && !(r.line || '').trim());
+    row.classList.toggle('invalid', !isVirtual(r) && !(r.line || '').trim());
   });
 
   el.innerHTML = bad.length
@@ -5295,13 +5344,15 @@ function cuMsg(cls, text) {
 async function cuSave() {
   const d = CU.detail;
   if (!d) return;
-  // 只保存人工段：自动推断出来的「虚拟经由」一律不写入正式经由
-  const manualRows = CU.via.filter(r => r.src !== 'auto' && (r.line || '').trim());
-  const autoCount = CU.via.filter(r => r.src === 'auto').length;
+  // 只保存人工段：自动推断 / 同类沿用的「虚拟经由」一律不写入正式经由
+  const manualRows = CU.via.filter(r => !isVirtual(r) && (r.line || '').trim());
+  const virtCount = CU.via.filter(r => isVirtual(r)).length;
   const via = manualRows
     .map(r => ({ line: (r.line || '').trim(), from: (r.from || '').trim(), to: (r.to || '').trim() }));
   const kmRaw = ($('#ceKm').value || '').trim();
   const note = ($('#ceNote').value || '').trim();
+  const propEl = $('#ceProp');
+  const propagate = propEl ? propEl.checked : true;
   const segKm = {};
   Object.keys(CU.segKm || {}).forEach(k => {
     const v = Number(CU.segKm[k]);
@@ -5310,12 +5361,21 @@ async function cuSave() {
   cuMsg('', '保存中…');
   try {
     const r = await postJSON('/api/override', {
-      code: d.code, via, totalKm: kmRaw ? Number(kmRaw) : null, note, segKm,
+      code: d.code, date: d.date, via, totalKm: kmRaw ? Number(kmRaw) : null,
+      note, segKm, propagate,
     });
     await cuOpen(d.code);
     const parts = [via.length ? `${via.length} 段人工经由已存为正式经由` : '没有人工段，未写入经由'];
-    if (autoCount) parts.push(`${autoCount} 段自动推断仅作参考，未保存`);
-    cuMsg('ok', '已保存 · ' + parts.join('；'));
+    if (virtCount) parts.push(`${virtCount} 段自动/同类推断仅作参考，未保存`);
+    const cls = (r && r.viaClass) || {};
+    if (cls.ok) {
+      const n = (r && r.classRefreshed) || 0;
+      parts.push(`同类（${cls.from}→${cls.to}${cls.category ? ' · ' + cls.category + ' 字头' : ''}）`
+        + (n ? `已一并沿用，${n} 趟车已刷新` : '已记下，其它车次下次打开即沿用'));
+    } else if (cls.reason && via.length) {
+      parts.push('未设同类沿用：' + cls.reason);
+    }
+    cuMsg(cls.ok || !via.length ? 'ok' : '', '已保存 · ' + parts.join('；'));
     const outside = (r && r.outsideLines) || [];
     if (outside.length) {
       cuMsg('bad', `已保存，但线路库里没有「${outside.join('」「')}」，`

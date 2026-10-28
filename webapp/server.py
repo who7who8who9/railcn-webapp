@@ -131,8 +131,20 @@ class Handler(BaseHTTPRequestHandler):
                     payload.get("note") or "",
                     payload.get("segKm") or {},
                 )
+                # 人工经由存好后，记一份「同类」副本：同起讫站 + 同车种的车次自动沿用
+                cls = None
+                if res.get("cleared"):
+                    cls = {"ok": False, "reason": "已撤销，同类副本一并撤掉"}
+                elif res.get("via"):
+                    if payload.get("propagate") is False:
+                        cls = {"ok": False, "reason": "没有勾选「同类沿用」"}
+                    else:
+                        date = payload.get("date") or railcore.latest_date(code)
+                        cls = railcore.learn_via_class(
+                            code, date or "", res["via"], res.get("note") or "")
                 curate.refresh_one(code)
-                return self.json({"ok": True, **res})
+                n = curate.refresh_class(code)
+                return self.json({"ok": True, **res, "viaClass": cls, "classRefreshed": n})
 
             if path == "/api/line/km":
                 res = railcore.save_line_override(

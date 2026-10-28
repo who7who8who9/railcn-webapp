@@ -543,6 +543,7 @@ a{color:var(--accent)}
 .cu-flag.via{background:#fff2e6;color:#b45309}
 .cu-flag.coord{background:#fdecec;color:#b42318}
 .cu-flag.manual{background:#e8f6ee;color:#0f7a45}
+.cu-flag.cls{background:#e8f0fd;color:#1f5fae}
 
 /* ---------- 校对编辑器（占右侧地图区） ---------- */
 .curate-stage{flex:1;min-width:0;background:var(--bg);overflow:auto}
@@ -553,7 +554,11 @@ a{color:var(--accent)}
 .ce-od{font-size:14px;color:#3d4a60}
 .ce-badge{font-size:11px;padding:2px 8px;border-radius:6px;background:#eef2f8;color:#5a6b82}
 .ce-badge.manual{background:#e8f6ee;color:#0f7a45}
+.ce-badge.class{background:#e8f0fd;color:#1f5fae}
+.ce-badge.class-dim{background:#f4f6f9;color:#8794a8}
 .ce-badge.warn{background:#fff2e6;color:#b45309}
+.ce-prop{margin-left:2px;color:#4a6f9c}
+.hint.cls{color:#1f5fae}
 .ce-spacer{flex:1}
 .ce-card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
   padding:14px 16px;margin-bottom:12px;box-shadow:var(--shadow)}
@@ -577,6 +582,10 @@ a{color:var(--accent)}
   padding:0;background:none;color:#7b8798;cursor:default}
 .ve-src.auto{background:#f1f4f9;border-color:#dde4ee;color:#7b8798;cursor:pointer}
 .ve-src.auto:hover{background:#e7eef9;border-color:#c6d5ea;color:#2f6cb0}
+/* 同类沿用：同起讫站 + 同车种的人工经由，虚拟段（保存时不写入） */
+.ve-src.class{background:#eef5ff;border-color:#cfe0f7;color:#2f6cb0;cursor:pointer}
+.ve-src.class:hover{background:#e3eeff;border-color:#b8d2f4}
+.ve-row.is-class input{color:#4a6f9c}
 .ve-src.manual{background:#eaf6ee;border-color:#cfe9d7;color:#2f7a4d}
 .ve-row.is-auto input{color:#717d8c}
 .ve-row input{height:30px;border:1px solid var(--line);border-radius:7px;padding:0 9px;
@@ -651,6 +660,7 @@ a{color:var(--accent)}
 .st-card>summary:hover{color:var(--accent)}
 .st-card .st-list{margin:0 16px 12px;max-height:260px}
 .tag.manual{background:#e8f6ee;color:#0f7a45}
+.tag.cls{background:#e8f0fd;color:#1f5fae}
 .gap-line{color:#a8620a}
 .linkbtn{border:none;background:transparent;color:var(--accent);cursor:pointer;font:inherit;
   font-size:11px;padding:0 2px;text-decoration:underline;text-underline-offset:2px}

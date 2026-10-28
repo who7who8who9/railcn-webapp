@@ -145,6 +145,56 @@ def refresh_one(code: str) -> Optional[dict]:
         return s
 
 
+def _sibling_codes(from_sta: str, to_sta: str, code: str,
+                   exclude_manual: bool = False) -> List[str]:
+    """同起讫站 + 同车种的车次（不含自己）：人工校正经由后它们会自动沿用"""
+    if not from_sta or not to_sta:
+        return []
+    cat = railcore.train_class(code)
+    try:
+        with railcore.db() as conn:
+            rows = conn.execute(
+                "SELECT code FROM curate WHERE from_sta=? AND to_sta=?",
+                (from_sta, to_sta),
+            ).fetchall()
+    except Exception:                                # noqa: BLE001
+        return []
+    out = [r["code"] for r in rows
+           if r["code"] != code and railcore.train_class(r["code"]) == cat]
+    if exclude_manual:
+        keep = []
+        for c in out:
+            ov = railcore.get_override(c) or {}
+            if not ov.get("via"):
+                keep.append(c)
+        out = keep
+    return sorted(out)
+
+
+def refresh_class(code: str) -> int:
+    """人工保存经由后，把同类车次的摘要一起重算 —— 它们读的时候就会自动沿用"""
+    code = (code or "").strip().upper()
+    if not code:
+        return 0
+    try:
+        with railcore.db() as conn:
+            row = conn.execute(
+                "SELECT from_sta, to_sta FROM curate WHERE code=?", (code,)
+            ).fetchone()
+    except Exception:                                # noqa: BLE001
+        return 0
+    if not row or not row["from_sta"] or not row["to_sta"]:
+        return 0
+    n = 0
+    for c in _sibling_codes(row["from_sta"], row["to_sta"], code, exclude_manual=True)[:200]:
+        try:
+            if refresh_one(c):
+                n += 1
+        except Exception:                            # noqa: BLE001
+            continue
+    return n
+
+
 def refresh_station(name: str) -> int:
     """补录或撤销某站坐标后，把清单里涉及该站的车次重算一遍"""
     name = (name or "").strip()
@@ -440,4 +490,23 @@ def detail(code: str) -> dict:
         "missing": sum(1 for s in stop_rows if s["lat"] is None),
         "manual": sum(1 for s in stop_rows if s["coordSource"] == "manual"),
     }
+
+    # ---- 同类沿用：同起讫站 + 同车种的人工经由 ----
+    try:
+        cls = railcore.get_via_class(out.get("from") or "", out.get("to") or "", code)
+    except Exception:                                # noqa: BLE001
+        cls = None
+    out["classVia"] = ({"from": cls["from"], "to": cls["to"],
+                        "category": cls.get("category"), "srcCode": cls.get("srcCode"),
+                        "segs": len(cls.get("via") or [])} if cls else None)
+    out["classCount"] = len(_sibling_codes(out.get("from") or "", out.get("to") or "", code))
+    # 这趟车实际生效的经由（可能来自同类沿用）—— 编辑器拿它做初始值，
+    # 否则面板上写着「未识别」、地图上却已经画出正确走向，看着自相矛盾
+    try:
+        eff = railcore.build_route_payload(code, date, cache_only=True, with_path=False)
+        out["effective"] = {"viaSource": eff.get("viaSource"),
+                            "viaSegs": eff.get("viaSegs") or [],
+                            "viaClass": eff.get("viaClass")}
+    except Exception:                                # noqa: BLE001
+        out["effective"] = {"viaSource": "none", "viaSegs": [], "viaClass": None}
     return out

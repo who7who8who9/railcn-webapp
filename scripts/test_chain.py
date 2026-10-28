@@ -12,6 +12,7 @@ WEBAPP = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, WEBAPP)
 
 import railcore  # noqa: E402
+import routestore  # noqa: E402
 
 TMP = os.path.join(tempfile.gettempdir(), "railcn_chain_test.db")
 for p in (TMP, TMP + "-wal", TMP + "-shm"):
@@ -26,11 +27,9 @@ with sqlite3.connect(TMP) as c:
             code TEXT NOT NULL, train_no TEXT, type TEXT,
             start_sta TEXT, end_sta TEXT, stop_count INTEGER, date TEXT,
             PRIMARY KEY (code, date));
-        CREATE TABLE routes (
-            train_no TEXT NOT NULL, date TEXT NOT NULL, code TEXT, raw TEXT,
-            updated_at REAL, PRIMARY KEY (train_no, date));
         """
     )
+    routestore.ensure_schema(c)      # 经停站表：route_tpl / route_day / routes 视图
 
 import collector  # noqa: E402
 
@@ -109,7 +108,8 @@ assert all(counts(d)[0] == 3 for d in PLAN)           # 每天 3 趟都下到了
 print("== 2. 暂停：跑到一半停掉，状态为 paused，进度保留 ==")
 collector._CHAIN = None
 with sqlite3.connect(TMP) as c:
-    c.execute("DELETE FROM routes")
+    c.execute("DELETE FROM route_day")
+    c.execute("DELETE FROM route_tpl")
     c.execute("DELETE FROM day_skip")
 collector._stops = fake_stops(slow=0.08)
 ch2 = collector.Chain(PLAN, 1, False)

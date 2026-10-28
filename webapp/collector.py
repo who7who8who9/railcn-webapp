@@ -31,6 +31,7 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 import railcore  # noqa: E402
+import routestore  # noqa: E402
 import config as rail_config  # noqa: E402
 
 EXPORT_DIR = os.path.join(railcore.DATA_DIR, "exports")
@@ -354,16 +355,16 @@ def _save_trains(date: str, items) -> None:
 
 
 def _save_batch(date: str, rows) -> None:
-    """rows: (train_no, code, type, start, end, n_stops, raw_json)"""
+    """rows: (train_no, code, type, start, end, n_stops, raw_json)
+
+    经停站走 routestore：内容与这趟车已有版本相同就只记一条指针，
+    只有停站真变了才新存一份（每天照抓不误，存的是「是否一致」的结论）。
+    """
     if not rows:
         return
-    now = time.time()
     with railcore._db_lock, _conn() as c:
-        c.executemany(
-            "INSERT OR REPLACE INTO routes (train_no, date, code, raw, updated_at)"
-            " VALUES (?,?,?,?,?)",
-            [(r[0], date, r[1], r[6], now) for r in rows],
-        )
+        routestore.put_routes_for_date(
+            c, date, [(r[0], r[1], r[6]) for r in rows])
         c.executemany(
             """INSERT INTO trains (code, train_no, type, start_sta, end_sta, stop_count, date)
                VALUES (?,?,?,?,?,?,?)

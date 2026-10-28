@@ -32,6 +32,10 @@ RAILCN_DIR = os.path.dirname(BASE_DIR)          # D:\railcn
 
 if RAILCN_DIR not in sys.path:
     sys.path.insert(0, RAILCN_DIR)
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
+import routestore  # noqa: E402  经停站存储：一天一条指针 + 内容按趟去重
 
 import config as rail_config            # noqa: E402
 import trainclaw                        # noqa: E402
@@ -84,14 +88,9 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_trains_code ON trains(code);
             CREATE INDEX IF NOT EXISTS idx_trains_sta  ON trains(start_sta, end_sta);
 
-            CREATE TABLE IF NOT EXISTS routes (
-                train_no    TEXT NOT NULL,
-                date        TEXT NOT NULL,
-                code        TEXT,
-                raw         TEXT,          -- 12306 原始经停站 JSON
-                updated_at  REAL,
-                PRIMARY KEY (train_no, date)
-            );
+            -- 经停站：route_tpl（每份停站表只存一次）+ route_day（一天一条指针）
+            -- 外面看到的 routes 是二者 join 出来的只读视图，字段与老表一致
+            -- 详见 routestore.py
 
             CREATE TABLE IF NOT EXISTS coord_override (
                 name        TEXT PRIMARY KEY,
@@ -181,6 +180,8 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_curate_issues ON curate(issues);
             """
         )
+        # 经停站表结构（route_tpl / route_day / routes 视图）
+        routestore.ensure_schema(conn)
         # 老库迁移：seg_km_json 是后加的列
         cols = {r[1] for r in conn.execute("PRAGMA table_info(train_override)")}
         if "seg_km_json" not in cols:
@@ -2371,11 +2372,10 @@ def _cache_get_route(train_no: str, date: str) -> Optional[List[dict]]:
 
 
 def _cache_put_route(train_no: str, date: str, code: str, raw: List[dict]) -> None:
+    """写一天的经停站。内容与这趟车已有版本相同就只挂个指针，不再存整份"""
     with _db_lock, db() as conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO routes (train_no, date, code, raw, updated_at) VALUES (?,?,?,?,?)",
-            (train_no, date, code, json.dumps(raw, ensure_ascii=False), time.time()),
-        )
+        routestore.put_route(conn, train_no, date, code,
+                             json.dumps(raw, ensure_ascii=False))
 
 
 def fetch_route(code: str, date: str, force: bool = False,

@@ -25,6 +25,10 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 DB_PATH = os.path.join(DATA_DIR, "rail.db")
 STATIONS_OUT = os.path.join(DATA_DIR, "stations.json")
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
+import routestore  # noqa: E402  经停站存储（一天一条指针）
 
 DEFAULT_DIRS = [r"D:\railcn", r"D:\ceshi\tranclaw"]
 
@@ -41,15 +45,13 @@ def init_db(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_trains_code ON trains(code);
         CREATE INDEX IF NOT EXISTS idx_trains_sta  ON trains(start_sta, end_sta);
-        CREATE TABLE IF NOT EXISTS routes (
-            train_no TEXT NOT NULL, date TEXT NOT NULL, code TEXT,
-            raw TEXT, updated_at REAL, PRIMARY KEY (train_no, date)
-        );
+        -- 经停站表由 routestore 建（route_tpl / route_day / routes 视图）
         CREATE TABLE IF NOT EXISTS coord_override (
             name TEXT PRIMARY KEY, lat REAL, lon REAL
         );
         """
     )
+    routestore.ensure_schema(conn)
 
 
 def ymd(raw) -> str:
@@ -153,10 +155,8 @@ def import_routes(conn: sqlite3.Connection, dirs: list[str]) -> None:
             items.sort(key=lambda x: x[0])
             raw = [s for _, s in items]
             code = raw[0]["station_train_code"] if raw else ""
-            conn.execute(
-                "INSERT OR REPLACE INTO routes (train_no, date, code, raw, updated_at) VALUES (?,?,?,?,?)",
-                (train_no, date, code, json.dumps(raw, ensure_ascii=False), 0),
-            )
+            routestore.put_route(conn, train_no, date, code,
+                                 json.dumps(raw, ensure_ascii=False))
             total_trains += 1
         conn.commit()
         print(f"  + {os.path.basename(path)}: {len(groups)} 趟列车的经停站")

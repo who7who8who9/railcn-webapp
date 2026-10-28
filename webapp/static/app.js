@@ -950,7 +950,39 @@ const TL = {
     this.ticks = $('#tlTicks');
     this.tip = $('#tlTip');
     this.band = $('#tlBand');
+    this.stops = $('#tlStops');
     const el = this.el;
+
+    // 点时间条上的站名 → 直接跳到该站时刻
+    if (this.stops) {
+      this.stops.addEventListener('click', e => {
+        const b = e.target.closest('.tl-st');
+        if (!b || !S.route) return;
+        const t = this.stT && this.stT[Number(b.dataset.i)];
+        if (!isFinite(t)) return;
+        this.setFrac(clamp((t - this.a) / Math.max(1, this.b - this.a)), true);
+      });
+    }
+    const bs = $('#btnStops');
+    if (bs) {
+      if (localStorage.getItem('railcn.tlStops') === '0') {
+        $('#dock').classList.add('no-stops');
+        bs.classList.remove('on');
+      }
+      bs.addEventListener('click', () => {
+        const off = $('#dock').classList.toggle('no-stops');
+        bs.classList.toggle('on', !off);
+        localStorage.setItem('railcn.tlStops', off ? '0' : '1');
+      });
+    }
+    // 宽度变了要重新分层，否则站名会叠在一起
+    let rz = 0;
+    window.addEventListener('resize', () => {
+      clearTimeout(rz);
+      rz = setTimeout(() => {
+        if (S.route && !$('#dock').classList.contains('hidden')) TL.setup(S.route);
+      }, 180);
+    });
 
     el.addEventListener('pointerdown', e => {
       if (!S.route) return;
@@ -1021,6 +1053,116 @@ const TL = {
     this.knob.style.left = `${p}%`;
     this.el.setAttribute('aria-valuenow', p.toFixed(1));
     this.tip.textContent = fmtStamp(this.a + (this.b - this.a) * (p / 100));
+    this.markNow();
+  },
+
+  /* 停站轨：把每一站的站名与时刻标到时间轴上。
+     站挤在一起时自动错到下一层，两层都放不下就只留一条刻度线（悬停仍可看时刻）；
+     首末站不参与"只留线"，宁可单独占第三层也要把站名写上。 */
+  buildStops(route) {
+    const el = this.stops;
+    if (!el) return;
+    el.innerHTML = '';
+    this.stT = [];
+    this.stopEls = [];
+    this.curStop = -2;
+
+    const stops = route.stops || [];
+    if (stops.length < 2) {
+      el.style.height = '0px';
+      el.classList.add('hidden');
+      return;
+    }
+    el.classList.remove('hidden');
+
+    const a = this.a;
+    const span = Math.max(1, this.b - a);
+    const W = el.clientWidth || 900;
+    const LV = 25;                       // 每层高度
+    const maxLv = W >= 560 ? 3 : 2;      // 前两层常规错开，第三层只留给首末站兜底
+    const GAP = 6;                       // 标签之间留的空
+    const right = new Array(maxLv).fill(-1e9);
+    const frag = document.createDocumentFragment();
+    let used = 0;
+
+    const textW = (s, fs) => {
+      let w = 0;
+      for (const ch of s) w += ch.charCodeAt(0) > 255 ? fs * 1.06 : fs * 0.6;
+      return w;
+    };
+
+    stops.forEach((s, i) => {
+      const t = Date.parse(s.iso || '');
+      this.stT.push(t);
+
+      const arrTxt = s.arr || (isFinite(t) ? fmtClock(t) : '');
+      const depTxt = s.dep || (s.depIso ? fmtClock(Date.parse(s.depIso)) : '');
+      // 「宋站」这种名字本身带站的，只有剪掉还够两字才剪
+      let nm = s.name || '';
+      if (nm.length > 2 && nm.endsWith('站')) nm = nm.slice(0, -1);
+      const showT = (i === 0 && depTxt) ? depTxt : (arrTxt || depTxt);
+      const tip = depTxt && depTxt !== arrTxt
+        ? `${s.name} · 到 ${arrTxt} 开 ${depTxt}（停 ${s.stayMin || 0} 分）· ${fmtStamp(t)}`
+        : `${s.name} · ${arrTxt}${isFinite(t) ? ` · ${fmtStamp(t)}` : ''}`;
+
+      const pct = isFinite(t) ? (t - a) / span * 100 : 0;
+      const edgeL = pct <= 0.8, edgeR = pct >= 99.2;
+      const OVER = 10;   // 首末站允许探出时间条一点（dock 还有内边距），换来少错一层
+      const w = Math.max(textW(nm, 10), textW(showT, 9)) + 4;
+      const x = pct / 100 * W;
+      const x0 = edgeL ? x : (edgeR ? x + OVER - w : x - w / 2);
+      const x1 = edgeL ? x + w : (edgeR ? x + OVER : x + w / 2);
+
+      // 贪心找层：放得下的最靠上一层（第三层不给普通站用，免得动辄三层高）
+      let lv = -1;
+      for (let k = 0; k < 2 && k < maxLv; k++) {
+        if (x0 > right[k] + GAP) { lv = k; right[k] = x1; break; }
+      }
+      // 首末站一定要有标签：挤不下就单独占第三层，宁可多一行也不丢站名
+      if (lv < 0 && (edgeL || edgeR)) {
+        if (maxLv > 2 && x0 > right[2] + GAP) { lv = 2; right[2] = x1; }
+        else {   // 前三层都满了，挑前两层里空得最多的那层（宁可挨一点也不丢）
+          lv = 0;
+          for (let k = 1; k < 2; k++) if (right[k] < right[lv]) lv = k;
+          right[lv] = Math.max(right[lv], x1);
+        }
+      }
+      if (lv + 1 > used) used = lv + 1;
+
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'tl-st' + (edgeL ? ' edge-l' : edgeR ? ' edge-r' : '');
+      btn.style.left = `${pct.toFixed(3)}%`;
+      btn.style.setProperty('--lv', String(lv >= 0 ? lv : 0));
+      btn.dataset.i = String(i);
+      btn.title = tip;
+      btn.setAttribute('aria-label', tip);
+      const stemH = lv >= 0 ? lv * LV + 7 : 7;
+      btn.innerHTML = `<i class="stem" style="height:${stemH}px"></i>`
+        + (lv >= 0 ? `<i class="nm">${esc(nm)}</i><span class="tm">${esc(showT)}</span>` : '');
+      frag.appendChild(btn);
+      this.stopEls.push(btn);
+    });
+
+    el.appendChild(frag);
+    el.style.height = `${used ? (used - 1) * LV + 33 : 8}px`;
+  },
+
+  /* 列车现在在哪一站，时间条上那站的文字跟着高亮 */
+  markNow() {
+    const ts = this.stT;
+    if (!ts || !ts.length) return;
+    const t = S.simT;
+    let i = -1;
+    for (let k = 0; k < ts.length; k++) {
+      if (isFinite(ts[k]) && ts[k] <= t) i = k; else break;
+    }
+    if (i === this.curStop) return;
+    if (this.curStop >= 0 && this.stopEls[this.curStop]) {
+      this.stopEls[this.curStop].classList.remove('isnow');
+    }
+    this.curStop = i;
+    if (i >= 0 && this.stopEls[i]) this.stopEls[i].classList.add('isnow');
   },
 
   setup(route) {
@@ -1053,18 +1195,20 @@ const TL = {
       this.band.classList.add('hidden');
       this.band.innerHTML = '';
     }
+    this.buildStops(route);
     this.render(0);
   },
 };
 
 function setupDock(route) {
   const a = Date.parse(route.startIso), b = Date.parse(route.endIso);
+  // 先显示再排版，否则量不到时间条宽度，站名分层会算错
+  $('#dock').classList.remove('hidden');
+  $('#hud').classList.remove('hidden');
   TL.setup(route);
   $('#labA').textContent = fmtStamp(a);
   $('#labB').textContent = fmtStamp(b);
   $('#labNow').textContent = fmtStamp(S.simT);
-  $('#dock').classList.remove('hidden');
-  $('#hud').classList.remove('hidden');
 }
 
 function syncSlider() {

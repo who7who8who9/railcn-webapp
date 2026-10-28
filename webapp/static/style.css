@@ -56,6 +56,7 @@ button{font-family:inherit}
 .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
 .btn.primary:hover{background:#1a5fd0;border-color:#1a5fd0}
 .btn.ghost{background:transparent}
+.btn.on{background:var(--accent-soft);border-color:#c7dbff;color:var(--accent);font-weight:600}
 .btn.round{width:34px;padding:0;border-radius:50%;font-size:12px}
 
 /* ---------- layout ---------- */
@@ -365,6 +366,53 @@ code.inline{background:#eef2f8;padding:1px 5px;border-radius:4px;font-size:10.5p
   font-family:ui-monospace,Menlo,monospace;
 }
 .tl:hover .tl-tip,.tl.drag .tl-tip{opacity:1}
+/* 停站轨：时间条上标出全部停站与时刻（宽不够时自动往下一层错开，再挤不下只留刻度线） */
+.tl-stops{
+  position:relative;margin:0 10px;height:0;overflow:visible;
+  transition:height .18s ease;
+}
+.tl-stops.hidden{display:none}
+/* 每站是一个零宽锚点，站名/时刻/引线各自绝对定位：
+   引线走 z-index 0、文字走 z-index 1，这样后面的站不会用引线划掉前面站的文字 */
+.tl-st{
+  position:absolute;top:0;left:0;width:0;height:0;padding:0;border:0;background:none;
+  cursor:pointer;font:inherit;white-space:nowrap;pointer-events:none;
+  -webkit-tap-highlight-color:transparent;
+}
+.tl-st .stem{
+  position:absolute;left:-3px;top:0;width:6px;pointer-events:none;z-index:0;
+}
+.tl-st .stem::after{
+  content:'';position:absolute;left:2.5px;top:0;bottom:0;width:1px;background:#b8c6d8;
+  transition:background .12s;
+}
+.tl-st .stem::before{
+  content:'';position:absolute;left:0;top:-1px;width:6px;height:6px;border-radius:50%;
+  background:#fff;border:1px solid #a8b8cc;box-sizing:border-box;pointer-events:auto;
+  transition:background .12s,border-color .12s;
+}
+.tl-st .nm{
+  position:absolute;top:calc(var(--lv, 0) * 25px + 8px);left:0;transform:translateX(-50%);
+  display:block;font-size:10px;line-height:12px;font-style:normal;z-index:1;
+  font-weight:600;color:#41506a;max-width:96px;overflow:hidden;text-overflow:ellipsis;
+  pointer-events:auto;background:#fff;
+}
+.tl-st .tm{
+  position:absolute;top:calc(var(--lv, 0) * 25px + 21px);left:0;transform:translateX(-50%);
+  display:block;font-size:9px;line-height:11px;color:#8493a8;z-index:1;
+  font-variant-numeric:tabular-nums;letter-spacing:-.1px;pointer-events:auto;background:#fff;
+}
+.tl-st:hover .stem::after{background:var(--accent)}
+.tl-st:hover .stem::before{border-color:var(--accent);background:var(--accent)}
+.tl-st:hover .nm{color:var(--accent)}
+.tl-st.isnow .stem::after{background:var(--train)}
+.tl-st.isnow .stem::before{border-color:var(--train);background:var(--train)}
+.tl-st.isnow .nm{color:var(--train)}
+.tl-st.isnow .tm{color:var(--train)}
+.tl-st.edge-l .nm,.tl-st.edge-l .tm{transform:none}
+.tl-st.edge-r .nm,.tl-st.edge-r .tm{transform:translateX(-100%);margin-left:10px}
+.tl-st.edge-l .nm,.tl-st.edge-r .nm{max-width:80px}
+.dock.no-stops .tl-stops{display:none}
 /* 自然日分段条：跨日车次一眼看清 10-22 / 10-23 / 10-24 */
 .tl-band{display:flex;height:13px;margin:1px 10px 0;font-size:9.5px;color:#7d8ba0;
   overflow:hidden;border-radius:4px}
@@ -721,7 +769,7 @@ a{color:var(--accent)}
 .seg-row.bad .u{color:#d92d20}
 /* ---------- 地图图例 ---------- */
 .map-legend{position:absolute;left:12px;bottom:104px;z-index:8;display:flex;align-items:center;gap:10px;
-  background:rgba(255,255,255,.92);border:1px solid var(--line);border-radius:8px;padding:5px 9px;
+  background:#fff;border:1px solid var(--line);border-radius:8px;padding:5px 9px;
   font-size:11px;color:#3d4a60;box-shadow:0 2px 8px rgba(23,42,74,.08);pointer-events:none}
 .map-legend.hidden{display:none}
 .map-legend i{display:inline-flex;align-items:center;gap:4px;font-style:normal}

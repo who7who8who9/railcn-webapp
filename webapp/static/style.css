@@ -143,6 +143,8 @@ main{flex:1;display:flex;min-height:0}
 .dhead .tag{font-size:11px;padding:2px 7px;border-radius:6px;background:var(--accent-soft);color:var(--accent)}
 .dhead .tag.type{background:#fff4ec;color:var(--train)}
 .dhead .l2{margin-top:6px;font-size:13px;color:#3a465c}
+/* 线路详情里缺坐标的那几个站：别只说缺，要说清去哪儿补 */
+.dhead .ln-miss{color:#b45309;font-weight:600}
 .dhead .l3{margin-top:6px;font-size:11.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
 /* 地图走向开关：站点直连 ⇄ 沿真实线路 */
 .dhead .l3 .geo-sw{display:inline-flex;align-items:center;gap:7px}

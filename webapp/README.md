@@ -391,6 +391,11 @@ python scripts/fill_missing_stations.py --apply         # 写库（--report docs
 （`唐海南站` → `唐海南`），并把「唐山」和「唐山站」这类同一站的两种写法并成一条，
 显示优先用 12306 的写法（不带「站」）。
 
+> 这类站一旦有人建了它所在的线路（比如手填「曹妃甸港线」曹妃甸港—唐海南），
+> 保存时就会补进 `station_custom`（`source='line-fill'`）—— 头部的标记换成「线路补全」，
+> 有「连接线路」可点，当天经停的车次照旧列出（自建站的档案里没有车次数据，
+> `station_detail()` 对 `custom` 站按同一口径补 `trainsVia`）。
+
 ![车站兜底档案](../docs/station-loose.png)
 
 <sub>查「唐海南站」：档案里没有这个站，照样给出电报码 IEP、坐标、地址，以及当天经停的 5 趟 C 字头列车（点车次号可直接看这趟车）。</sub>
@@ -434,6 +439,10 @@ python scripts\import_crtrain.py     :: 归集成 data\crtrain\lines.json + geom
   - 站名下拉拿的是 `/api/stations/names`：**车站档案 + 12306 站表的并集**，和车站搜索同一套来源。
     只在 12306 站表里、档案还没收的站（唐海南、曹妃甸港、南堡北）一样能选到，输入「唐海南站」也按「唐海南」命中，不会再追加一条库外站名
   - 存进去的站名按 12306 口径归一（`唐海南站` → `唐海南`，`十八站` 这种地名不动），否则和车次经停站对不上，经由与里程也套不上
+  - 保存时会把**沿线站补进车站库**（`station_custom`，`source='line-fill'`，坐标取 档案 → OSM 派生 → 人工补录 的合并值，
+    电报码取自 12306 站表）：线路页的站点坐标读的就是车站档案，不补这一步，站名能显示却标「缺坐标」、地图上一个点也画不出来。
+    实在没有坐标的站仍然留空，详情页头部会写清「N 站缺坐标（…），地图上不显示，可到「车站」里搜站名补坐标」
+  - 老库里的自建线路不用重存：`backfill_line_stations()` 在启动线程里统一补一遍（和 `backfill_via_class()` 一样的位置）
 - **给只有 OSM 几何的线路补车站**：线路库和资料库都查不到、只在 OSM 里有走向的线（联络线、支线最多见），
   搜出来点进详情后有个「添加车站」——按走向反查车站库，把候选站连同沿线里程预填进「新增线路」弹窗，
   删掉不在线上的、补上空缺的，保存就成正式线路（之后能进车次经由与里程推断）。
@@ -570,7 +579,7 @@ python scripts\import_crtrain.py     :: 归集成 data\crtrain\lines.json + geom
 | `POST /api/override` | `code`、`via[]`、`totalKm`、`segKm`、`note`、`date`、`propagate` | 保存人工校正；`segKm` 形如 `{"0":205,"2":230}`（键是区间序号）；全为空即撤销。`propagate` 默认开：把这份经由记成「同类」（同起讫站 + 同车种）副本并刷新同组车次，返回 `viaClass`（`ok` / `reason`）与 `classRefreshed`（刷了几趟） |
 | `POST /api/line/km` | `name`、`segKm`、`totalKm`、`note` | 保存线路里程人工校正，返回最新线路详情；全为空即撤销 |
 | `POST /api/line/km/clear` | `name` | 线路里程恢复档案值 |
-| `POST /api/line/new` | `name`、`stations[]`（`{name, km}`，km 可空）、`note`、`replace` | 新增线路，返回线路详情；`replace=1` 允许覆盖同名**自建**线路（改站表用） |
+| `POST /api/line/new` | `name`、`stations[]`（`{name, km}`，km 可空）、`note`、`replace` | 新增线路，返回线路详情 + `filledStations`（这次补进车站库的沿线站）；`replace=1` 允许覆盖同名**自建**线路（改站表用） |
 | `POST /api/line/delete` | `name` | 删除自建线路（连带清掉它的里程校正） |
 | `POST /api/station/new` | `name`、`lat`、`lon`、`lines[]`、`tele`、`bureau`、`note` | 新增车站 |
 | `POST /api/station/delete` | `name` | 删除自建车站 |

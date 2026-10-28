@@ -1893,9 +1893,10 @@ async function showStation(q) {
     if (!d.found) { box.innerHTML = `<div class="empty">车站库里没有「${q}」</div>`; return; }
     const chips = (d.lines || []).map(l => `<button class="chip" data-line="${l}">${l}</button>`).join('');
     const svc = (d.services || []).map(s => `<span class="chip flat">${s}</span>`).join('');
-    /* 档案里没有的站（货运支线 / 疏港线上的站）：没有「连接线路」，但能列出当天经停的车次 */
+    /* 档案里没有的站（货运支线 / 疏港线上的站）：没有「连接线路」，但能列出当天经停的车次；
+       自建线路补进来的站有档案了，一样列一下（档案里没有车次数据） */
     const viaCodes = d.trainsVia || [];
-    const viaHtml = d.archive === false
+    const viaHtml = (d.archive === false || viaCodes.length)
       ? `<div class="st-via">
            <div class="st-via-h">经停本站的车次
              <em>${viaCodes.length
@@ -2502,6 +2503,14 @@ async function lnResetAll() {
   }
 }
 
+/** 线路详情里补一句缺坐标提示：自建线路的站补过档案才有坐标，缺的要说清怎么办 */
+function lnMissCoordNote(d) {
+  const miss = (d.stations || []).filter(s => s.lat == null);
+  if (!miss.length) return '';
+  return `<b class="ln-miss"> · ${miss.length} 站缺坐标（${miss.slice(0, 4).map(s => esc(s.name)).join('、')}`
+    + `${miss.length > 4 ? '…' : ''}），地图上不显示，可到「车站」里搜站名补坐标</b>`;
+}
+
 function lnRenderHead() {
   const d = LN.data, el = $('#lnHead');
   if (!el || !d) return;
@@ -2520,7 +2529,7 @@ function lnRenderHead() {
         <button class="btn sm${LN.editing ? ' on' : ''}" id="lnEditBtn">${LN.editing ? '收起编辑' : '编辑里程'}</button>
       </span>
     </div>
-    <div class="l2">${d.aliasOf ? `「${esc(d.aliasOf)}」在资料库里对应这条线 · ` : ''}坐标覆盖 ${d.coordCoverage}% · 点击站点查看所属线路 · <span id="lnFoot"></span></div>`;
+    <div class="l2">${d.aliasOf ? `「${esc(d.aliasOf)}」在资料库里对应这条线 · ` : ''}坐标覆盖 ${d.coordCoverage}%${lnMissCoordNote(d)} · 点击站点查看所属线路 · <span id="lnFoot"></span></div>`;
   lnRenderInfo();
   const stopsBtn = $('#lnStopsBtn');
   if (stopsBtn) stopsBtn.addEventListener('click', () => osmAddStations(

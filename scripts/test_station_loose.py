@@ -22,14 +22,24 @@ def get(path):
 
 
 def check_api(loose, archived):
+    """loose：还没有档案的站（走 12306 兜底）；archived：档案里有、但要能查到的站
+
+    自建线路会把沿线站补进 station_custom（source=line-fill），所以「唐海南」
+    「曹妃甸港」在有人建了曹妃甸港线之后就有档案了 —— 这里两种都认，
+    只要求「没有档案 → 必须有当天经停车次」「有档案 → 必须有连接线路」。
+    """
     for name in loose:
         d = get("/api/station?q=" + urllib.parse.quote(name + "站"))
         assert d.get("found"), f"{name} 查不到"
-        assert d.get("archive") is False, f"{name} 不该有档案"
         print(f"  {name:6} 电报码 {d.get('tele')} 坐标 {d.get('lat')},{d.get('lon')} "
+              f"{'档案' if d.get('archive') else '12306 兜底'} "
               f"经停 {len(d.get('trainsVia') or [])} 趟 ({d.get('viaDate')})")
-        assert d.get("trainsVia"), f"{name} 没有经停车次"
         assert d.get("lat") is not None, f"{name} 没有坐标"
+        assert d.get("tele"), f"{name} 没有电报码"
+        if d.get("archive") is False:
+            assert d.get("trainsVia"), f"{name} 没有档案却也没列经停车次"
+        else:
+            assert d.get("lines"), f"{name} 有档案却没有连接线路"
         # 带不带「站」字结果要一致
         bare = get("/api/station?q=" + urllib.parse.quote(name))
         assert bare.get("name") == d.get("name"), f"{name} 带/不带「站」结果不一致"
@@ -99,7 +109,13 @@ def main():
     print("== 接口")
     check_api(loose, ["唐山", "上海虹桥"])
     print("== 页面")
-    check_ui(loose[0])
+    # 「仅 12306 站表」的界面只对还没档案的站有意义（自建线路会把这些站补进车站库）
+    still = [n for n in loose
+             if get("/api/station?q=" + urllib.parse.quote(n)).get("archive") is False]
+    if still:
+        check_ui(still[0])
+    else:
+        print(f"  {'、'.join(loose)} 都已有档案，跳过「仅 12306 站表」的界面检查")
     print("全部通过")
 
 

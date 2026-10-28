@@ -947,6 +947,79 @@ def list_custom_lines() -> List[dict]:
     return out
 
 
+def _reload_coord_cache() -> None:
+    """让 station_custom 里新补的坐标立即可用（reload_coords 会重建整个坐标缓存）"""
+    try:
+        stations.reload_coords()
+    except Exception:                    # noqa: BLE001
+        pass
+
+
+def _fill_line_stations(line_name: str, names: Sequence[str]) -> List[str]:
+    """自建线路落库后，把沿线站补进 station_custom —— 不补就没有坐标可画
+
+    线路页的站点坐标读的是 cnrail 车站档案；档案里没有的站（唐海南、曹妃甸港
+    这批货运支线上的站）坐标只存在于 OSM 派生的坐标表里，于是「站名能显示、
+    却标缺坐标、地图上也没有点」。这里把档案里没有的站补成 station_custom
+    （`source='line-fill'`，和 fill_missing_stations.py 一个口径），
+    坐标按 `stations.coord()`（档案 → OSM → 人工补录 的合并值）填，
+    取不到就留空 —— 界面照旧标「缺坐标」，补录走车站详情的「补坐标」。
+    """
+    names = [n for n in dict.fromkeys(names or []) if n]
+    if not names:
+        return []
+    custom = {_norm_line_name(it["name"]) for it in list_custom_stations()}
+    rows: List[tuple] = []
+    for nm in names:
+        if cnrail.station(nm) or _norm_line_name(nm) in custom:
+            continue
+        c = stations.coord(nm)
+        src = stations.coord_info(nm).get("source") or ""
+        typ = "线路所" if nm.endswith("线路所") or nm.endswith("所") else "车站"
+        rows.append((
+            nm, c[0] if c else None, c[1] if c else None,
+            json.dumps([line_name], ensure_ascii=False),
+            stations.telecode(nm) or "", typ,
+            "manual" if (c and src == "manual") else ("osm" if c else ""),
+        ))
+    if not rows:
+        return []
+    now = time.time()
+    with _db_lock, db() as conn:
+        for nm, lat, lon, lines_json, tele, typ, csrc in rows:
+            conn.execute(
+                """INSERT INTO station_custom(name, lat, lon, lines_json, tele, bureau, note,
+                                              updated_at, type, source, alias, coord_src)
+                   VALUES(?,?,?,?,?,'','',?,?,'line-fill','',?)
+                   ON CONFLICT(name) DO UPDATE SET
+                     lat=COALESCE(station_custom.lat, excluded.lat),
+                     lon=COALESCE(station_custom.lon, excluded.lon),
+                     updated_at=excluded.updated_at""",
+                (nm, lat, lon, lines_json, tele, now, typ, csrc),
+            )
+    return [r[0] for r in rows]
+
+
+def backfill_line_stations() -> int:
+    """把自建线路（含资料库带进来的）的沿线站统一补一遍，返回补了几站
+
+    和 `backfill_via_class()` 一个用法：老库里已经存下的线路不可能回头重存，
+    启动时顺手补一次，补过就什么都不写。
+    """
+    n = 0
+    for it in list_custom_lines():
+        try:
+            ln = _build_custom_line(it["name"], it["stations"], it.get("note") or "")
+        except ValueError:
+            continue
+        n += len(_fill_line_stations(ln["name"], [p["name"] for p in ln["stations"]]))
+    if n:
+        _apply_custom()                  # 补进来的车站要并进 cnrail，线路详情才有坐标
+        _reload_coord_cache()
+        _apply_coord_overrides()
+    return n
+
+
 def save_custom_line(name: str, stations, note: str = "", replace: bool = False) -> dict:
     """新增 / 覆盖一条自建线路
 
@@ -967,7 +1040,16 @@ def save_custom_line(name: str, stations, note: str = "", replace: bool = False)
             (ln["name"], json.dumps(ln["stations"], ensure_ascii=False), ln["note"], now, now),
         )
     _apply_custom()
-    return cnrail.line_detail(ln["name"]) or ln
+    # 档案里没有的站补成自建车站（带 OSM / 人工坐标），否则线路页缺坐标、地图上没有点
+    filled = _fill_line_stations(ln["name"], [p["name"] for p in ln["stations"]])
+    if filled:
+        _apply_custom()                  # 新补的车站要并进 cnrail，线路详情才拿得到坐标
+        _reload_coord_cache()
+        _apply_coord_overrides()
+    detail = cnrail.line_detail(ln["name"]) or ln
+    if isinstance(detail, dict):
+        detail["filledStations"] = filled
+    return detail
 
 
 def delete_custom_line(name: str) -> bool:
@@ -2427,6 +2509,12 @@ def station_detail(q: str) -> dict:
         "trainsFrom": as_start,
         "trainsTo": as_end,
     }
+    # 自建 / 线路补全的站（唐海南、曹妃甸港这批）档案里没有车次数据，
+    # 和兜底档案一个口径，把当天经停的车次也列上
+    if st.get("custom"):
+        day, codes = _trains_via(name)
+        out["viaDate"] = day
+        out["trainsVia"] = codes
     # 12306 那份站资料只用来补：缺电报码时补上，顺带给个街道地址
     extra = railgeom.station_extra(out.get("name") or name) or {}
     if not out.get("tele") and extra.get("code"):
@@ -2434,6 +2522,21 @@ def station_detail(q: str) -> dict:
     if extra.get("addr"):
         out["addr"] = extra["addr"]
     return out
+
+
+def _trains_via(name: str):
+    """当天经停这个站的车次：只扫最新一天的路由缓存（约 1 万行，0.2 秒）
+
+    全表扫要 4 秒，别那么干 —— 车站详情是一个点击就到的地方。
+    """
+    with db() as conn:
+        day = conn.execute("SELECT MAX(date) d FROM routes").fetchone()["d"]
+        if not day:
+            return None, []
+        rows = conn.execute(
+            "SELECT DISTINCT code FROM routes WHERE date = ? AND raw LIKE ? ORDER BY code",
+            (day, f'%"station_name": "{name}"%')).fetchall()
+    return day, [r["code"] for r in rows]
 
 
 def _station_detail_loose(q: str) -> dict:
@@ -2460,11 +2563,7 @@ def _station_detail_loose(q: str) -> dict:
             "SELECT COUNT(*) c FROM trains WHERE start_sta = ?", (nm,)).fetchone()["c"]
         as_end = conn.execute(
             "SELECT COUNT(*) c FROM trains WHERE end_sta = ?", (nm,)).fetchone()["c"]
-        # 哪些车经停这里：只扫最新一天的路由缓存（约 1 万行，0.2 秒），够说明问题
-        day = conn.execute("SELECT MAX(date) d FROM routes").fetchone()["d"]
-        rows = conn.execute(
-            "SELECT DISTINCT code FROM routes WHERE date = ? AND raw LIKE ? ORDER BY code",
-            (day, f'%"station_name": "{nm}"%')).fetchall()
+    day, codes = _trains_via(nm)
     return {
         "found": True,
         "name": nm, "key": nm,
@@ -2480,7 +2579,7 @@ def _station_detail_loose(q: str) -> dict:
         "trainsFrom": as_start,
         "trainsTo": as_end,
         "viaDate": day,
-        "trainsVia": [r["code"] for r in rows],
+        "trainsVia": codes,
     }
 
 
@@ -2540,6 +2639,12 @@ def _startup_backfill() -> None:
         n = backfill_via_class()
         if n:
             print(f"[railcore] 已把 {n} 趟车的人工经由补记为同类副本")
+    except Exception:                                # noqa: BLE001
+        pass
+    try:
+        k = backfill_line_stations()
+        if k:
+            print(f"[railcore] 已把 {k} 个沿线车站补进车站库（带 OSM / 人工坐标）")
     except Exception:                                # noqa: BLE001
         pass
 

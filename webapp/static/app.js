@@ -1572,19 +1572,23 @@ function nmRender() {
 
   if (NM.kind === 'line') {
     const p = NM.preset || {};
+    const fixed = !!(p.libStations || p.replace);   // 改已有线路时名字不给动，免得存出一条重名线
     body.innerHTML = `
       <div class="nm-field">
         <label>线路名</label>
-        <input id="nmName" placeholder="比如 沪宁沿江高速线" autocomplete="off" value="${esc(p.name || '')}">
-        <span class="nm-tip">${p.replace
-          ? '这是自建线路，保存会用下面这份站表整体替换现有的'
-          : '档案里已有的线路不能重名；重名会提示改用「编辑里程」'}</span>
+        <input id="nmName" placeholder="比如 沪宁沿江高速线" autocomplete="off"
+               value="${esc(p.name || '')}"${fixed ? ' readonly' : ''}>
+        <span class="nm-tip">${p.libStations
+          ? '保存后按这份站序覆盖本机（原始档案不动），随时可「恢复档案站序」'
+          : p.replace
+            ? '这是自建线路，保存会用下面这份站表整体替换现有的'
+            : '档案里已有的线路不能重名；重名会提示改用「编辑里程」'}</span>
       </div>
       ${p.hint ? `<div class="nm-auto">${p.hint}</div>` : ''}
       <div class="nm-sec">
         <div class="nm-sec-h"><b>沿线车站</b>
-          <span class="nm-tip">按从上到下的顺序；站名可打字联想或点 ▾ 选择，回车跳下一格；里程填「自起点起算的累计公里数」，不详就留空</span>
-          <button class="btn sm ghost" id="nmAddRow">+ 加一站</button>
+          <span class="nm-tip">按从上到下的顺序；站名可打字联想或点 ▾ 选择，回车跳下一格；点行首的 ＋ 可在两站之间插一站；里程填「自起点起算的累计公里数」，不详就留空</span>
+          <button class="btn sm ghost" id="nmAddRow">+ 末尾加一站</button>
         </div>
         <div class="nm-rows" id="nmRows"></div>
       </div>
@@ -1593,12 +1597,7 @@ function nmRender() {
         <input id="nmNote" placeholder="可空，比如：2026 年调图新增" value="${esc(p.note || '')}">
       </div>`;
     nmRenderRows();
-    $('#nmAddRow').addEventListener('click', () => {
-      NM.rows.push({ name: '', km: '' });
-      nmRenderRows();
-      const rows = $$('#nmRows .nm-row');
-      if (rows.length) rows[rows.length - 1].querySelector('input.st').focus();
-    });
+    $('#nmAddRow').addEventListener('click', () => nmInsertRow(NM.rows.length));
     return;
   }
 
@@ -1635,12 +1634,42 @@ function nmRender() {
   });
 }
 
+/** 空里程格给个区间提示：插在两站之间时，写多少合适一眼就知道 */
+function nmKmHint(i) {
+  const num = v => {
+    if (v === '' || v == null) return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  let a = null;
+  let b = null;
+  for (let k = i - 1; k >= 0; k--) { const n = num(NM.rows[k].km); if (n != null) { a = n; break; } }
+  for (let k = i + 1; k < NM.rows.length; k++) { const n = num(NM.rows[k].km); if (n != null) { b = n; break; } }
+  if (a != null && b != null) return `在 ${a}–${b} 之间`;
+  if (a != null) return `大于 ${a}`;
+  if (b != null) return `小于 ${b}`;
+  return '累计 km（可空）';
+}
+
+/** 在第 i 行前面插一空行（i === rows.length 就是追加到末尾），插完直接focus这一行 */
+function nmInsertRow(i, focus) {
+  const at = Math.max(0, Math.min(i, NM.rows.length));
+  NM.rows.splice(at, 0, { name: '', km: '' });
+  nmRenderRows();
+  if (focus === false) return;
+  const row = $$('#nmRows .nm-row')[at];
+  if (!row) return;
+  row.scrollIntoView({ block: 'nearest' });
+  row.querySelector('input.line').focus();
+}
+
 function nmRenderRows() {
   const box = $('#nmRows');
   if (!box) return;
   box.innerHTML = NM.rows.map((r, i) => `
     <div class="nm-row" data-i="${i}">
       <span class="i">${i + 1}</span>
+      <button type="button" class="ins" tabindex="-1" title="在这一行前面插一站（插在两站之间就点它）">＋</button>
       <div class="combo">
         <input class="line st" value="${esc(r.name)}" placeholder="车站名，可直接输入"
                autocomplete="off" spellcheck="false">
@@ -1648,13 +1677,14 @@ function nmRenderRows() {
         <div class="cb-pop"></div>
       </div>
       <input class="km" type="number" step="0.1" min="0" inputmode="decimal"
-             value="${esc(r.km)}" placeholder="累计 km（可空）">
+             value="${esc(r.km)}" placeholder="${esc(nmKmHint(i))}">
       <button class="del" title="删掉这一行">×</button>
     </div>`).join('');
 
   $$('#nmRows .nm-row').forEach(row => {
     const i = Number(row.dataset.i);
     nmStaBind(row.querySelector('.combo'), i);
+    row.querySelector('.ins').addEventListener('click', () => nmInsertRow(i));
     row.querySelector('input.km').addEventListener('input', e => { NM.rows[i].km = e.target.value; });
     row.querySelector('input.km').addEventListener('keydown', e => {
       if (e.isComposing || e.keyCode === 229) return;
@@ -1860,15 +1890,16 @@ async function nmSave() {
       const stations = NM.rows
         .map(r => ({ name: (r.name || '').trim(), km: String(r.km || '').trim() === '' ? null : Number(r.km) }))
         .filter(r => r.name);
-      const r = await postJSON('/api/line/new', {
-        name, stations, note: ($('#nmNote').value || '').trim(),
-        replace: !!NM.replace,
-      });
+      const libMode = !!(NM.preset && NM.preset.libStations);
+      const r = await postJSON(libMode ? '/api/line/stations' : '/api/line/new', libMode
+        ? { name, stations, note: ($('#nmNote').value || '').trim() }
+        : { name, stations, note: ($('#nmNote').value || '').trim(), replace: !!NM.replace });
       dropLibCaches();                     // 新线路马上要能在校对页的下拉里搜到
       nmClose();
       switchTab('net');
       netKind = 'line';
       $$('.net-toggle .chipsel').forEach(b => b.classList.toggle('active', b.dataset.kind === 'line'));
+      LN.data = null;
       $('#netQ').value = r.line.name;
       showLine(r.line.name);
     } else {
@@ -2544,8 +2575,10 @@ function lnRenderHead() {
       ${d.kmComplete ? '' : '<span class="tag warn">里程不完整</span>'}
       ${d.source === 'huirui' ? '<span class="tag manual">资料库</span>' : ''}
       ${d.custom ? '<span class="tag manual">自建</span>' : ''}
+      ${d.stopsManual ? '<span class="tag manual">站序人工</span>' : ''}
       <span class="ln-acts">
-        ${d.custom ? '<button class="btn sm" id="lnStopsBtn">改站表</button>' : ''}
+        ${d.stopsManual ? '<button class="btn sm ghost" id="lnStopsReset">恢复档案站序</button>' : ''}
+        <button class="btn sm" id="lnStopsBtn">${d.custom ? '改站表' : '改站序'}</button>
         ${d.custom || d.source === 'huirui' ? '<button class="btn sm ghost" id="lnDel">删除</button>' : ''}
         <button class="btn sm${LN.editing ? ' on' : ''}" id="lnEditBtn">${LN.editing ? '收起编辑' : '编辑里程'}</button>
       </span>
@@ -2553,8 +2586,26 @@ function lnRenderHead() {
     <div class="l2">${d.aliasOf ? `「${esc(d.aliasOf)}」在资料库里对应这条线 · ` : ''}坐标覆盖 ${d.coordCoverage}%${lnMissCoordNote(d)} · 点击站点查看所属线路 · <span id="lnFoot"></span></div>`;
   lnRenderInfo();
   const stopsBtn = $('#lnStopsBtn');
-  if (stopsBtn) stopsBtn.addEventListener('click', () => osmAddStations(
-    d.name, (d.stations || []).map(s => ({ name: s.name, km: s.km }))));
+  if (stopsBtn) stopsBtn.addEventListener('click', () => openLineStops(d));
+  const stopsReset = $('#lnStopsReset');
+  if (stopsReset) {
+    let armed = false;
+    stopsReset.addEventListener('click', async () => {
+      if (!armed) {
+        armed = true;
+        stopsReset.textContent = '确认恢复？人工里程也会清掉';
+        setTimeout(() => { armed = false; stopsReset.textContent = '恢复档案站序'; }, 4000);
+        return;
+      }
+      try {
+        const r = await postJSON('/api/line/stations/clear', { name: d.name });
+        dropLibCaches();
+        showLine((r.line && r.line.name) || d.name);
+      } catch (e) {
+        stopsReset.textContent = '恢复失败：' + e.message;
+      }
+    });
+  }
   $('#lnEditBtn').addEventListener('click', () => {
     LN.editing = !LN.editing;
     lnWide(LN.editing);
@@ -2985,6 +3036,26 @@ async function showOsmLine(name) {
   } catch (e) {
     box.innerHTML = `<div class="empty">${e.message}</div>`;
   }
+}
+
+/**
+ * 打开「改站表 / 改站序」：
+ *   自建线路 → 走 OSM 补站那套（站表可整体替换）
+ *   档案线路 → 直接拿现有站序开弹窗，保存走人工站序覆盖（原始档案不动）
+ */
+function openLineStops(d) {
+  const rows = (d.stations || []).map(s => ({ name: s.name, km: s.km }));
+  if (d.custom) { osmAddStations(d.name, rows); return; }
+  nmOpen('line', {
+    title: `改站序 · ${d.name}`,
+    name: d.name,
+    rows,
+    note: (d.override && d.override.note) || '',
+    libStations: true,
+    hint: `这是<b>档案线路</b>，改的是本机站序：原始档案不动，随时可以在线路详情里「恢复档案站序」。`
+      + `<br>点行首的 ＋ 可在两站之间插一站；里程按「自起点算起的累计公里」填，`
+      + `留空表示这站里程不详（不影响后面已知的站）。`,
+  });
 }
 
 /**

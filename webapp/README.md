@@ -286,7 +286,7 @@ G1 北京南→上海虹桥 因此从「直线 1176 km」修正为 **1318 km**�
 | `train_override` | `code`（主键，按车次不按日期）、`via_json`、`total_km`、`seg_km_json`、`note`、`updated_at` |
 | `via_class` | `from_name`+`to_name`+`category`（主键，起讫站 + 车种）、`via_json`（带 `f0/f1` 占比）、`src_code`（学自哪趟车）、`note`、`updated_at` —— 人工经由的同类副本 |
 | `coord_override` | `name`、`lat`、`lon` —— 车站坐标人工修正（**任何站都能改**，不限于缺坐标的）。改完会套进 `cnrail` 车站表，线路页地图、站间里程、资料库线路图一起生效，不用重启 |
-| `line_override` | `name`（主键，线路名）、`seg_km_json`、`total_km`、`note`、`updated_at` —— 线路里程人工校正 |
+| `line_override` | `name`（主键，线路名）、`seg_km_json`、`sta_km_json`、`stops_json`（人工站序，`[{name, km}]`，null = 用档案站序）、`total_km`、`note`、`updated_at` —— 线路里程 / 站序人工校正 |
 | `line_custom` | `name`、`stations_json`、`note` —— 用户新增的线路（档案里没有的） |
 | `station_custom` | `name`、`lat`、`lon`、`lines_json`、`tele`、`bureau`、`note`、`type`（车站/线路所）、`source`（manual 自建 / line-fill 线路补全）、`alias`（线路里的原写法）、`coord_src`（osm/manual）—— 用户新增 + 线路补全的车站 |
 | `curate` | 全量扫描结果：每趟车的经由 / 里程 / 缺坐标摘要与问题标签 |
@@ -340,7 +340,9 @@ D7607 沈阳→丹东 → 读 payload 时命中同类副本 → viaSource = "cla
 
 - 相邻两站逐段列出，灰字是档案值，档案缺的段显示 `-`（不详），留空即沿用
 - 填了就锁住该段；底部的「线路总里程」同样可改，填了就把**没手填的段**缩放到「总里程 − 手填段之和」
-- 保存进 `line_override`；「全部恢复档案」删掉这条记录
+- 保存进 `line_override`；「全部恢复档案」清掉里程那几列（只改过站序的线保留站序，站序要撤走「恢复档案站序」）
+- 同一张表里还存**人工站序**（`stops_json`）：档案线路插站 / 调站序后，`_line_with_override()` 先整份替换档案站序，
+  再按这次填的累计里程重算；`seg_km_json` / `sta_km_json` 是按**下标**记的，所以改站序时会被一并清空
 
 生效方式和车次里程不同：`railcore` 启动时把 `line_override` 灌进 `cnrail`，
 `cnrail.rebuild_lines()` 用人工值重算各站累计里程并**重建「站名 → 线路里程」索引**，
@@ -480,6 +482,15 @@ python scripts\import_crtrain.py     :: 归集成 data\crtrain\lines.json + geom
   搜出来点进详情后有个「添加车站」——按走向反查车站库，把候选站连同沿线里程预填进「新增线路」弹窗，
   删掉不在线上的、补上空缺的，保存就成正式线路（之后能进车次经由与里程推断）。
   自建线路的详情里有「改站表」，走同一个弹窗，保存整体替换站表
+- **站中间插站 / 调站序**（自建、档案线路都行）：站表每行行首有个 `＋`，点它就在这一行前面插一个空行
+  （插在最前、两站之间、末尾都能插；「＋ 末尾加一站」照旧），插入后光标直接落在新行，接着打字即可。
+  新行的里程格会提示相邻两站的区间（`在 12.3–48.0 之间`），留空表示这站里程不详 —— 累计里程是按站给的，
+  中间插一站不影响后面已知的站。
+  - 自建线路：`POST /api/line/new`（`replace=1`）整份替换站表
+  - **档案线路**：详情里的按钮是「改站序」，改的是本机覆盖（`line_override.stops_json`），原始档案不动；
+    头部标「站序人工」，旁边有「恢复档案站序」（点两下确认）随时撤回。
+    站序一变，旧人工里程的**下标**（第 i 段 / 第 i 站）就对不上了，所以保存时会一并作废，
+    改为按这次填的累计里程重算；新插进来的站同样补进车站库（`source='line-fill'`），地图上直接有点
 - **新增车站**：填站名 + 经纬度（可直接粘贴「经度,纬度」或「经度:126.576636,纬度:42.038926」，
   复用校对页的拆分规则），可选填所属线路 / 电报码 / 路局。
   已在站库里的站会被拒绝，避免与 `coord_override` 两套坐标打架
@@ -632,6 +643,8 @@ python scripts\import_crtrain.py     :: 归集成 data\crtrain\lines.json + geom
 | `POST /api/line/km` | `name`、`segKm`、`totalKm`、`note` | 保存线路里程人工校正，返回最新线路详情；全为空即撤销 |
 | `POST /api/line/km/clear` | `name` | 线路里程恢复档案值 |
 | `POST /api/line/new` | `name`、`stations[]`（`{name, km}`，km 可空）、`note`、`replace` | 新增线路，返回线路详情 + `filledStations`（这次补进车站库的沿线站）；`replace=1` 允许覆盖同名**自建**线路（改站表用） |
+| `POST /api/line/stations` | `name`、`stations[]`、`note` | 改站序（站中间插站 / 调先后）：自建线路改自己的站表，档案线路写 `line_override.stops_json`（人工站序覆盖，原始档案不动），返回线路详情 + `stationOrder` |
+| `POST /api/line/stations/clear` | `name` | 撤销档案线路的人工站序，回到档案原样（连带清掉按旧下标算的人工里程） |
 | `POST /api/line/delete` | `name` | 删除自建线路（连带清掉它的里程校正） |
 | `POST /api/station/new` | `name`、`lat`、`lon`、`lines[]`、`tele`、`bureau`、`note` | 新增车站 |
 | `POST /api/station/delete` | `name` | 删除自建车站 |

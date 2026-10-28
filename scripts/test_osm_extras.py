@@ -107,6 +107,28 @@ def check_ui(kw: str, lib_name: str, osm_name: str) -> None:
         b.close()
 
 
+def find_pair():
+    """自动找一组「库里一条线 + OSM 里同核心名的另一条」当测试对象
+
+    原来写死的是 津霸客运专线 / 津霸线，后来 津霸线 按 OSM 走向补进了线路库，
+    这组就不再是「OSM 未收录」，写死的用例会误报。改成按当前库现找。
+    """
+    for kw in ("津霸", "京哈", "京广", "陇海", "胶济", "沪宁", "京沪", "津山"):
+        d = get("/api/lines?q=" + q(kw))
+        lib = [x["name"] for x in d.get("items") or []]
+        if not lib:
+            continue
+        for ln in lib[:3]:
+            try:
+                det = get("/api/line?q=" + q(ln))
+            except Exception:                     # noqa: BLE001
+                continue
+            for o in det.get("osmOther") or []:
+                if o.get("libSame") and any(s in lib for s in o["libSame"]):
+                    return kw, ln, o["name"]
+    return None
+
+
 def main() -> None:
     kw = "津霸"
     lib_name, osm_name = "津霸客运专线", "津霸线"
@@ -116,6 +138,13 @@ def main() -> None:
             print("用法：test_osm_extras.py [关键字 库内线名 OSM线名]")
             return
         kw, lib_name, osm_name = args[:3]
+    else:
+        pair = find_pair()
+        if not pair:
+            print("跳过：当前线路库里找不到「库内一条、OSM 另一条同核心名」的线对")
+            return
+        kw, lib_name, osm_name = pair
+        print(f"  自动选线：{lib_name}（库）/ {osm_name}（OSM 未收录）")
     print("== 接口")
     check_api(kw, lib_name, osm_name)
     check_negative()

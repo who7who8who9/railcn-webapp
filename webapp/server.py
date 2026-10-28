@@ -184,6 +184,17 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return self.json({"ok": True, "line": ln})
 
+            # 改站序（站中间插站 / 调先后）：自建线路改自己的站表，档案线路存人工站序
+            if path == "/api/line/stations":
+                ln = railcore.save_line_stations(
+                    payload.get("name"), payload.get("stations") or [],
+                    payload.get("note") or "",
+                )
+                return self.json({"ok": True, "line": ln})
+
+            if path == "/api/line/stations/clear":
+                return self.json({"ok": True, **railcore.clear_line_stations(payload.get("name"))})
+
             if path == "/api/line/catalog/add":
                 ln = railcore.add_catalog_line(payload.get("id"))
                 return self.json({"ok": True, "line": ln})

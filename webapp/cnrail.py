@@ -232,14 +232,23 @@ def _rebuild_km(stations: List[dict], seg_km: Optional[dict] = None,
 
 
 def _line_with_override(raw: dict, ov: Optional[dict]) -> dict:
-    """档案线路 + 人工里程 → 生效线路（不动原字典，累积里程全部重算）"""
+    """档案线路 + 人工里程 / 人工站序 → 生效线路（不动原字典，累积里程全部重算）"""
     ln = {k: v for k, v in raw.items() if k != "stations"}
     stations = [dict(p) for p in (raw.get("stations") or [])]
-    ln["stations"] = stations
     ln["totalKmBase"] = raw.get("totalKm")
     ln["kmManual"] = False
     if not ov:
+        ln["stations"] = stations
         return ln
+
+    # 人工站序（站中间插站、调整先后）：整份替换档案站序
+    stops_ov = ov.get("stops")
+    if stops_ov:
+        stations = [{"name": s.get("name"), "km": s.get("km")} for s in stops_ov if s.get("name")]
+        ln["stopsManual"] = True
+        ln["n"] = len(stations)
+        ln["stopsRaw"] = len(raw.get("stations") or [])
+    ln["stations"] = stations
 
     cum, seg = _rebuild_km(stations, ov.get("segKm"), ov.get("totalKm"), ov.get("staKm"))
     for p, c in zip(stations, cum):
@@ -284,7 +293,7 @@ def rebuild_lines() -> None:
 
 
 def set_line_overrides(mapping: Optional[Dict[str, dict]]) -> None:
-    """设置全部人工线路里程（railcore 启动与保存时调用）；已加载则立即重建"""
+    """设置全部人工线路校正（里程 / 站序，railcore 启动与保存时调用）；已加载则立即重建"""
     global _LINE_OVR
     _LINE_OVR = {k: v for k, v in (mapping or {}).items() if v}
     if _LOADED:
@@ -594,7 +603,9 @@ def line_detail(name: str) -> Optional[dict]:
         info["matchHow"] = rec.get("match_how")
         km_check = _km_check(ln, rec)
     return {**ln, "stations": pts, "segKm": seg,
+            "stopsManual": bool(ln.get("stopsManual")),
             "override": {"segKm": ov.get("segKm") or {}, "staKm": ov.get("staKm") or {},
+                         "stops": ov.get("stops") or [],
                          "totalKm": ov.get("totalKm"),
                          "note": ov.get("note") or ""} if ov else None,
             "info": info, "kmCheck": km_check,

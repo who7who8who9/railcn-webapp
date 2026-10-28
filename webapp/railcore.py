@@ -128,6 +128,7 @@ def init_db() -> None:
                 seg_km_json TEXT,          -- {"0":12.3} 站间里程，键是区间序号
                 sta_km_json TEXT,          -- {"15":163.0} 站累计里程，键是车站序号；null = 这一站明确不详
                 total_km    REAL,          -- 手工线路总里程，未手填段按比例缩放
+                stops_json  TEXT,          -- 人工站序 [{"name":"XX","km":12.3}]；null = 用档案站序
                 note        TEXT,
                 updated_at  REAL
             );
@@ -188,6 +189,9 @@ def init_db() -> None:
         lcols = {r[1] for r in conn.execute("PRAGMA table_info(line_override)")}
         if "sta_km_json" not in lcols:
             conn.execute("ALTER TABLE line_override ADD COLUMN sta_km_json TEXT")
+        # 老库迁移：档案线路的人工站序（站中间插站 / 调站序）
+        if "stops_json" not in lcols:
+            conn.execute("ALTER TABLE line_override ADD COLUMN stops_json TEXT")
         # 老库迁移：车站扩展信息（类型 / 来源 / 原写法 / 坐标来源）
         scols = {r[1] for r in conn.execute("PRAGMA table_info(station_custom)")}
         for col in ("type", "source", "alias", "coord_src"):
@@ -820,7 +824,8 @@ def list_line_overrides() -> Dict[str, dict]:
     try:
         with db() as conn:
             rows = conn.execute(
-                "SELECT name, seg_km_json, sta_km_json, total_km, note, updated_at FROM line_override"
+                "SELECT name, seg_km_json, sta_km_json, stops_json, total_km, note, updated_at "
+                "FROM line_override"
             ).fetchall()
     except sqlite3.Error:
         return {}
@@ -834,10 +839,39 @@ def list_line_overrides() -> Dict[str, dict]:
             sta = _clean_sta_km(json.loads(row["sta_km_json"] or "{}"))
         except (TypeError, ValueError):
             sta = {}
+        try:
+            stops = _clean_stops(json.loads(row["stops_json"] or "[]"))
+        except (TypeError, ValueError):
+            stops = []
         out[row["name"]] = {
-            "segKm": seg, "staKm": sta, "totalKm": row["total_km"],
+            "segKm": seg, "staKm": sta, "stops": stops, "totalKm": row["total_km"],
             "note": row["note"], "updatedAt": row["updated_at"],
         }
+    return out
+
+
+def _clean_stops(raw) -> List[dict]:
+    """人工站序的入库 / 出库口径：[{name, km}]，km 可为 None"""
+    if not isinstance(raw, list):
+        return []
+    out: List[dict] = []
+    for s in raw:
+        if isinstance(s, str):
+            s = {"name": s}
+        if not isinstance(s, dict):
+            continue
+        nm = _norm_line_name(s.get("name") or "")
+        if not nm:
+            continue
+        km = s.get("km")
+        if km in ("", None):
+            km = None
+        else:
+            try:
+                km = round(float(km), 1)
+            except (TypeError, ValueError):
+                km = None
+        out.append({"name": nm, "km": km})
     return out
 
 
@@ -849,10 +883,10 @@ def line_override_map() -> Dict[str, dict]:
 
 
 def _apply_line_overrides() -> None:
-    """把库里的人工线路里程灌进 cnrail，并重建「站名→线路里程」索引"""
+    """把库里的人工线路站序 / 里程灌进 cnrail，并重建「站名→线路里程」索引"""
     cnrail.set_line_overrides({
         name: {"segKm": ov.get("segKm") or {}, "staKm": ov.get("staKm") or {},
-               "totalKm": ov.get("totalKm")}
+               "stops": ov.get("stops") or [], "totalKm": ov.get("totalKm")}
         for name, ov in line_override_map().items()
     })
 
@@ -1677,14 +1711,110 @@ def save_line_override(name: str, seg_km=None, total_km=None, note: str = "",
 
 
 def clear_line_override(name: str) -> bool:
+    """清掉人工里程，回到档案值
+
+    只改过站序的线（stops_json 有值）保留站序 —— 「恢复档案值」说的是里程，
+    不该顺带把用户插的站一起撤掉；站序要恢复走「恢复档案站序」。
+    """
     ln = cnrail.line(name)
     lname = ln["name"] if ln else _norm(name)
     with _db_lock, db() as conn:
-        hit = conn.execute("DELETE FROM line_override WHERE name=?", (lname,)).rowcount > 0
+        row = conn.execute("SELECT stops_json FROM line_override WHERE name=?",
+                           (lname,)).fetchone()
+        hit = False
+        if row:
+            if (row["stops_json"] or "").strip() not in ("", "[]", "null"):
+                conn.execute(
+                    "UPDATE line_override SET seg_km_json='{}', sta_km_json='{}', "
+                    "total_km=NULL, note='', updated_at=? WHERE name=?",
+                    (time.time(), lname))
+            else:
+                conn.execute("DELETE FROM line_override WHERE name=?", (lname,))
+            hit = True
     global _line_ovr_cache
     _line_ovr_cache = None
     _apply_line_overrides()
     return hit
+
+
+def save_line_stations(name: str, stations, note: str = "") -> dict:
+    """改一条线的站序（站中间插站、调先后）—— 自建 / 档案线路都走这里
+
+    自建线路直接改自己的站表；档案线路改不了原始档案，改的是本机覆盖（line_override
+    的 stops_json）：整份替换档案站序，`/api/line` 一读就套用，随时能「恢复档案站序」。
+    站序一变，旧人工里程的下标（第 i 段 / 第 i 站）就对不上了，所以一并清掉，
+    改为按这次填的累计里程重算。
+    """
+    ln = cnrail.line(name)
+    if not ln:
+        raise ValueError("线路库里没有这条线：" + str(name or ""))
+    stops = _clean_stops(stations)
+    # 落库前按档案 / 12306 口径归一（「唐海南站」→「唐海南」），和车次经停站对得上
+    stops = [{"name": _entry_name(s["name"]), "km": s["km"]} for s in stops]
+    stops = [s for s in stops if s["name"]]
+    if len(stops) < 2:
+        raise ValueError("一条线路至少要两个车站")
+    names = [s["name"] for s in stops]
+    dup = list(dict.fromkeys(n for i, n in enumerate(names) if n in names[:i]))
+    if dup:
+        raise ValueError("站表里有重复车站：" + "、".join(dup))
+
+    lname = ln["name"]
+    now = time.time()
+    if ln.get("custom"):
+        old = next((x for x in list_custom_lines() if x["name"] == lname), None)
+        detail = save_custom_line(lname, stops, note or (old or {}).get("note") or "",
+                                  replace=True)
+        detail["stationOrder"] = "custom"
+        return detail
+
+    # 档案线路：存成人工站序（保留备注；下标类里程一律作废）
+    old_ov = line_override_map().get(lname) or {}
+    note = (note or "").strip() or (old_ov.get("note") or "")
+    with _db_lock, db() as conn:
+        conn.execute(
+            """INSERT INTO line_override(name, seg_km_json, sta_km_json, stops_json,
+                                         total_km, note, updated_at)
+               VALUES(?,'{}','{}',?,NULL,?,?)
+               ON CONFLICT(name) DO UPDATE SET
+                 seg_km_json='{}', sta_km_json='{}', stops_json=excluded.stops_json,
+                 total_km=NULL, note=excluded.note, updated_at=excluded.updated_at""",
+            (lname, json.dumps(stops, ensure_ascii=False), note, now),
+        )
+    global _line_ovr_cache, _LIB_IDX
+    _line_ovr_cache = None
+    _apply_line_overrides()
+    _LIB_IDX = None                       # 站序变了，OSM 占用比对要重算
+
+    filled = _fill_line_stations(lname, names)
+    if filled:
+        _apply_custom()                   # 新补进来的站要并进 cnrail，线路页才有坐标
+        _reload_coord_cache()
+        _apply_coord_overrides()
+    detail = cnrail.line_detail(lname) or dict(ln)
+    detail["stationOrder"] = "override"
+    detail["filledStations"] = filled
+    return detail
+
+
+def clear_line_stations(name: str) -> dict:
+    """撤销档案线路的人工站序，回到档案原样
+
+    站序变了以后旧里程下标没意义，所以整行校正一起清掉（界面会说明）。
+    """
+    ln = cnrail.line(name)
+    if not ln:
+        raise ValueError("线路库里没有这条线：" + str(name or ""))
+    lname = ln["name"]
+    if ln.get("custom"):
+        raise ValueError("自建线路没有档案站序可恢复，直接改站表即可")
+    with _db_lock, db() as conn:
+        hit = conn.execute("DELETE FROM line_override WHERE name=?", (lname,)).rowcount > 0
+    global _line_ovr_cache, _LIB_IDX
+    _line_ovr_cache = None
+    _apply_line_overrides()
+    _LIB_IDX = None
+    return {"name": lname, "cleared": hit, "line": cnrail.line_detail(lname)}
 
 
 def _coord_pair(lat, lon) -> Tuple[float, float]:

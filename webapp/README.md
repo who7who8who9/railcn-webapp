@@ -664,6 +664,19 @@ python scripts\import_crtrain.py     :: 归集成 data\crtrain\lines.json + geom
 > 现在匹配不到时回退到 `routes.raw LIKE '%"station_name": "站名"%'` 反查
 > （全表扫描约 0.3 s，撤销是低频操作，可以接受）。
 
+## 前端样式约定（类名别撞车）
+
+单文件 `static/app.js` 里几套东西共用同一份 CSS，类名一撞就是整块布局塌掉，动 class 前先看一眼这张表：
+
+| 类名 | 干什么 | 注意 |
+|---|---|---|
+| `.od-form .od-row` | 查询表单的一行（站站查询 / 车站线路） | `display:flex`，输入框靠 `.field{flex:1}` 撑开 |
+| `.mate-list / .mate-row` | 校对页「同起讫点车次」的六列 grid | 早期也叫 `.od-row`，grid 覆盖了表单的 flex，把输入框压成 24px |
+| `.suggest > .si` | 联想下拉的条目 | 左 `<span>` 名字、右 `<span class="c">` 灰字、缺坐标加 `.nocoord`；**别再用 `.sug-item`**（CSS 里没有这个类，写出来就是一行没有内边距的裸文字） |
+| `.list:empty` | 空列表 | 自动 `display:none`；车站查询是直接出详情，列表空着不该和 `.detail` 平分高度 |
+
+回归：`python scripts/test_net_form.py` —— 盯输入框宽度、联想框宽度与行高、Esc / 点空白能否收起、空列表是否还占高度。
+
 ## HTTP 接口
 
 | 接口 | 参数 | 说明 |

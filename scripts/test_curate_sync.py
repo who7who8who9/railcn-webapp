@@ -152,12 +152,12 @@ def check_ui(src, dst):
         pg.wait_for_timeout(700)
 
         assert pg.query_selector("#ceProp") is None, "「同类 N 趟一并沿用」复选框还在"
-        rows = pg.query_selector_all("#ceMates .od-row")
+        rows = pg.query_selector_all("#ceMates .mate-row")
         print(f"  编辑器里同起讫点 {len(rows)} 行")
         assert rows, "没渲染出同起讫点的车次"
 
         # 勾一个同伴 → 保存按钮旁计数出现
-        box = pg.query_selector('#ceMates .od-row[data-code="%s"] input[type=checkbox]' % dst)
+        box = pg.query_selector('#ceMates .mate-row[data-code="%s"] input[type=checkbox]' % dst)
         assert box, f"列表里没有 {dst}"
         box.check()
         pg.wait_for_timeout(200)
@@ -166,11 +166,11 @@ def check_ui(src, dst):
         assert dst in cnt or "1 趟" in cnt, "勾选后没显示同步条数"
 
         # 停站详情
-        pg.query_selector('#ceMates .od-row[data-code="%s"] .od-more' % dst).click()
+        pg.query_selector('#ceMates .mate-row[data-code="%s"] .mate-more' % dst).click()
         pg.wait_for_timeout(900)
-        det = pg.query_selector(f'.od-detail[data-for="{dst}"]')
+        det = pg.query_selector(f'.mate-detail[data-for="{dst}"]')
         assert det and not det.get_attribute("class").count("hidden"), "停站详情没展开"
-        nst = pg.eval_on_selector_all(f'.od-detail[data-for="{dst}"] .od-st', "els => els.length")
+        nst = pg.eval_on_selector_all(f'.mate-detail[data-for="{dst}"] .mate-st', "els => els.length")
         print(f"  停站详情 {nst} 行")
         assert nst >= 2, "停站详情没内容"
         pg.screenshot(path=os.path.join(SHOT, "cu-sync.png"))

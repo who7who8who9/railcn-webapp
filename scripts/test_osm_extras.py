@@ -79,14 +79,14 @@ def check_ui(kw: str, lib_name: str, osm_name: str) -> None:
         pg.click("#netQ")
         pg.type("#netQ", kw, delay=90)
         pg.wait_for_timeout(1200)
-        rows = [x.inner_text().replace("\n", " ") for x in pg.query_selector_all("#sugNet .sug-item")]
+        rows = [x.inner_text().replace("\n", " ") for x in pg.query_selector_all("#sugNet .si")]
         print(f"  下拉：{rows}")
         assert any(r.startswith(lib_name) for r in rows), "下拉里没有库内那条"
         assert any(r.startswith(osm_name) for r in rows), "下拉里没有 OSM 那条"
         assert any("OSM" in r for r in rows), "OSM 那条没标出来"
         pg.screenshot(path=os.path.join(SHOT, "suggest.png"))
 
-        pg.query_selector_all("#sugNet .sug-item")[0].click()
+        pg.query_selector_all("#sugNet .si")[0].click()
         pg.wait_for_timeout(2200)
         blk = pg.query_selector("#lnOsmOther")
         assert blk, "详情里没有 OSM 提示块"

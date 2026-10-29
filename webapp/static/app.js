@@ -3272,14 +3272,18 @@ async function suggestNet() {
       : [...(d.items || []).map(x => ({ ...x, lib: true })),
          ...(d.osm || []).map(x => ({ ...x, lib: false }))].slice(0, 12);
     if (!items.length) { box.classList.add('hidden'); return; }
+    /* 和站站查询那边共用 .si / .c 的样式（.sug-item 是早期写法，CSS 里没有它，
+       联想框会退化成一行没有内边距的裸文字） */
     box.innerHTML = items.map(it => netKind === 'station'
-      ? `<div class="sug-item" data-v="${esc(it.name)}">${esc(it.name)} <i>${esc(it.city || '')}</i></div>`
-      : `<div class="sug-item" data-v="${esc(it.name)}" data-osm="${it.lib ? 0 : 1}">
-           ${esc(it.name)}
-           <i>${it.lib ? `${it.n} 站 · ${lnKmText(it.totalKm)}`
-                       : `${it.km} km · OSM 未收录`}</i></div>`).join('');
+      ? `<div class="si${it.hasCoord === false ? ' nocoord' : ''}" data-v="${esc(it.name)}"
+           title="${it.archive === false ? '线路库还没收录这个站，资料来自 12306 站表' : ''}">
+           <span>${esc(it.name)}</span><span class="c">${esc(it.city || '')}</span></div>`
+      : `<div class="si" data-v="${esc(it.name)}" data-osm="${it.lib ? 0 : 1}">
+           <span>${esc(it.name)}</span>
+           <span class="c">${it.lib ? `${it.n} 站 · ${lnKmText(it.totalKm)}`
+                         : `${it.km} km · OSM 未收录`}</span></div>`).join('');
     box.classList.remove('hidden');
-    $$('#sugNet .sug-item').forEach(el => el.addEventListener('click', () => {
+    $$('#sugNet .si').forEach(el => el.addEventListener('click', () => {
       $('#netQ').value = el.dataset.v;
       box.classList.add('hidden');
       if (el.dataset.osm === '1') showOsmLine(el.dataset.v);   // 库里没有，直接看 OSM 走向
@@ -3934,6 +3938,14 @@ async function boot() {
   $('#btnNet').addEventListener('click', searchNet);
   $('#netQ').addEventListener('keydown', e => e.key === 'Enter' && searchNet());
   $('#netQ').addEventListener('input', () => { clearTimeout(netTimer); netTimer = setTimeout(suggestNet, 220); });
+  // 联想框：点别处 / 按 Esc 收起（下拉盖住了下面那排「车站 / 线路」，不收起来会一直挡着）
+  document.addEventListener('click', e => {
+    const box = $('#sugNet');
+    if (!box.contains(e.target) && e.target !== $('#netQ')) box.classList.add('hidden');
+  });
+  $('#netQ').addEventListener('keydown', e => {
+    if (e.key === 'Escape') $('#sugNet').classList.add('hidden');
+  });
   $$('.chipsel').forEach(b => b.addEventListener('click', () => {
     $$('.chipsel').forEach(x => x.classList.remove('active'));
     b.classList.add('active');
@@ -4559,24 +4571,24 @@ function odRowHtml(it) {
   const on = CU.mates.has(it.code);
   const tags = [];
   tags.push(it.sameStops
-    ? '<span class="od-tag same" title="站序和这趟车完全一样，经套过去最准">站序相同</span>'
-    : `<span class="od-tag" title="和这趟车共有的停站占比">重合 ${it.overlap}%</span>`);
+    ? '<span class="mate-tag same" title="站序和这趟车完全一样，经套过去最准">站序相同</span>'
+    : `<span class="mate-tag" title="和这趟车共有的停站占比">重合 ${it.overlap}%</span>`);
   if (it.hasOverride) {
-    tags.push(`<span class="od-tag manual" title="已有一条自己的校正，勾选同步会覆盖它">${
+    tags.push(`<span class="mate-tag manual" title="已有一条自己的校正，勾选同步会覆盖它">${
       it.origin === 'sync' ? '同步入库' : '已校正'}</span>`);
   } else if (it.viaSource === 'auto') {
-    tags.push('<span class="od-tag pending">待确认</span>');
+    tags.push('<span class="mate-tag pending">待确认</span>');
   }
   const time = it.startTime ? `${esc(it.startTime)}–${esc(it.endTime || '')}` : '';
-  return `<div class="od-row${on ? ' on' : ''}" data-code="${esc(it.code)}">
-    <label class="od-chk"><input type="checkbox"${on ? ' checked' : ''}></label>
-    <span class="od-code">${esc(it.codeLabel || it.code)}</span>
-    <span class="od-meta">${it.stops} 站${time ? ' · ' + time : ''}</span>
-    <span class="od-tags">${tags.join('')}</span>
-    <span class="od-via" title="${esc(it.via || '')}">${esc(it.via || '经由未识别')}</span>
-    <button type="button" class="od-more">停站详情</button>
+  return `<div class="mate-row${on ? ' on' : ''}" data-code="${esc(it.code)}">
+    <label class="mate-chk"><input type="checkbox"${on ? ' checked' : ''}></label>
+    <span class="mate-code">${esc(it.codeLabel || it.code)}</span>
+    <span class="mate-meta">${it.stops} 站${time ? ' · ' + time : ''}</span>
+    <span class="mate-tags">${tags.join('')}</span>
+    <span class="mate-via" title="${esc(it.via || '')}">${esc(it.via || '经由未识别')}</span>
+    <button type="button" class="mate-more">停站详情</button>
   </div>
-  <div class="od-detail hidden" data-for="${esc(it.code)}"></div>`;
+  <div class="mate-detail hidden" data-for="${esc(it.code)}"></div>`;
 }
 
 function cuMatesHtml(d) {
@@ -4592,7 +4604,7 @@ function cuMatesHtml(d) {
         <span class="hint" id="ceMateCount"></span>
       </span>
     </h4>
-    <div class="od-list" id="ceMates">${items.map(odRowHtml).join('')}</div>
+    <div class="mate-list" id="ceMates">${items.map(odRowHtml).join('')}</div>
     <div class="ve-note">同步只带动经由：站间里程按「第几站」记下标，站数不同就对不上，所以不跟着同步。
       已经有自己校正的车次默认不覆盖，勾了会在保存前问一句。</div>
   </div>`;
@@ -4615,19 +4627,19 @@ function cuBindMates() {
   const valid = new Set(items.map(x => x.code));
   [...CU.mates].forEach(c => { if (!valid.has(c)) CU.mates.delete(c); });
   cuMateCount();
-  $$('#ceMates .od-row').forEach(row => {
+  $$('#ceMates .mate-row').forEach(row => {
     const code = row.dataset.code;
     row.querySelector('input[type=checkbox]').addEventListener('change', e => {
       if (e.target.checked) CU.mates.add(code); else CU.mates.delete(code);
       row.classList.toggle('on', e.target.checked);
       cuMateCount();
     });
-    row.querySelector('.od-more').addEventListener('click', () => cuToggleMateDetail(code));
+    row.querySelector('.mate-more').addEventListener('click', () => cuToggleMateDetail(code));
   });
   const same = $('#ceMateSame');
   if (same) {
     same.addEventListener('change', () => {
-      $$('#ceMates .od-row').forEach(row => {
+      $$('#ceMates .mate-row').forEach(row => {
         const it = items.find(x => x.code === row.dataset.code) || {};
         const want = same.checked ? !!it.sameStops : false;
         const cb = row.querySelector('input[type=checkbox]');
@@ -4643,31 +4655,31 @@ function cuBindMates() {
 
 /** 展开/收起某趟车的停站详情（第一次展开才去取，取过就留着） */
 async function cuToggleMateDetail(code) {
-  const box = $(`.od-detail[data-for="${code}"]`);
+  const box = $(`.mate-detail[data-for="${code}"]`);
   if (!box) return;
   if (!box.classList.contains('hidden')) { box.classList.add('hidden'); return; }
   if (!box.dataset.loaded) {
-    box.innerHTML = '<div class="od-loading">正在读取停站…</div>';
+    box.innerHTML = '<div class="mate-loading">正在读取停站…</div>';
     try {
       const d = await api('/api/curate/mate', { code });
       const last = (d.stops || []).length - 1;
       const rows = (d.stops || []).map((s, i) => {
         const arr = s.arr ? `到 ${s.arr}` : '';
         const dep = i === last ? '' : (s.dep ? `开 ${s.dep}` : '');
-        return `<div class="od-st">
+        return `<div class="mate-st">
           <span class="i">${i + 1}</span>
           <span class="n">${esc(s.name)}</span>
           <span class="t">${[arr, dep].filter(Boolean).join(' / ')}</span>
           ${s.day ? `<span class="d">+${s.day}</span>` : ''}
         </div>`;
       }).join('');
-      box.innerHTML = `<div class="od-sthead">${esc(d.codeLabel || d.code)} · ${esc(d.date || '')} ·
+      box.innerHTML = `<div class="mate-sthead">${esc(d.codeLabel || d.code)} · ${esc(d.date || '')} ·
           ${esc(d.from || '—')} → ${esc(d.to || '—')} · ${(d.stops || []).length} 站${
           d.override && d.override.via ? ` · 已有 ${d.override.via} 段校正` : ''}</div>
-        <div class="od-stops">${rows || '<div class="od-loading">没有停站数据</div>'}</div>`;
+        <div class="mate-stops">${rows || '<div class="mate-loading">没有停站数据</div>'}</div>`;
       box.dataset.loaded = '1';
     } catch (e) {
-      box.innerHTML = `<div class="od-loading">读取失败：${esc(e.message)}</div>`;
+      box.innerHTML = `<div class="mate-loading">读取失败：${esc(e.message)}</div>`;
     }
   }
   box.classList.remove('hidden');

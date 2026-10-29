@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>railcn · 线路整理台</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🗺️</text></svg>">
+<link rel="stylesheet" href="linedesk.css">
+</head>
+<body>
+<div id="ldapp">
+
+  <header class="ld-top">
+    <div class="ld-brand">
+      <span style="font-size:17px">🗺️</span>
+      <b>线路整理台</b>
+      <span class="sub">独立库 linedesk.db · 手动归并线路与站序</span>
+    </div>
+    <div class="ld-stats" id="ldStats"></div>
+    <div class="ld-actions">
+      <button id="btnNew" class="btn ghost" title="线路库里没有的线，先建一条空的，再补站序">+ 新线</button>
+      <button id="btnMerge" class="btn ghost" title="把几条不同写法的线并成一条">合并</button>
+      <button id="btnRebuild" class="btn ghost" title="从 rail.db 补进新出现的线名，已整理过的不动">补新线</button>
+      <button id="btnLog" class="btn ghost" title="谁在什么时候改了什么">记录</button>
+      <button id="btnExport" class="btn ghost" title="导出整理结果（规范名 ← 各来源写法 + 站序 + 父子关系）">导出 JSON</button>
+      <a class="btn ghost" href="/" title="回到车次查询">回查询页</a>
+    </div>
+  </header>
+
+  <main>
+    <aside class="ld-left">
+      <div class="ld-search">
+        <input id="ldQ" placeholder="线名 / 别名，如 京哈、成昆" autocomplete="off">
+        <button id="ldGo" class="btn">查</button>
+      </div>
+      <div id="ldFilters" class="ld-filters"></div>
+      <div id="ldCount" class="ld-count"></div>
+      <div id="ldList" class="ld-list"></div>
+    </aside>
+
+    <section class="ld-stage">
+      <svg id="ldMap" xmlns="http://www.w3.org/2000/svg"></svg>
+
+      <div id="ldMapInfo" class="ld-mapinfo">
+        <div class="t" style="color:#77839a">未选线路</div>
+        <div class="r">左侧挑一条线，这里会画出它的走向与站位。</div>
+      </div>
+
+      <div class="ld-mapctl">
+        <button data-zoom="in" title="放大">+</button>
+        <button data-zoom="out" title="缩小">−</button>
+        <button data-zoom="fit" class="wide" title="整条线放进画面">适应</button>
+      </div>
+
+      <div class="ld-legend">
+        <i><span class="ln geo"></span>OSM 真实走向</i>
+        <i><span class="ln"></span>无走向时按站点直连</i>
+        <i><span class="dot"></span>站</i>
+        <i><span class="dot sel"></span>点中的站</i>
+      </div>
+    </section>
+
+    <aside class="ld-right" id="ldPanel"></aside>
+  </main>
+</div>
+
+<script src="linedesk.js"></script>
+</body>
+</html>

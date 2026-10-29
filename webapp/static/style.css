@@ -56,6 +56,7 @@ button{font-family:inherit}
 .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
 .btn.primary:hover{background:#1a5fd0;border-color:#1a5fd0}
 .btn.ghost{background:transparent}
+a.btn{display:inline-flex;align-items:center;justify-content:center;text-decoration:none}
 .btn.on{background:var(--accent-soft);border-color:#c7dbff;color:var(--accent);font-weight:600}
 .btn.round{width:34px;padding:0;border-radius:50%;font-size:12px}
 

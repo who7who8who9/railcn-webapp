@@ -8,12 +8,14 @@
 ## 1. 这是什么
 
 本地铁路查询网页：查车次 / 经停站 / 余票、按日期批量采集、看历史数据、地图上画走向，
-外加一个「数据校对」页把线路 / 站点 / 经由 / 里程 / 坐标的人工修正沉淀成正式库。
+外加一个「数据校对」页把线路 / 站点 / 经由 / 里程 / 坐标的人工修正沉淀成正式库，
+和一个独立的「线路整理台」（`/linedesk.html`）把五套来源的线名归并成人能看懂的规范线路。
 
 - 纯标准库后端（`ThreadingHTTPServer` + SQLite），前端单页（`index.html` + `app.js` + `style.css`），无框架无构建。
 - 数据源：12306（车次 / 经停 / 余票）、`cnrail_data_v2.xlsx`（车站 / 线路 / 站序底表）、
-  辉睿线路资料库（844 条线路参数与逐站里程）、OSM（线路几何，可选）。
-- 本地库：`webapp/data/rail.db`（约 160 MB，不入库）。
+  辉睿线路资料库（844 条线路参数与逐站里程）、china-emu（660 条线路的逐站 K 里程）、OSM（线路几何，可选）。
+- 本地库：`webapp/data/rail.db`（约 160 MB，不入库）；
+  整理库 `webapp/data/linedesk.db`（约 2 MB，**入库**，是人工整理的成果）。
 
 ## 2. 怎么跑
 
@@ -24,6 +26,7 @@ C:/Users/Administrator/AppData/Local/Programs/Python/Python313/python.exe webapp
 ```
 
 - **改了 `.py` 必须重启服务**（常驻进程，没有热重载）；只改 `static/` 下的文件刷新页面即可。
+- **U 盘同步已暂停**：推到 U 盘那一步先别做，等用户说「需要」再恢复（代码和库都别拷）。
 - 服务日志走 stderr，一行一个请求；排查先看 `GET/POST -> 200` 有没有异常。
 - 推送：`env -u HTTPS_PROXY -u HTTP_PROXY -u ALL_PROXY git -c http.proxy= -c https.proxy= push origin main`
   （本机代理会 502，必须剥掉）。
@@ -33,18 +36,21 @@ C:/Users/Administrator/AppData/Local/Programs/Python/Python313/python.exe webapp
 
 ```
 railcn/
-├─ data/            车站档案 7579、线路 417、坐标索引、huirui 线路资料库
-├─ scripts/         数据导入（crtrain / huirui / 站名归一 / 去重）+ 17 个回归脚本
+├─ data/            车站档案 7579、线路 417、坐标索引、huirui 线路资料库、chinaemu
+├─ scripts/         数据导入（crtrain / huirui / chinaemu / 站名归一 / 去重）+ 19 个回归脚本
+│                   （含 build_linedesk.py 建整理库、report_line_names.py 出清理报告）
 ├─ webapp/
-│  ├─ server.py     HTTP 路由（563 行，所有接口在这一个文件里）
+│  ├─ server.py     HTTP 路由（约 700 行，所有接口在这一个文件里）
 │  ├─ railcore.py   核心（3036 行）：SQLite 缓存、经由推断、里程、校正存取、同步
 │  ├─ curate.py     校对页后端（655 行）：扫描、清单、详情、同起讫点、停站明细
 │  ├─ cnrail.py     底表 JSON 查询：线路展开、里程、站序、经由推断 cnrail.infer_via
+│  ├─ linedesk.py   线路整理台：独立库 linedesk.db、线名归并、站序与父子关系维护
 │  ├─ collector.py  按日期批量下载（并发 / 断点 / 自适应限速 / 一键连跑）
 │  ├─ railosm.py + railgeom.py  OSM 真实走向折线
 │  ├─ historyq.py   历史数据查询（开行日历 / 覆盖 / 大类统计）
-│  └─ static/       index.html / app.js(6057 行) / style.css(1101 行)
-└─ docs/            README 用截图 + 本文件
+│  └─ static/       index.html / app.js(6100 行) / style.css
+│                   linedesk.html / linedesk.js / linedesk.css（整理台，自带 SVG 地图）
+└─ docs/            README 用截图 + 本文件 + line-names-report.md（清理报告）
 ```
 
 ## 4. 数据模型（`webapp/data/rail.db`）
@@ -61,6 +67,22 @@ railcn/
 | **`train_override`** | 21 | **人工经由的正式库**，见下 |
 | `curate` | 12722 | 校对清单（每趟车一行摘要，扫描生成） |
 | `via_class` | 2 | **已废弃**（「同类沿用」已删），可删表 |
+
+### 另一个库：`webapp/data/linedesk.db`（整理库，入库）
+
+线名整理是独立的一件事，另开库，**rail.db 一个字节都不碰**：
+
+| 表 | 说明 |
+|---|---|
+| `ld_line` | 规范线路：`name` 人工定的规范名、`family` 归一键（`前缀|族`）、`kind`、`status`(draft/confirmed)、`total_km`、起讫、`src_main` |
+| `ld_alias` | 每个来源的原始写法，`UNIQUE(source,name)`——一个来源线名只能归一条线 |
+| `ld_stop` | 整理后的站序：站名 / 里程 / 经纬度 / 这站取自哪个来源 |
+| `ld_relation` | 分段 ↔ 全线的父子（`kind='seg'`），带成环检查 |
+| `ld_log` | 改动流水 |
+
+初稿由 `scripts/build_linedesk.py` 从五套来源机器归并（3445 条线 / 4841 个写法 / 61 条父子），
+`status='draft'`，在 `/linedesk.html` 里人工确认。重建是幂等的：只补新出现的线名，
+已整理过的不动，`--force` 才清空。
 
 ### `train_override`（最重要）
 
@@ -172,8 +194,22 @@ railcn/
     - **遗留**：资料库还有 39 条「小资料挂大干线」的错配（马坊支线→京哈线、库俄线→南疆线、
       南昌西环线→京九线…），站序包含关系能判，但需要再跑一轮修正。
 
-## 6. 前端约定
+17. **线名整理走独立库，别往 rail.db 里塞。** 五套来源的线名各写各的（底表分段命名
+    `京哈高速线京沈段`、辉睿 `京沪高铁`、china-emu `京沪高速铁路`、OSM `京沪高速线`），
+    整理结果落在 `webapp/data/linedesk.db`，`rail.db` 一个字节都不改。
+    - **归并只做名字层面确定的事**：后缀族归一（`高铁/高速线/高速铁路/客运专线/客专` → 高速族；
+      `城际/城际线/城际铁路` → 城际族；`线/铁路` → 普速族），`X线Y段` 拆成「父线 + 段名」，
+      同一段的两种写法按「父线族 + 段名」再并一次（否则京哈沈哈段会挂两遍）。
+    - **OSM 的桥隧名不算写法**：`图佳线（第一五林河桥）` 这种有 150 个，是桥隧要素不是线名，
+      `is_work_name()` 滤掉。不加的话「写法数」全是水（图佳线能显示 24 种写法）。
+    - **分段名的父线没人命名时补一条空壳**（`src_main='inferred'`），站序留空待人工补。
+    - **初稿是机器归并的，`status='draft'`，必须人工确认**；重建幂等，只补新线名，
+      `--force` 才清空（会连人工结果一起清）。
+    - **合并时被并掉那条的规范名也要存成别名**，否则搜旧名再也找不到它；
+      转移别名要先把整批读出来再改（边查边改同一张表会漏行）。
+    - **不做自动回灌**：整理结果先导出（`/api/ld/export`）人工看，确认真对了再谈改 rail.db。
 
+## 6. 前端约定
 - 5 个页签：`车站/线路`、`站站查询`、`数据下载`、`历史数据`、`数据校对`；状态都在全局 `CU` 对象里。
 - 校对页筛选：`todo / via0 / via / km / coord / pending / manual / synced / clean / all`。
 - **类名别撞车**（`.od-form .od-row` 是查询表单 flex；`.mate-*` 是同起讫点六列 grid；
@@ -181,13 +217,13 @@ railcn/
   非客运节点；`.list:empty{display:none}`）——详见 `webapp/README.md` 的同名章节。
 - `cuLoad()` 带请求序号 `CU.loadSeq`，连点筛选 / 搜索时旧响应整包丢弃（否则列表会被旧结果盖住）。
 
-## 7. 回归脚本（19 个，改完必跑）
+## 7. 回归脚本（20 个，改完必跑）
 
 ```bash
 for f in test_chain test_line_km test_line_stations test_nm_stations test_osm_extras \
          test_station_loose test_tl_stops test_geo_toggle test_dock_speed test_code_alias \
          test_routestore test_nm_insert test_curate_refresh test_curate_sync test_net_form \
-         test_via_nodes test_lineseg test_catalog_match test_chinaemu; do
+         test_via_nodes test_lineseg test_catalog_match test_chinaemu test_linedesk; do
   "C:/Users/Administrator/AppData/Local/Programs/Python/Python313/python.exe" scripts/$f.py
 done
 ```
@@ -201,6 +237,7 @@ done
 | `test_lineseg` | 分段线借整条线的几何并按首末站裁剪（元昆段 257.7 / 成攀段 725.4）、裁不出如实退整条（宁西线断 7 截）、只有 OSM 的线名补站序（成昆 133 站 / 京哈 37 站）、京港两段隔 407 km 拒绝拼、UI 标「借…裁出本段」|
 | `test_catalog_match` | 资料库不会挂到小联络线上（侯西线 42 站不能匹配陇海西成联络线 2 站）、分段关系不被误杀（京石高铁 → 京广高速线）、搜侯西线拿到 42 站 288.5 km 且 OSM 走向在 |
 | `test_chinaemu` | china-emu 表在且行数够、桥隧行没混进站序、match_key 两套命名同键、兰新线纠回 118 站（不是兰中城际 6 站）、资料库没有的线名能补出站序、杭深铁路补出 50+ 站里程、首末站里程口径对 |
+| `test_linedesk` | 整理库独立（跑在临时文件上，rail.db 修改时间不变）、京沪四种写法归到一条、京哈沈哈段只挂一次、改名不破坏线族、同一来源线名不能被两条线抢、china-emu 的 K 里程搬过来变段内里程、合并转移别名/站序/旧名仍可搜、父子不能成环、导出结构完整 |
 | `test_chain` | 车次合并（中途换号）与检索 |
 | `test_line_km` / `test_line_stations` | 线路里程双模式、站序编辑 |
 | `test_nm_stations` / `test_station_loose` | 新增线路站名并集、站名带「站」也能搜 |
@@ -226,6 +263,13 @@ done
 
 ## 9. 还没做 / 待定
 
+- **整理库怎么回灌 rail.db 还没定**（用户未拍板）：A 以 cnrail 417 + 自建 62 为骨架 + alias 映射表；
+  B 直接以辉睿 844 为骨架；C 新建 canonical line 表。整理台现在只是把关系攒在 `linedesk.db`，
+  导出（`/api/ld/export`）能拿到「规范名 ← 各来源写法 + 站序 + 父子」，回灌要等骨架定了再写。
+- 整理库 3445 条线里 **1223 条有站序**，其余 2000 多条只有 OSM 线名（有走向没站序）；
+  是否按 OSM 走向反查补站 —— 未定。
+- 资料库那 **39 条「小资料挂大干线」** 的历史错配（马坊支线→京哈线、库俄线→南疆线…）仍在 rail.db 里，
+  整理台能看到族内多条线，但要不要清空 `line_name` 让 compose 接管 —— 未确认。
 - 武冈城际、武石城际的站序一样（`line_catalog_stop` 源头数据错），是否按资料改正 —— 未确认。
 - 唐曹线站序从七道桥起、唐山站不在线上，所以 C248「唐山→南堡北」永远要人工填；是否把唐山接进站序 —— 未确认。
 - override 是否改成按 `code + 站表版本` 指纹存（调图后自动失效）。

@@ -32,6 +32,7 @@ import historyq  # noqa: E402
 import curate   # noqa: E402
 import railgeom  # noqa: E402
 import lineseg   # noqa: E402  分段线 ↔ 整线的站序 / 走向互补
+import linedesk  # noqa: E402  线路整理台（独立库 linedesk.db）
 
 mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("text/css", ".css")
@@ -227,9 +228,60 @@ class Handler(BaseHTTPRequestHandler):
                 refreshed = curate.refresh_station(res["name"])
                 return self.json({"ok": True, "refreshed": refreshed, **res})
 
+            # ---- 线路整理台（独立库 linedesk.db，不写 rail.db）----
+            if path == "/api/ld/save":
+                return self.json({"ok": True,
+                                  "line": linedesk.save_line(int(payload.get("id") or 0),
+                                                             payload)})
+
+            if path == "/api/ld/new":
+                return self.json({"ok": True, "line": linedesk.create_line(
+                    payload.get("name"), payload.get("kind") or "",
+                    payload.get("note") or "")})
+
+            if path == "/api/ld/delete":
+                linedesk.delete_line(int(payload.get("id") or 0))
+                return self.json({"ok": True})
+
+            if path == "/api/ld/alias/add":
+                return self.json({"ok": True, "line": linedesk.add_alias(
+                    int(payload.get("id") or 0), payload.get("source") or "",
+                    payload.get("name") or "", payload.get("srcId") or "")})
+
+            if path == "/api/ld/alias/del":
+                return self.json({"ok": True,
+                                  "line": linedesk.del_alias(int(payload.get("aliasId") or 0))})
+
+            if path == "/api/ld/stops/save":
+                return self.json({"ok": True, "line": linedesk.save_stops(
+                    int(payload.get("id") or 0), payload.get("stops") or [])})
+
+            if path == "/api/ld/stops/fill":
+                return self.json({"ok": True, "line": linedesk.fill_stops(
+                    int(payload.get("id") or 0), payload.get("source") or "",
+                    payload.get("name") or "")})
+
+            if path == "/api/ld/merge":
+                return self.json({"ok": True, "line": linedesk.merge_lines(
+                    payload.get("ids") or [], int(payload.get("into") or 0),
+                    payload.get("name") or "")})
+
+            if path == "/api/ld/relation":
+                return self.json({"ok": True, "line": linedesk.set_relation(
+                    int(payload.get("parent") or 0), int(payload.get("child") or 0),
+                    payload.get("kind") or "seg", payload.get("note") or "")})
+
+            if path == "/api/ld/relation/del":
+                return self.json({"ok": True, "line": linedesk.del_relation(
+                    int(payload.get("parent") or 0), int(payload.get("child") or 0))})
+
+            if path == "/api/ld/rebuild":
+                linedesk.clear_cache()
+                return self.json({"ok": True,
+                                  **linedesk.build_seed(bool(payload.get("force")))})
+
             if path == "/api/curate/scan":
                 return self.json(curate.start())
-
             if path == "/api/curate/refresh":
                 # 线路库动过之后按新线路重算这趟车的自动经由（校对页「重算」）
                 return self.json(curate.refresh(payload.get("code") or ""))
@@ -431,6 +483,42 @@ class Handler(BaseHTTPRequestHandler):
             d["osm"] = railgeom.meta(d.get("line_name") or d.get("name") or "",
                                      d.get("length_km"))
             return self.json(d)
+
+        # ---- 线路整理台 ----
+        if path == "/api/ld/stats":
+            return self.json(linedesk.stats())
+
+        if path == "/api/ld/lines":
+            return self.json(linedesk.list_lines(
+                one("q"), one("kind"), one("source"), one("status"),
+                bool(one("hasStops")),
+                int(one("limit", "200") or 200), int(one("offset", "0") or 0)))
+
+        if path == "/api/ld/line":
+            d = linedesk.line_detail(int(one("id", "0") or 0))
+            if not d:
+                return self.err("整理库里没有这条线路", 404)
+            return self.json(d)
+
+        if path == "/api/ld/geom":
+            return self.json(linedesk.geom(int(one("id", "0") or 0)))
+
+        if path == "/api/ld/candidates":
+            return self.json({"items": linedesk.family_candidates(
+                int(one("id", "0") or 0))})
+
+        if path == "/api/ld/source/search":
+            return self.json({"items": linedesk.search_source(
+                one("q"), int(one("limit", "40") or 40))})
+
+        if path == "/api/ld/source/stops":
+            return self.json(linedesk.source_stops(one("source"), one("name")))
+
+        if path == "/api/ld/log":
+            return self.json({"items": linedesk.recent_log(int(one("limit", "60") or 60))})
+
+        if path == "/api/ld/export":
+            return self.json(linedesk.export_map())
 
         # ---- 按日期批量下载 ----
         if path == "/api/dates":

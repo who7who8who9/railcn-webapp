@@ -752,6 +752,69 @@ python scripts/fill_catalog_km.py --apply   # 把里程补进 line_catalog_stop
 
 回归 `test_chinaemu`。
 
+### 线路整理台（独立库 linedesk.db）
+
+五套来源各写各的线名，同一条线最多四种写法：
+
+| 来源 | 写法 |
+|---|---|
+| 底表 | `京哈高速线京沈段`（按段命名） |
+| 辉睿资料库 | `京沪高铁` |
+| china-emu | `京沪高速铁路` |
+| OSM | `京沪高速线` |
+
+靠字符串硬绑已经绑不下去了，所以**另开一个库** `webapp/data/linedesk.db`，
+只做一件事：把「谁是谁」整理清楚，给人工确认。**它不碰 rail.db 一个字节**，
+整理完了再谈回灌。
+
+页面：`http://127.0.0.1:8686/linedesk.html`（主页面右上角「线路整理台」也能进）。
+
+```
+ld_line      规范线路（name 是人工定的规范名，family 是归一后的线族）
+ld_alias     每个来源的原始写法（source + name 唯一，一个来源线名只能归一条线）
+ld_stop      整理后的站序（站名 / 里程 / 坐标 / 这站来自哪个来源）
+ld_relation  分段 ↔ 全线 的父子关系
+ld_log       每次改动的流水
+```
+
+**初稿是机器归并出来的，`status='draft'`，要人工确认**：
+
+```bash
+python scripts/build_linedesk.py            # 建库 + 灌初稿（幂等：只补新出现的线名）
+python scripts/build_linedesk.py --force    # 清空重建（会把人工整理结果一起清掉）
+python scripts/report_line_names.py --out docs/line-names-report.md
+```
+
+归并只做名字层面确定的事，不做猜测：
+
+- **后缀族归一**：`高铁 / 高速线 / 高速铁路 / 客运专线 / 客专` 算同一个族，
+  `城际 / 城际线 / 城际铁路` 算一个族，`线 / 铁路` 算普速族。所以
+  `京沪高铁`、`京沪高速线`、`京沪高速铁路` 归到同一条线，其余写法进 `ld_alias`。
+- **「X线Y段」认成分段**：`京哈高速线沈哈段` 拆成父线 `京哈高速线` + 段名 `沈哈`，
+  父线在别的来源里存在就挂上去（61 条关系）。同一段有两种写法（`京哈高速线沈哈段` /
+  `京哈高速铁路沈哈段`）按「父线族 + 段名」再并一次，不会挂两遍。
+- **桥隧名不算写法**：OSM 把桥、隧道单独存一条，名字是 `图佳线（第一五林河桥）`，
+  共 150 个。这些不是线路的另一种叫法，`is_work_name()` 直接滤掉，
+  否则「写法数」会灌水（图佳线能显示成 24 种写法）。
+- **父线没人命名就补一条空壳**：海南环岛只剩东西两段、没有整条的名字，
+  就从分段名反推出 `海南环岛高铁线` 建一条（`src_main='inferred'`），站序留空待补。
+
+页面上的操作，也就是这套东西的全部能力：
+
+| 想干的事 | 怎么做 |
+|---|---|
+| 把几种写法认成同一条线 | 「各来源写法」里删错的、用「+ 收一条」补对的；下面「同族还没收的写法」会列出同族里还没归属的 |
+| 改规范名 / 类型 / 总里程 | 「基本信息」，改完点保存 |
+| 整理站序 | 站名可直接改、↑↓ 调顺序、✕ 删；「+ 站」补站（坐标自动按站名查档案）；也可以「用它」把某个来源的站序整份导进来 |
+| 把分段挂到整线 | 「挂到父线」，搜父线名；父线页面里会列出它由哪几段组成 |
+| 两条线其实是一条 | 顶部「合并」→ 勾几条 → 选目标线 → 合并。别名、站序、父子关系全部转移到目标线上，被并掉那条的规范名也会存成别名（不然搜不回来了） |
+| 看改过什么 | 顶部「记录」，`ld_log` 的流水 |
+
+**从 china-emu 导站序时会自动把 K 里程换成段内里程**（整份减掉首站），
+否则陇海铁路西宝段会变成「183 km 的线路，站序一直排到 1256 km」。
+
+回归 `test_linedesk`（35 项），跑的时候库指向临时文件，不碰正在整理的 `linedesk.db`。
+
 ### 地图：经由线路上的全部车站
 
 `cnrail.path_stations(stops, prefer=经由线路名)` 把经停站序列展开成「线路上全部车站」：
@@ -878,6 +941,24 @@ python scripts/fill_catalog_km.py --apply   # 把里程补进 line_catalog_stop
 | `GET /api/collect/stop` | `date` | 暂停（进度保留） |
 | `GET /api/collect/chain/start` | `workers`、`enum`、`start` | 一键连跑：先刷新全集（`enum=1`）再按天依次下载；`start=<日期>` 用于「继续连跑」 |
 | `GET /api/collect/chain/status` | — | 连跑进度（`status`/`index`/`total`/`curDate`/`plan`/`message`） |
+| `GET /api/ld/stats` | — | 整理库现状（线数 / 已确认 / 别名 / 有站序 / 父子 / 各来源条数） |
+| `GET /api/ld/lines` | `q`、`kind`、`source`、`status`、`hasStops`、`limit`、`offset` | 整理库线路清单，`q` 同时搜规范名和别名；有站序的排前面 |
+| `GET /api/ld/line` | `id` | 一条线的全部：别名、站序、父线、子段 |
+| `GET /api/ld/geom` | `id` | 画图用：站序坐标 + 借 OSM 别名取到的走向（取不到就只有站） |
+| `GET /api/ld/candidates` | `id` | 同族但还没被任何线收下的来源写法（页面「收」按钮的数据） |
+| `GET /api/ld/source/search` | `q`、`limit` | 在五套来源里搜线名（加别名时挑来源） |
+| `GET /api/ld/source/stops` | `source`、`name` | 某个来源里这条线自己的原始站序（多方对比用） |
+| `GET /api/ld/log` | `limit` | 改动流水 |
+| `GET /api/ld/export` | — | 导出整理结果：规范名 ← 各来源写法 + 站序 + 父子关系 |
+| `POST /api/ld/save` | `id` + 任选 `name`/`kind`/`status`/`total_km`/`note` | 改一条线 |
+| `POST /api/ld/new` | `name`、`kind` | 新建一条线 |
+| `POST /api/ld/delete` | `id` | 删线（别名、站序、关系一起删） |
+| `POST /api/ld/alias/add`、`/alias/del` | `id`+`source`+`name` / `aliasId` | 收 / 删来源写法 |
+| `POST /api/ld/stops/save` | `id`、`stops[]` | 整份覆盖站序（缺坐标按站名查档案补） |
+| `POST /api/ld/stops/fill` | `id`、`source`、`name` | 用某个来源的站序替换（china-emu 的 K 里程会平移成段内里程） |
+| `POST /api/ld/merge` | `ids[]`、`into`、`name` | 合并多条线，别名/站序/关系全部转移 |
+| `POST /api/ld/relation`、`/relation/del` | `parent`、`child`、`kind` | 挂 / 解除父子（会挡成环） |
+| `POST /api/ld/rebuild` | `force` | 从 rail.db 补新线名；`force=1` 清空重建 |
 | `GET /api/collect/chain/stop` | — | 暂停连跑（当天进度保留） |
 | `GET /api/collect/download` | `date`、`fmt=json\|csv` | 导出并直接下载 |
 | `GET /api/collect/files` | — | 已导出的文件清单 |

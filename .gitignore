@@ -2,6 +2,8 @@
 webapp/data/rail.db
 webapp/data/rail.db-wal
 webapp/data/rail.db-shm
+webapp/data/linedesk.db-wal
+webapp/data/linedesk.db-shm
 # 迁移前的自动备份
 webapp/data/rail.db.bak-*
 # 数据清洗 / 去重脚本导出的备份（按需自行保留，不进仓库）

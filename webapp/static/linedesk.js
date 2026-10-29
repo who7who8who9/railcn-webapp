@@ -293,8 +293,7 @@ function renderList() {
     $('#ldCount').textContent = '';
     return;
   }
-  box.innerHTML = S.items.map(it => {
-    const al = (it.aliases || []).length
+  box.innerHTML = S.items.map(it => {    const al = (it.aliases || []).length
       ? `<span class="als">${(it.aliases || []).map(a =>
           `<span class="s" style="background:${SRCBG(a.source)}" title="${esc(a.source)}：${esc(a.name)}"></span>`).join('')}</span>`
       : '<span style="color:#c3cddd">无别名</span>';
@@ -313,7 +312,13 @@ function renderList() {
       </div>
     </div>`;
   }).join('');
+  if (S.items.length < S.total) {
+    box.innerHTML += `<div style="padding:8px 2px 2px">
+      <button class="btn sm" id="ldMore">加载更多（还有 ${S.total - S.items.length} 条）</button></div>`;
+  }
   $('#ldCount').innerHTML = `共 <b>${S.total}</b> 条，显示 ${S.items.length} 条`;
+  const more = $('#ldMore');
+  if (more) more.onclick = () => { more.disabled = true; loadList(true); };
 
   $$('#ldList .ld-item').forEach(el => {
     el.onclick = () => {
@@ -350,15 +355,18 @@ function renderMergeBar() {
   $('#ldMergeCancel').onclick = () => { S.merge = false; S.picks.clear(); renderList(); renderMergeBar(); };
 }
 
-async function loadList() {
-  const p = new URLSearchParams({ limit: '300' });
+async function loadList(append) {
+  const p = new URLSearchParams({
+    limit: '300', offset: String(append ? S.items.length : 0),
+  });
   if (S.q) p.set('q', S.q);
   if (S.source) p.set('source', S.source);
   if (S.kind) p.set('kind', S.kind);
   if (S.status) p.set('status', S.status);
   if (S.hasStops) p.set('hasStops', '1');
   const d = await api('/api/ld/lines?' + p);
-  S.items = d.items || [];
+  const items = d.items || [];
+  S.items = append ? S.items.concat(items) : items;
   S.total = d.total || 0;
   renderList();
   renderMergeBar();

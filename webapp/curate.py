@@ -655,7 +655,8 @@ def detail(code: str) -> dict:
         old = railcore.route_stops_brief(code, stale["basedDate"])
         old_names = [s["name"] for s in old.get("stops") or []]
         new_names = out["stations"]
-        if old_names and old_names != new_names:
+        # 依据那天本身没抓到站序（拿到的是相邻某天的）就不比：差一天不代表调图
+        if old_names and old.get("dateExact", True) and old_names != new_names:
             stale.update(changed=True,
                          missing=[n for n in old_names if n not in new_names],
                          added=[n for n in new_names if n not in old_names])

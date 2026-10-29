@@ -366,6 +366,32 @@ def check_alias():
         assert len(st) >= 2, f"{code} 只按本号查 code，取不到站序"
         assert st[0].get("dep") or st[0].get("arr"), f"{code} 首站没有到发时刻"
 
+    # 指定那天没抓到、只能退到相邻某天：要能取到，并且明确标出不是当天那一页
+    with railcore.db() as conn:
+        pairs = conn.execute(
+            """SELECT c.code AS code, c.date AS date FROM curate c
+                WHERE NOT EXISTS (SELECT 1 FROM routes r
+                                   WHERE r.date = c.date
+                                     AND r.train_no = (SELECT train_no FROM trains t
+                                                        WHERE t.code = c.code
+                                                        ORDER BY date DESC LIMIT 1))
+                GROUP BY c.code LIMIT 8""").fetchall()
+    checked = 0
+    for p in pairs:
+        miss = railcore.route_stops_brief(p["code"], p["date"])
+        if not (miss.get("stops") or []):
+            continue
+        if miss.get("date") == p["date"]:        # 本号下正好有那一天，不算退让
+            continue
+        print(f"  {p['code']} 指定 {p['date']} 没有那一页 → 退到 {miss.get('date')}"
+              f"（dateExact={miss.get('dateExact')}）")
+        assert miss.get("dateExact") is False, "用了相邻某天的站序，却没标明"
+        checked += 1
+        if checked >= 3:
+            break
+    if not checked:
+        print("  没有『指定日期只能退到相邻某天』的车次，跳过退让判定")
+
 
 def main():
     if SRC:

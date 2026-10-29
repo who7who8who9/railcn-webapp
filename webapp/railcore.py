@@ -742,9 +742,14 @@ def route_stops_brief(code: str, date: Optional[str] = None) -> dict:
     注意缓存是按 **train_no** 存一天的（`route_day`），不是按车次号：中途换号的车
     （C344/5、C4326/7）整趟站序只落在到达号 C345/C4327 那一行里，
     按出发号 C344 查 code 会一无所获——所以先按 train_no 找，找不到再退回按 code 找。
+
+    指定的那一天完全没有这一页时（换号车常常只抓到相邻某天），退到最接近的一天并
+    把 `dateExact` 置 False：调用方要么照用（同起讫点比站名，够用），要么据此不做
+    「站表变没变」这种按日期的判断。
     """
     code = (code or "").strip().upper()
-    out: Dict[str, object] = {"code": code, "date": None, "stops": [], "from": None, "to": None}
+    out: Dict[str, object] = {"code": code, "date": None, "stops": [], "from": None, "to": None,
+                              "dateExact": True}
     if not code:
         return out
     try:
@@ -771,11 +776,26 @@ def route_stops_brief(code: str, date: Optional[str] = None) -> dict:
             row = None
             if train_no:
                 row = conn.execute(
-                    "SELECT raw FROM routes WHERE train_no=? AND date=? LIMIT 1",
+                    "SELECT date, raw FROM routes WHERE train_no=? AND date=? LIMIT 1",
                     (train_no, d)).fetchone()
             if not (row and row["raw"]):
                 row = conn.execute(
-                    "SELECT raw FROM routes WHERE code=? AND date=?", (code, d)).fetchone()
+                    "SELECT date, raw FROM routes WHERE code=? AND date=?", (code, d)).fetchone()
+            if not (row and row["raw"]):
+                # 这一天没抓到这一页（换号车常常只抓到相邻某天）：退到最接近的那一天。
+                # 站名顺序基本不变，比在界面上显示「0 站、没有时刻」有用；
+                # 实际用的日期写进 out["date"]，停站详情照实显示，不冒充当天
+                near = ("""SELECT date, raw FROM routes
+                            WHERE %s AND raw IS NOT NULL
+                            ORDER BY ABS(julianday(date) - julianday(?)) LIMIT 1""")
+                row = None
+                if train_no:
+                    row = conn.execute(near % "train_no=?", (train_no, d)).fetchone()
+                if not (row and row["raw"]):
+                    row = conn.execute(near % "code=?", (code, d)).fetchone()
+                if row and row["raw"]:
+                    d = row["date"]
+                    out["dateExact"] = False
     except sqlite3.Error:
         return out
     if not row or not row["raw"]:

@@ -4591,13 +4591,8 @@ function odRowHtml(it) {
   tags.push(it.sameStops
     ? '<span class="mate-tag same" title="站序和这趟车完全一样，经套过去最准">站序相同</span>'
     : `<span class="mate-tag" title="和这趟车共有的停站占比">重合 ${it.overlap}%</span>`);
-  if (it.hasOverride) {
-    // 同步入库的和人工校正一样算「已校正」，来源只作补充说明
-    tags.push(it.origin === 'sync'
-      ? `<span class="mate-tag manual" title="已校正（同步自 ${
-          esc(it.srcCode || '同起讫点车次')}），勾选同步会覆盖它">已校正 · 同步</span>`
-      : '<span class="mate-tag manual" title="已校正，勾选同步会覆盖它">已校正</span>');
-  } else if (it.viaSource === 'auto') {
+  // 已校正/已同步的车次不会进这份列表，所以这里只剩「还没定稿」的标记
+  if (it.viaSource === 'auto') {
     tags.push('<span class="mate-tag pending">待确认</span>');
   }
   if (it.viaFits) {
@@ -4619,10 +4614,21 @@ function odRowHtml(it) {
 function cuMatesHtml(d) {
   const m = d.odMates || {};
   const items = m.items || [];
-  if (!m.from || !m.to || !items.length) return '';
+  const hidden = m.hidden || 0;
+  if (!m.from || !m.to) return '';
+  // 同起讫点下全都校正过了：不留一个空壳，只说一句为什么没有候选
+  if (!items.length) {
+    if (!hidden) return '';
+    return `<div class="ce-card" id="ceMatesCard">
+      <h4>同起讫点的车次
+        <span class="hint">${esc(m.from)} → ${esc(m.to)} · 另外 ${hidden} 趟也已经校正过，没有待同步的了</span>
+      </h4>
+    </div>`;
+  }
+  const hid = hidden ? `；另有 ${hidden} 趟已校正，不再列出` : '';
   return `<div class="ce-card" id="ceMatesCard">
     <h4>同起讫点的车次
-      <span class="hint">${esc(m.from)} → ${esc(m.to)} · ${items.length} 趟；勾选后保存时把这趟车的经由同步过去，
+      <span class="hint">${esc(m.from)} → ${esc(m.to)} · ${items.length} 趟待同步${hid}；勾选后保存时把这趟车的经由同步过去，
         每趟各存一条自己的校正（和车次号绑定）</span>
       <span class="right">
         <label class="cu-mini" title="只勾停站完全一样的，套过去最准"><input type="checkbox" id="ceMateSame"> 选同站序</label>
@@ -4632,7 +4638,7 @@ function cuMatesHtml(d) {
     <div class="mate-list" id="ceMates">${items.map(odRowHtml).join('')}</div>
     <div class="ve-note">同步只带动经由：站间里程按「第几站」记下标，站数不同就对不上，所以不跟着同步。
       标「停站全在经由内」的，它的每一站都在这条经由走过的路上，保存时原样照抄（转线的所也不改）；
-      其余车次只有停了经由外的站，才按它的停站重新落站。已经有自己校正的车次默认不覆盖，勾了会在保存前问一句。</div>
+      其余车次只有停了经由外的站，才按它的停站重新落站。已完成校正或同步的车次不列在这里，不会被误覆盖。</div>
   </div>`;
 }
 
@@ -4646,13 +4652,14 @@ function cuMateCount() {
 }
 
 function cuBindMates() {
-  const box = $('#ceMates');
-  if (!box) return;
   // 重算 / 重新打开后候选可能变了：勾选集合里只留还列得出来的车次
+  // （刚同步完的那几趟会自动从候选里消失，勾选也跟着作废）
   const items = ((CU.detail || {}).odMates || {}).items || [];
   const valid = new Set(items.map(x => x.code));
   [...CU.mates].forEach(c => { if (!valid.has(c)) CU.mates.delete(c); });
   cuMateCount();
+  const box = $('#ceMates');
+  if (!box) return;
   $$('#ceMates .mate-row').forEach(row => {
     const code = row.dataset.code;
     row.querySelector('input[type=checkbox]').addEventListener('change', e => {
@@ -5975,22 +5982,19 @@ async function cuSave() {
   });
 
   // 勾了同起讫点的车次：保存后把这些车的经由一起同步过去
+  // 列表里只会有还没校正过的车次，所以不存在「覆盖别人成果」的情况，不用再问
   const mates = ((d.odMates || {}).items || []).filter(x => CU.mates.has(x.code));
-  const dup = mates.filter(x => x.hasOverride);
   if (mates.length && !via.length) {
     cuMsg('bad', '还没有人工确认的经由，同步过去没有内容');
     return;
   }
-  if (dup.length && !confirm(
-    `勾选的 ${mates.length} 趟里有 ${dup.length} 趟已有自己的校正（${dup.map(x => x.codeLabel || x.code).join('、')}），`
-    + '同步会覆盖它们。继续？')) return;
 
   cuMsg('', '保存中…');
   try {
     const r = await postJSON('/api/override', {
       code: d.code, date: d.date, via, totalKm: kmRaw ? Number(kmRaw) : null,
       note, segKm,
-      syncCodes: mates.map(x => x.code), syncOverwrite: dup.length > 0,
+      syncCodes: mates.map(x => x.code),
     });
     await cuOpen(d.code);
     const parts = [via.length ? `${via.length} 段人工经由已存为正式经由` : '没有人工段，未写入经由'];

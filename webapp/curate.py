@@ -232,9 +232,12 @@ def od_mates(code: str, limit: int = 60, via: Optional[List[dict]] = None) -> di
 
     `via` 给来源车次当前的经由：算一下对方的每一站是不是都在这条经由走过的路上
     （`viaFits=True` 的那几趟，同步时原样照抄就行，不必重新落站）。
+
+    已经有自己校正的车次（人工填的、从别处同步来的）不再进候选，只把趟数记在
+    `hidden` 里，供界面说一句「还有 N 趟已校正」。
     """
     code = (code or "").strip().upper()
-    out: Dict[str, object] = {"from": None, "to": None, "items": [], "total": 0}
+    out: Dict[str, object] = {"from": None, "to": None, "items": [], "total": 0, "hidden": 0}
     segs = [s for s in (via or []) if isinstance(s, dict) and s.get("line")]
     span_cache: Dict[str, Optional[List[str]]] = {}
     if not code:
@@ -262,10 +265,16 @@ def od_mates(code: str, limit: int = 60, via: Optional[List[dict]] = None) -> di
     ov_map = railcore.override_map()
 
     items: List[dict] = []
+    hidden = 0
     for r in rows:
+        ov = ov_map.get(r["code"]) or {}
+        # 已经有自己校正的（人工的、同步来的都算）不再列出来：它已经定稿了，
+        # 再摆在这里只会被误勾一次、被覆盖一次。数量单独报给前端做说明。
+        if ov.get("via"):
+            hidden += 1
+            continue
         brief = railcore.route_stops_brief(r["code"])
         names = [s["name"] for s in brief.get("stops") or []]
-        ov = ov_map.get(r["code"]) or {}
         info = labels.get(r["code"]) or {}
         shared = len(mine_set & set(names)) if mine_set else 0
         # 它的每一站都在这条经由走过的路上 → 同步时原样照抄，不用重新落站
@@ -283,9 +292,6 @@ def od_mates(code: str, limit: int = 60, via: Optional[List[dict]] = None) -> di
             "via": r["via_text"] or "",
             "viaSource": r["via_source"],
             "viaCoverage": r["via_cov"],
-            "origin": r["via_origin"] or (ov.get("source") or ""),
-            "srcCode": ov.get("srcCode") or "",     # 同步来的：从哪趟车同步的
-            "hasOverride": bool(ov.get("via")),
             "overlap": round(shared / len(mine_set) * 100) if mine_set else 0,
             "sameStops": bool(names) and names == mine_names,
             "stopsMissing": not names,
@@ -294,6 +300,7 @@ def od_mates(code: str, limit: int = 60, via: Optional[List[dict]] = None) -> di
     # 站序一模一样的排最前（套过去最准），其次按重合站数
     items.sort(key=lambda x: (not x["sameStops"], -x["overlap"], x["code"]))
     out["total"] = len(items)
+    out["hidden"] = hidden                          # 同起讫点里已完成校正、没列出来的趟数
     out["items"] = items[:max(1, int(limit))]
     return out
 
@@ -636,7 +643,8 @@ def detail(code: str) -> dict:
     try:
         out["odMates"] = od_mates(code, via=(out.get("override") or {}).get("via") or [])
     except Exception:                                # noqa: BLE001
-        out["odMates"] = {"from": out.get("from"), "to": out.get("to"), "items": [], "total": 0}
+        out["odMates"] = {"from": out.get("from"), "to": out.get("to"),
+                          "items": [], "total": 0, "hidden": 0}
 
     # ---- 校正和「校正时的站表」绑定：调图换了站序就提醒重校 ----
     ov = out.get("override") or {}

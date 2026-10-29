@@ -48,3 +48,6 @@ desktop.ini
 # 本地调试截图
 webapp/shots/
 shots/
+
+# 移动盘同步回开发机时，被覆盖文件的自动备份
+/.sync-backup/

@@ -9,6 +9,8 @@
   4. 只能人工勾选同步；同步过去的每趟各存一条自己的校正（source=sync）
   5. 对方的每一站都在这条经由走过的路上 → 原样照抄（mode=direct，不重新落站）；
      只有它停了经由之外的站，才按它的停站重新落站（mode=adapt）
+  6. 已经校正或同步过的车次不再出现在同起讫点候选里（只报 hidden 趟数），
+     保存同步之后那几趟立刻从列表消失
 
 自带清理：测试用到的校正跑完全部撤销。
 用法：python scripts/test_curate_sync.py [来源车次 目标车次]
@@ -81,10 +83,26 @@ def check_api(src, dst):
           f"同起讫点 {len(mates)} 趟")
     assert mates, "没有列出同起讫点的车次"
     codes = [m["code"] for m in mates]
+    hidden = (d.get("odMates") or {}).get("hidden", 0)
+    assert src not in codes, "来源车次自己出现在同起讫点候选里"
+    # 已经校正/同步过的一律不出现——这是这一版的规则
+    import railcore as _rco                              # noqa: E402  （find_pair 已塞好路径）
+    done = {c for c, o in _rco.override_map().items() if (o or {}).get("via")}
+    leaked = [c for c in codes if c in done]
+    assert not leaked, f"已校正的车次还在候选里：{leaked}"
+    print(f"  候选 {len(codes)} 趟（全部未校正），另有 hidden={hidden} 趟已校正未列出")
+    # hidden 要对得上：同起讫点里已经校正的一趟不少、一趟也不多
+    with _rco.db() as conn:
+        grp = [r["code"] for r in conn.execute(
+            "SELECT code FROM curate WHERE from_sta=? AND to_sta=? AND code<>?",
+            (d["from"], d["to"], src))]
+    want_hidden = len([c for c in grp if c in done])
+    assert hidden == want_hidden, f"hidden 报 {hidden}，同组实际已校正 {want_hidden} 趟"
+    if len(grp) <= 60:                         # 候选上限 60，超了不断言这条恒等式
+        assert len(codes) + hidden == len(grp), \
+            f"候选 {len(codes)} + 已隐藏 {hidden} ≠ 同组车次 {len(grp)}"
     if dst not in codes:                       # 传进来的车次不在这组里就换一个
-        free = [m["code"] for m in mates if not m["hasOverride"]]
-        assert free, "同起讫点里没有可同步的车次"
-        dst = free[0]
+        dst = codes[0]
     assert dst != src, "来源和目标是同一趟"
     print(f"  同步目标：{dst}")
 
@@ -140,13 +158,18 @@ def check_api(src, dst):
     assert segs[0][1] == m["from"] and segs[-1][2] == m["to"], "同步后的区间没覆盖对方全程"
     assert len(m["stops"]) == len(pm["stops"]), "停站数被改了"
 
-    # 5) 「同类沿用」确实没了：同组第三趟车仍是 auto，没被悄悄套用
-    others = [x["code"] for x in get("/api/curate/detail?code=" + src)["odMates"]["items"]
-              if x["code"] not in (src, dst) and not x["hasOverride"]]
-    if others:
-        po = get("/api/route?code=%s&date=%s" % (others[0], d["date"]))
-        assert po["viaSource"] == "auto", f"{others[0]} 自动沿用了别人的校正"
-        print(f"  同组第三趟 {others[0]} 仍是 auto（没有自动沿用）")
+    # 5) 保存之后：刚同步的这趟必须立刻从候选里消失，同组剩下的仍是 auto（没被悄悄套用）
+    after = get("/api/curate/detail?code=" + src)["odMates"]
+    after_codes = [x["code"] for x in after["items"]]
+    assert dst not in after_codes, f"{dst} 已同步，却还留在同起讫点候选里"
+    assert after["hidden"] == want_hidden + 1, \
+        f"隐藏数没涨：{after['hidden']}，应该从 {want_hidden} 变成 {want_hidden + 1}"
+    print(f"  保存后候选 {len(after_codes)} 趟，{dst} 已移出候选，"
+          f"hidden {want_hidden}→{after['hidden']}")
+    if after_codes:
+        po = get("/api/route?code=%s&date=%s" % (after_codes[0], d["date"]))
+        assert po["viaSource"] == "auto", f"{after_codes[0]} 自动沿用了别人的校正"
+        print(f"  同组剩余 {after_codes[0]} 仍是 auto（没有自动沿用）")
 
     # 6) 清单里能按来源筛出来，而且同步的算「已校正」（是它的一部分，不是并列项）
     lst = get("/api/curate/list?filter=synced&limit=200")
@@ -221,10 +244,23 @@ def check_ui(src, dst):
         print(f"  标「停站全在经由内」的行 {fits} 个（接口 {want} 个）")
         assert fits == want, "「停站全在经由内」标记和接口对不上"
 
-        # 文档截图：此时列表已标出「停站全在经由内」，再展开一趟的停站详情
-        pg.query_selector('#ceMates .mate-row[data-code="%s"] input[type=checkbox]' % dst).check()
-        pg.query_selector('#ceMates .mate-row[data-code="%s"] .mate-more' % dst).click()
-        pg.wait_for_timeout(900)
+        # 刚同步的这趟必须从画面上消失；标题里只留一句「另有 N 趟已校正」
+        left = pg.eval_on_selector_all("#ceMates .mate-row", "els => els.map(e => e.dataset.code)")
+        print(f"  保存后画面上候选 {len(left)} 趟：{'、'.join(left[:8])}")
+        assert dst not in left, f"{dst} 已同步，画面上还列着"
+        d2 = get("/api/curate/detail?code=" + src)["odMates"]
+        assert len(left) == len(d2["items"]), "画面行数和接口候选数不一致"
+        if (d2.get("hidden") or 0) > 0:
+            hdr = pg.inner_text("#ceMatesCard h4")
+            print("  卡片标题：" + hdr.replace("\n", " ")[:100])
+            assert "另有" in hdr and "已校正" in hdr, "没有说明被隐去的已校正趟数"
+
+        # 文档截图：挑一趟还留在候选里的（刚同步的那趟已经不在列表），展开停站详情
+        if left:
+            pick = left[0]
+            pg.query_selector('#ceMates .mate-row[data-code="%s"] input[type=checkbox]' % pick).check()
+            pg.query_selector('#ceMates .mate-row[data-code="%s"] .mate-more' % pick).click()
+            pg.wait_for_timeout(900)
         pg.query_selector("#ceMatesCard").screenshot(path=os.path.join(DOC, "curate-od.png"))
 
         # 同步入库的算「已校正」：统计条是「已校正 / 其中同步」，行上标「已校正 · 同步」

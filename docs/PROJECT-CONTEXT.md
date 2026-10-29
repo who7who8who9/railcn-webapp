@@ -209,6 +209,22 @@ railcn/
       转移别名要先把整批读出来再改（边查边改同一张表会漏行）。
     - **不做自动回灌**：整理结果先导出（`/api/ld/export`）人工看，确认真对了再谈改 rail.db。
 
+18. **库外的线（只有资料库 / china-emu 有站序）也能改站序，保存时自动收进线路库。**
+    侯西线是典型：底表 417 条里没有它，站序只在线路资料库（42 站），走向只有 OSM 有。
+    `/api/line` 走 `compose_line` 拼出一条完整线路，页面能看、能点「改站序」，
+    但保存时 `cnrail.line('侯西线')` 是 `None`，报「线路库里没有这条线」——改的全丢。
+    - **拼出来的线要用规范名**：`compose_line()` 的 `name` 取资料库那条的 `name`（侯西线），
+      搜索词挂在 `aliasOf`。以前直接用入参，搜「侯西铁路」（资料库 title）会拼出一条也叫
+      「侯西铁路」的线，同一条线在库里长出第二个名字，保存还报错。
+    - **保存时自动收编**：`railcore._adopt_loose_line()` 按 `stations_for()` 的站序先
+      `save_custom_line()` 落一条自建线（名字用规范名），紧接着的覆盖写把用户改的站序落上去，
+      返回 `adopted=true` / `adoptedFrom`，前端在详情头部提示一次「已按资料库线名收进线路库」。
+      之后再改就是普通自建线路；删掉它回到资料库原样（`compose` 重新拼）。
+    - **站序来源确实没有的线仍然明确报错**（「线路库里没有这条线：X，资料库里也查不到它的站序」）。
+    - **联想里 OSM 条目带站序就不算「未收录」**：`/api/lines` 给 `osm` 条目补 `stopsN` / `stopsFrom`，
+      搜「侯西」时显示「侯西线 42 站 取自资料库」，点进去是能编辑的线路详情，不是一条光走向。
+    - 回归 `scripts/test_loose_line.py`。
+
 ## 6. 前端约定
 - 5 个页签：`车站/线路`、`站站查询`、`数据下载`、`历史数据`、`数据校对`；状态都在全局 `CU` 对象里。
 - 校对页筛选：`todo / via0 / via / km / coord / pending / manual / synced / clean / all`。
@@ -224,13 +240,14 @@ railcn/
 - 覆盖层（底图切换条 / 缩放 / 图例 / 信息卡）`z-index:900`：Leaflet 的 pane 是 400~800，
   不抬上去会被瓦片整个吃掉。
 
-## 7. 回归脚本（20 个，改完必跑）
+## 7. 回归脚本（21 个，改完必跑）
 
 ```bash
 for f in test_chain test_line_km test_line_stations test_nm_stations test_osm_extras \
          test_station_loose test_tl_stops test_geo_toggle test_dock_speed test_code_alias \
          test_routestore test_nm_insert test_curate_refresh test_curate_sync test_net_form \
-         test_via_nodes test_lineseg test_catalog_match test_chinaemu test_linedesk; do
+         test_via_nodes test_lineseg test_catalog_match test_chinaemu test_linedesk \
+         test_loose_line; do
   "C:/Users/Administrator/AppData/Local/Programs/Python/Python313/python.exe" scripts/$f.py
 done
 ```
@@ -245,6 +262,7 @@ done
 | `test_catalog_match` | 资料库不会挂到小联络线上（侯西线 42 站不能匹配陇海西成联络线 2 站）、分段关系不被误杀（京石高铁 → 京广高速线）、搜侯西线拿到 42 站 288.5 km 且 OSM 走向在 |
 | `test_chinaemu` | china-emu 表在且行数够、桥隧行没混进站序、match_key 两套命名同键、兰新线纠回 118 站（不是兰中城际 6 站）、资料库没有的线名能补出站序、杭深铁路补出 50+ 站里程、首末站里程口径对 |
 | `test_linedesk` | 整理库独立（跑在临时文件上，rail.db 修改时间不变）、京沪四种写法归到一条、京哈沈哈段只挂一次、改名不破坏线族、同一来源线名不能被两条线抢、china-emu 的 K 里程搬过来变段内里程、合并转移别名/站序/旧名仍可搜、父子不能成环、导出结构完整 |
+| `test_loose_line` | 库外线路（侯西线：资料库 42 站 + OSM 走向）搜 title 收敛到规范名、改站序时自动收进线路库并落用户站序、再改走覆盖、删掉回资料库原样、真没有站序的线仍明确报错 |
 | `test_chain` | 车次合并（中途换号）与检索 |
 | `test_line_km` / `test_line_stations` | 线路里程双模式、站序编辑 |
 | `test_nm_stations` / `test_station_loose` | 新增线路站名并集、站名带「站」也能搜 |

@@ -1939,17 +1939,64 @@ def clear_line_override(name: str) -> bool:
     return hit
 
 
+def _adopt_loose_line(name: str) -> Optional[dict]:
+    """线路库里没有、但资料库 / china-emu / 分段能拼出站序的线：先收进线路库
+
+    侯西线就是这种：底表没有，站序只在资料库（42 站）里，走向只有 OSM 有。
+    线路页能打开、能「改站序」，但保存时找不到库内对象，只能报
+    「线路库里没有这条线」—— 用户改了半天白改。所以这里按资料库的规范名
+    落一条自建线（站序先按来源照抄），紧接着的覆盖写会把用户改的结果落上去。
+
+    线名优先用资料库那条的 name（搜「侯西铁路」时传进来的是 title）。
+    """
+    if not name:
+        return None
+    try:
+        import lineseg                        # 延迟导入：lineseg 顶层依赖本模块
+    except Exception:                        # noqa: BLE001
+        return None
+    try:
+        got = lineseg.stations_for(name) or {}
+    except Exception:                        # noqa: BLE001
+        return None
+    stops = got.get("stops") or []
+    if len(stops) < 2:
+        return None
+    canon = name
+    if got.get("source") == "catalog" and got.get("sourceName"):
+        canon = got["sourceName"]
+    for cand in (canon, name):
+        hit = cnrail.line(cand)
+        if hit:
+            return hit
+    rows = [{"name": s.get("name"), "km": s.get("km")} for s in stops if s.get("name")]
+    src = {"catalog": "线路资料库", "chinaemu": "china-emu"}.get(
+        got.get("source") or "", "分段线拼")
+    save_custom_line(canon, rows,
+                     f"改站序时按{src}的站序收进线路库", replace=False)
+    return cnrail.line(canon)
+
+
 def save_line_stations(name: str, stations, note: str = "") -> dict:
-    """改一条线的站序（站中间插站、调先后）—— 自建 / 档案线路都走这里
+    """改一条线的站序（站中间插站、调先后）—— 自建 / 档案 / 库外线路都走这里
 
     自建线路直接改自己的站表；档案线路改不了原始档案，改的是本机覆盖（line_override
     的 stops_json）：整份替换档案站序，`/api/line` 一读就套用，随时能「恢复档案站序」。
     站序一变，旧人工里程的下标（第 i 段 / 第 i 站）就对不上了，所以一并清掉，
     改为按这次填的累计里程重算。
+
+    线路库里没有、只有资料库或 OSM 拼得出来的线（侯西线），先收进线路库再改，
+    返回的 detail 里 `adopted=True`、`adoptedName` 是收进去以后的名字。
     """
     ln = cnrail.line(name)
+    adopted_from = ""
     if not ln:
-        raise ValueError("线路库里没有这条线：" + str(name or ""))
+        ln = _adopt_loose_line(name)
+        if ln:
+            adopted_from = str(name or "")
+        else:
+            raise ValueError("线路库里没有这条线：" + str(name or "")
+                             + "，资料库里也查不到它的站序")
     stops = _clean_stops(stations)
     # 落库前按档案 / 12306 口径归一（「唐海南站」→「唐海南」），和车次经停站对得上
     stops = [{"name": _entry_name(s["name"]), "km": s["km"]} for s in stops]
@@ -1968,6 +2015,9 @@ def save_line_stations(name: str, stations, note: str = "") -> dict:
         detail = save_custom_line(lname, stops, note or (old or {}).get("note") or "",
                                   replace=True)
         detail["stationOrder"] = "custom"
+        if adopted_from:
+            detail["adopted"] = True
+            detail["adoptedFrom"] = adopted_from
         return detail
 
     # 档案线路：存成人工站序（保留备注；下标类里程一律作废）

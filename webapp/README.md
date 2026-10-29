@@ -572,6 +572,10 @@ python scripts\import_crtrain.py     :: 归集成 data\crtrain\lines.json + geom
     头部标「站序人工」，旁边有「恢复档案站序」（点两下确认）随时撤回。
     站序一变，旧人工里程的**下标**（第 i 段 / 第 i 站）就对不上了，所以保存时会一并作废，
     改为按这次填的累计里程重算；新插进来的站同样补进车站库（`source='line-fill'`），地图上直接有点
+  - **库外的线路**（底表没有，站序来自资料库 / china-emu，比如侯西线）：详情头部标「站序来自资料库」，
+    「改站序」照常能点。保存时先按资料库的**规范线名**整条收进线路库（自建线，站序一起存），
+    再把这次改的结果落上去 —— 不用先手动「收进线路库」再改一遍。保存完头部会提示一句
+    「已按资料库的线名收进线路库」，之后就是普通自建线路；不想要了删掉它，页面会回到资料库原样。
 - **新增车站**：填站名 + 经纬度（可直接粘贴「经度,纬度」或「经度:126.576636,纬度:42.038926」，
   复用校对页的拆分规则），可选填所属线路 / 电报码 / 路局。
   已在站库里的站会被拒绝，避免与 `coord_override` 两套坐标打架
@@ -946,7 +950,7 @@ python scripts/report_line_names.py --out docs/line-names-report.md
 | `GET /api/tickets` | `from`、`to`、`date` | 余票 |
 | `GET /api/transfer` | `from`、`to`、`date`、`middle` | 中转换乘 |
 | `GET /api/station` | `q` | 车站档案（路局 / 电报码 / 服务 / 连接线路 / 始发终到车次量）；档案里没有但 12306 站表有的站，返回最小档案（`archive=false` + 当天经停车次 `trainsVia`） |
-| `GET /api/lines` | `q`、`limit`、`osmLimit` | 线路名检索；`osm[]` 是「和查询词相关、线路库还没收录」的 OSM 线（`name` / `km` / `libSame` 同核心名的库线），联想下拉与详情提示都用它 |
+| `GET /api/lines` | `q`、`limit`、`osmLimit` | 线路名检索；`osm[]` 是「和查询词相关、线路库还没收录」的 OSM 线（`name` / `km` / `libSame` 同核心名的库线），能拼出站序的还带 `stopsN` / `stopsFrom`（资料库 / china-emu / 分段）——联想下拉里点到这种就直接进线路详情，不是一条光走向 |
 | `GET /api/line/stops` | `q`（线路名） | 该线的完整站序（只有站名，按站序），供校对页「经由」选站；命名线路的站序里缺的线路所 / 乘降所 / 中继站会用资料库的同名站序按邻居位置补回来，只在资料库里的线路（银西高铁）也能出站序；OSM 有、库和资料库都没收的，按同名前缀的分段线拼（京哈高速线 = 京沈段 + 沈哈段）；`from` 说明站序来自哪（`lib` / `catalog` / `parts`），`found=false` 表示哪都没这条线 |
 | `GET /api/custom` | — | 用户新增的线路与车站清单 |
 | `GET /api/stations/names` | — | 全部站名（9548 条 = 车站档案 + 12306 站表，给新增线路时的站名补全） |
@@ -999,7 +1003,7 @@ python scripts/report_line_names.py --out docs/line-names-report.md
 | `POST /api/line/km` | `name`、`segKm`、`totalKm`、`note` | 保存线路里程人工校正，返回最新线路详情；全为空即撤销 |
 | `POST /api/line/km/clear` | `name` | 线路里程恢复档案值 |
 | `POST /api/line/new` | `name`、`stations[]`（`{name, km}`，km 可空）、`note`、`replace` | 新增线路，返回线路详情 + `filledStations`（这次补进车站库的沿线站）；`replace=1` 允许覆盖同名**自建**线路（改站表用） |
-| `POST /api/line/stations` | `name`、`stations[]`、`note` | 改站序（站中间插站 / 调先后）：自建线路改自己的站表，档案线路写 `line_override.stops_json`（人工站序覆盖，原始档案不动），返回线路详情 + `stationOrder` |
+| `POST /api/line/stations` | `name`、`stations[]`、`note` | 改站序（站中间插站 / 调先后）：自建线路改自己的站表，档案线路写 `line_override.stops_json`（人工站序覆盖，原始档案不动），返回线路详情 + `stationOrder`；线路库没有这条线时先按资料库规范名收进线路库，返回里多 `adopted` / `adoptedFrom` |
 | `POST /api/line/stations/clear` | `name` | 撤销档案线路的人工站序，回到档案原样（连带清掉按旧下标算的人工里程） |
 | `POST /api/line/delete` | `name` | 删除自建线路（连带清掉它的里程校正） |
 | `POST /api/station/new` | `name`、`lat`、`lon`、`lines[]`、`tele`、`bureau`、`note` | 新增车站 |

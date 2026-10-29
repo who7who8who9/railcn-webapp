@@ -653,8 +653,15 @@ def compose_line(name: str) -> Optional[dict]:
             seg.append(round(float(b) - float(a), 1) if a is not None and b is not None else None)
     kms = [x["km"] for x in stations if x["km"] is not None]
     total = got.get("totalKm") or (max(kms) if kms else None)
+    # 线名用资料库那条的规范名：搜「侯西铁路」（资料库的 title）拼出来的线不能
+    # 自己也叫「侯西铁路」，否则同一条线在库里长出第二个名字，保存站序时还会
+    # 报「线路库里没有这条线」。原始输入挂在 aliasOf 上，前端会说明是同一回事。
+    canon = name
+    if got.get("source") == "catalog" and got.get("sourceName"):
+        canon = got["sourceName"]
     return {
-        "name": name, "n": len(stations), "totalKm": total,
+        "name": canon, "n": len(stations), "totalKm": total,
+        "aliasOf": name if canon != name else None,
         "kmComplete": len(kms) == len(stations), "kmReliable": len(kms) == len(stations),
         "custom": False, "stopsManual": False,
         "source": got.get("source") or "catalog",

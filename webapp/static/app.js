@@ -1915,7 +1915,15 @@ async function nmSave() {
       $$('.net-toggle .chipsel').forEach(b => b.classList.toggle('active', b.dataset.kind === 'line'));
       LN.data = null;
       $('#netQ').value = r.line.name;
-      showLine(r.line.name);
+      /* 库外线路（只有资料库 / china-emu 有站序的，比如侯西线）：保存时后端会先把它
+         按资料库的规范名收进线路库，这里说明一句，免得用户以为线名被改掉了 */
+      const ln = r.line || {};
+      const tip = ln.adopted
+        ? `${ln.adoptedFrom && ln.adoptedFrom !== ln.name
+            ? `「${ln.adoptedFrom}」` : '这条线'}不在线路库里，已按资料库的线名`
+          + `「${ln.name}」把 ${ln.n} 站收进线路库；以后改站序直接存在这里`
+        : null;
+      showLine(ln.name, tip);
     } else {
       const r = await postJSON('/api/station/new', {
         name,
@@ -2097,7 +2105,7 @@ function bindStationCoord(d) {
 }
 
 /* ---------- 线路里程：人工校正 ---------- */
-const LN = { data: null, segKm: {}, staKm: {}, totalKm: '', editing: false, busy: false, mode: 'seg', bad: {}, gdata: null };
+const LN = { data: null, segKm: {}, staKm: {}, totalKm: '', editing: false, busy: false, mode: 'seg', bad: {}, gdata: null, notice: null };
 
 const lnKmText = v => (v == null ? '-' : `${v} km`);
 
@@ -2611,7 +2619,8 @@ function lnRenderHead() {
         <button class="btn sm${LN.editing ? ' on' : ''}" id="lnEditBtn">${LN.editing ? '收起编辑' : '编辑里程'}</button>
       </span>
     </div>
-    <div class="l2">${d.aliasOf ? `「${esc(d.aliasOf)}」在资料库里对应这条线 · ` : ''}坐标覆盖 ${d.coordCoverage}%${lnMissCoordNote(d)} · 点击站点查看所属线路 · <span id="lnFoot"></span></div>`;
+    <div class="l2">${d.aliasOf ? `「${esc(d.aliasOf)}」在资料库里对应这条线 · ` : ''}坐标覆盖 ${d.coordCoverage}%${lnMissCoordNote(d)} · 点击站点查看所属线路 · <span id="lnFoot"></span></div>
+    ${LN.notice ? `<div class="ln-notice">${esc(LN.notice)}</div>` : ''}`;
   lnRenderInfo();
   const stopsBtn = $('#lnStopsBtn');
   if (stopsBtn) stopsBtn.addEventListener('click', () => openLineStops(d));
@@ -2935,13 +2944,14 @@ function lnBindGeom() {
   });
 }
 
-async function showLine(q) {
+async function showLine(q, notice) {
   const box = $('#netList'), det = $('#netDetail');
   try {
     det.classList.remove('show');
     box.innerHTML = `<div class="empty">查询线路 ${q} …</div>`;
     const d = await api('/api/line', { q });
     LN.data = d;                       // 先挂上，lnDrawMap 要靠它取站点
+    LN.notice = notice || null;        // 一次性提示（收进线路库之类），换线路就清掉
     LN.gdata = null;
     if (d.osm && lnGeomOn()) await lnLoadGeom(d.osm.ask || d.osm.name, d.totalKm);
     lnDrawMap();
@@ -3102,15 +3112,25 @@ async function showOsmLine(name) {
 function openLineStops(d) {
   const rows = (d.stations || []).map(s => ({ name: s.name, km: s.km }));
   if (d.custom) { osmAddStations(d.name, rows); return; }
+  /* 库外线路（侯西线）：底表没有它，站序是资料库 / china-emu / 分段拼出来的。
+     保存时后端会先按资料库的规范名收进线路库，所以这里先说清楚，别让人以为
+     改的东西存不住。 */
+  const loose = !!d.composed;
+  const srcName = d.stopsFrom === 'chinaemu' ? 'china-emu'
+    : d.stopsFrom === 'parts' ? '同前缀的分段线' : '线路资料库';
   nmOpen('line', {
     title: `改站序 · ${d.name}`,
     name: d.name,
     rows,
     note: (d.override && d.override.note) || '',
     libStations: true,
-    hint: `这是<b>档案线路</b>，改的是本机站序：原始档案不动，随时可以在线路详情里「恢复档案站序」。`
-      + `<br>点行首的 ＋ 可在两站之间插一站；里程按「自起点算起的累计公里」填，`
-      + `留空表示这站里程不详（不影响后面已知的站）。`,
+    hint: loose
+      ? `这条线<b>还没进线路库</b>，站序现在取自${srcName}。`
+        + `保存时会按资料库的线名整条收进线路库（本站序一起存），之后就是普通线路。`
+        + `<br>点行首的 ＋ 可在两站之间插一站；里程按「自起点算起的累计公里」填，留空表示不详。`
+      : `这是<b>档案线路</b>，改的是本机站序：原始档案不动，随时可以在线路详情里「恢复档案站序」。`
+        + `<br>点行首的 ＋ 可在两站之间插一站；里程按「自起点算起的累计公里」填，`
+        + `留空表示这站里程不详（不影响后面已知的站）。`,
   });
 }
 
@@ -3323,16 +3343,22 @@ async function suggestNet() {
       ? `<div class="si${it.hasCoord === false ? ' nocoord' : ''}" data-v="${esc(it.name)}"
            title="${it.archive === false ? '线路库还没收录这个站，资料来自 12306 站表' : ''}">
            <span>${esc(it.name)}</span><span class="c">${esc(it.city || '')}</span></div>`
-      : `<div class="si" data-v="${esc(it.name)}" data-osm="${it.lib ? 0 : 1}">
+      : `<div class="si" data-v="${esc(it.name)}" data-osm="${it.lib ? 0 : 1}"
+           data-stops="${it.lib || it.stopsN ? 1 : 0}">
            <span>${esc(it.name)}</span>
            <span class="c">${it.lib ? `${it.n} 站 · ${lnKmText(it.totalKm)}`
+                         : it.stopsN ? `${it.stopsN} 站 · 取自${
+                             it.stopsFrom === 'chinaemu' ? 'china-emu'
+                             : it.stopsFrom === 'parts' ? '分段线' : '资料库'} · ${it.km} km`
                          : `${it.km} km · OSM 未收录`}</span></div>`).join('');
     box.classList.remove('hidden');
     $$('#sugNet .si').forEach(el => el.addEventListener('click', () => {
       $('#netQ').value = el.dataset.v;
       box.classList.add('hidden');
-      if (el.dataset.osm === '1') showOsmLine(el.dataset.v);   // 库里没有，直接看 OSM 走向
-      else searchNet();
+      /* 有站序的（资料库 / china-emu 能补）直接进线路详情，能改站序、能入库；
+         只有一条光走向的才走「按 OSM 补车站」那条路 */
+      if (el.dataset.stops === '1') searchNet();
+      else showOsmLine(el.dataset.v);
     }));
   } catch (_) { box.classList.add('hidden'); }
 }

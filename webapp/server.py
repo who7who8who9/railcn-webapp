@@ -349,8 +349,18 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/lines":
             kw = one("q")
-            return self.json({"items": cnrail.search_line(kw, int(one("limit", "24"))),
-                              "osm": railcore.osm_extras(kw, int(one("osmLimit", "6") or 6))})
+            items = cnrail.search_line(kw, int(one("limit", "24")))
+            osm = railcore.osm_extras(kw, int(one("osmLimit", "6") or 6))
+            # OSM 里有、线路库没收的线：能拼出站序的（资料库 / china-emu / 分段）
+            # 标出来。搜「侯西」时「侯西线」本来只显示「OSM 未收录」一条光走向，
+            # 其实资料库有 42 站，点进去就该是能编辑的线路详情。
+            for it in osm:
+                s = lineseg.stations_for(it.get("name")) or {}
+                n = len(s.get("stops") or [])
+                if n:
+                    it["stopsN"] = n
+                    it["stopsFrom"] = s.get("source")
+            return self.json({"items": items, "osm": osm})
 
         if path == "/api/line/stops":
             nm = one("q") or one("name")

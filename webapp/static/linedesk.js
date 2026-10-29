@@ -1,8 +1,10 @@
 /* linedesk.js — 线路整理台：手动归并线路、理站序
  *
  * 只跟 /api/ld/* 打交道；整理结果落在独立的 linedesk.db，不碰 rail.db。
- * 地图是自己画的（墨卡托 + 拖动缩放），不依赖任何地图 key：
- * 一条线最多几百段折线、上百个站，够用。
+ * 地图三种底图（左下方切换，选择记在 localStorage）：
+ *   tmap 腾讯位置服务 GL JS —— 国内底图最准，要 Key，WGS-84 数据按 GCJ-02 纠偏后画
+ *   osm  OpenStreetMap 栅格瓦片（Carto）—— 免 Key，不经纠偏，和 OSM 走向严丝合缝
+ *   svg  无底图示意 —— 自己画墨卡托折线，离线也能用，Key 失效时兜底
  */
 'use strict';
 
@@ -59,15 +61,94 @@ function fmtKm(v) {
 
 /* ------------------------------------------------------------------ 地图 */
 
+/* 与主站共用同一个 Key（localStorage.railcn.mapkey），两处填一次即可 */
+const mapKey = () => localStorage.getItem('railcn.mapkey') || '';
+const basePref = () => localStorage.getItem('railcn.ldbase') || '';
+
+/* WGS-84 → GCJ-02：腾讯底图用 GCJ-02，我们的坐标是 OSM 的 WGS-84 */
+const GCJ = (() => {
+  const PI = Math.PI, A = 6378245.0, EE = 0.00669342162296594323;
+  const outOfChina = (lng, lat) => lng < 73.66 || lng > 135.05 || lat < 3.86 || lat > 53.55;
+  function tLat(x, y) {
+    let r = -100 + 2 * x + 3 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x));
+    r += (20 * Math.sin(6 * x * PI) + 20 * Math.sin(2 * x * PI)) * 2 / 3;
+    r += (20 * Math.sin(y * PI) + 40 * Math.sin(y / 3 * PI)) * 2 / 3;
+    r += (160 * Math.sin(y / 12 * PI) + 320 * Math.sin(y * PI / 30)) * 2 / 3;
+    return r;
+  }
+  function tLng(x, y) {
+    let r = 300 + x + 2 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x));
+    r += (20 * Math.sin(6 * x * PI) + 20 * Math.sin(2 * x * PI)) * 2 / 3;
+    r += (20 * Math.sin(x * PI) + 40 * Math.sin(x / 3 * PI)) * 2 / 3;
+    r += (150 * Math.sin(x / 12 * PI) + 300 * Math.sin(x / 30 * PI)) * 2 / 3;
+    return r;
+  }
+  return function wgs2gcj(lng, lat) {
+    if (outOfChina(lng, lat)) return [lng, lat];
+    let dLat = tLat(lng - 105, lat - 35), dLng = tLng(lng - 105, lat - 35);
+    const rad = lat / 180 * PI;
+    let magic = Math.sin(rad);
+    magic = 1 - EE * magic * magic;
+    const sqrtMagic = Math.sqrt(magic);
+    dLat = (dLat * 180) / ((A * (1 - EE)) / (magic * sqrtMagic) * PI);
+    dLng = (dLng * 180) / (A / sqrtMagic * Math.cos(rad) * PI);
+    return [lng + dLng, lat + dLat];
+  };
+})();
+
+const _loaded = {};
+function loadScript(src) {
+  if (_loaded[src]) return _loaded[src];
+  _loaded[src] = new Promise((res, rej) => {
+    const el = document.createElement('script');
+    el.src = src;
+    el.onload = res;
+    el.onerror = () => { delete _loaded[src]; rej(new Error('加载失败：' + src)); };
+    document.head.appendChild(el);
+  });
+  return _loaded[src];
+}
+function loadCss(href) {
+  if (_loaded[href]) return _loaded[href];
+  _loaded[href] = new Promise(res => {
+    const el = document.createElement('link');
+    el.rel = 'stylesheet';
+    el.href = href;
+    el.onload = res;
+    el.onerror = res;
+    document.head.appendChild(el);
+  });
+  return _loaded[href];
+}
+
+/* 站名标签太密就抽稀：站多的时候每 5 个标一个 + 首末站 + 选中站 */
+function labelWanted(i, n, sel) {
+  return n <= 34 || i === sel || i === 0 || i === n - 1 || i % 5 === 0;
+}
+
+/* 点中地图上的站 → 右侧站序行跟着走 */
+function pickStop(i) {
+  MAP.select(i);
+  const row = $(`.st[data-i="${i}"]`);
+  if (row) {
+    row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    row.classList.add('hit');
+    setTimeout(() => row.classList.remove('hit'), 900);
+  }
+}
+
+/* 无底图示意：自己画的 SVG（墨卡托 + 拖动缩放） */
 const M = {
+  name: 'svg',
   svg: null, gGeo: null, gStops: null, gLabels: null,
   W: 0, H: 0, scale: 1, tx: 0, ty: 0,
   parts: [], stops: [], selStop: -1,
   ready: false,
+  ok: true,                     /* 示意模式永远可用，不参与降级判断 */
 
   init() {
     if (this.ready) return;
-    this.svg = $('#ldMap');
+    this.svg = $('#ldSvg');
     const NS = 'http://www.w3.org/2000/svg';
     this.gGeo = document.createElementNS(NS, 'g');
     this.gStops = document.createElementNS(NS, 'g');
@@ -100,6 +181,12 @@ const M = {
     this.parts = (parts || []).filter(p => p && p.length);
     this.selStop = -1;
     this.fit();
+    this.draw();
+  },
+
+  select(i) {
+    this.selStop = i;
+    this.resize();
     this.draw();
   },
 
@@ -236,10 +323,7 @@ const M = {
                      'stroke-width': on ? 2 : 1.6 }, this.gStops)
         .addEventListener('click', ev => {
           ev.stopPropagation();
-          this.selStop = i;
-          this.draw();
-          const row = $(`.st[data-i="${i}"]`);
-          if (row) { row.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); row.classList.add('hit'); setTimeout(() => row.classList.remove('hit'), 900); }
+          pickStop(i);
         });
       const show = !many || on || i === 0 || i === this.stops.length - 1 || i % 5 === 0;
       if (show) {
@@ -253,6 +337,405 @@ const M = {
     });
   },
 };
+
+/* ------------------------------------------------------------------ 腾讯地图 */
+
+const MT = {
+  name: 'tmap',
+  ok: false, map: null, layers: {},
+  stops: [], parts: [], sel: -1,
+
+  async init() {
+    if (this.ok) return;
+    const key = mapKey();
+    if (!key) { const e = new Error('还没配腾讯地图 Key'); e.code = 'NO_KEY'; throw e; }
+    await loadScript(`https://map.qq.com/api/gljs?v=1.exp&key=${encodeURIComponent(key)}`);
+    if (typeof TMap === 'undefined') throw new Error('腾讯地图 SDK 没就绪');
+    this.map = new TMap.Map('ldMap', {
+      center: new TMap.LatLng(34.5, 108.9), zoom: 5,
+      viewMode: '2D', showControl: false, pitch: 0, rotation: 0,
+    });
+    this.ok = true;
+  },
+
+  /* 底图是 GCJ-02，喂进去的坐标得先纠偏 */
+  g(lat, lon) {
+    const [lng2, lat2] = GCJ(lon, lat);
+    return new TMap.LatLng(lat2, lng2);
+  },
+
+  setData(stops, parts) {
+    this.stops = (stops || []).filter(s => s.lat != null && s.lon != null);
+    this.parts = (parts || []).filter(p => p && p.length);
+    this.sel = -1;
+    this.clear();
+    if (!this.ok) return;
+    this.paint();
+    this.fit();
+  },
+
+  select(i) {
+    this.sel = i;
+    if (this.ok) this.paint();
+  },
+
+  clear() {
+    Object.values(this.layers).forEach(l => { try { l.setMap && l.setMap(null); } catch (_) { /* 忽略 */ } });
+    this.layers = {};
+  },
+
+  paint() {
+    if (!this.map) return;
+    this.clear();
+    const geoPaths = this.parts
+      .map(part => part.map(p => this.g(p[1], p[0])))
+      .filter(a => a.length > 1);
+
+    if (geoPaths.length) {
+      this.layers.line = new TMap.MultiPolyline({
+        map: this.map,
+        styles: {
+          casing: new TMap.PolylineStyle({ color: '#ffffff', width: 9, lineCap: 'round', borderWidth: 0, opacity: .95 }),
+          main: new TMap.PolylineStyle({ color: '#1f6feb', width: 5, lineCap: 'round', borderWidth: 0 }),
+          gap: new TMap.PolylineStyle({ color: '#1f6feb', width: 2, borderWidth: 0, opacity: .25, dashArray: [4, 6] }),
+        },
+        geometries: [
+          { id: 'casing', styleId: 'casing', paths: geoPaths },
+          { id: 'main', styleId: 'main', paths: geoPaths },
+        ],
+        zIndex: 5,
+      });
+    } else if (this.stops.length > 1) {
+      /* 没走向就站点直连，虚线明说这是示意 */
+      this.layers.line = new TMap.MultiPolyline({
+        map: this.map,
+        styles: { d: new TMap.PolylineStyle({ color: '#93a2b8', width: 2, borderWidth: 0, dashArray: [6, 5] }) },
+        geometries: [{ id: 'd', styleId: 'd', paths: this.stops.map(s => this.g(s.lat, s.lon)) }],
+        zIndex: 5,
+      });
+    }
+
+    const dot = (fill, stroke, r) => `data:image/svg+xml;charset=utf-8,${encodeURIComponent(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${r * 2 + 6}" height="${r * 2 + 6}">
+         <circle cx="${r + 3}" cy="${r + 3}" r="${r}" fill="${fill}" stroke="${stroke}" stroke-width="2"/></svg>`)}`;
+    this.layers.stops = new TMap.MultiMarker({
+      map: this.map,
+      styles: {
+        st: new TMap.MarkerStyle({ width: 13, height: 13, anchor: { x: 6.5, y: 6.5 }, src: dot('#ffffff', '#0f2d52', 3.4) }),
+        sel: new TMap.MarkerStyle({ width: 17, height: 17, anchor: { x: 8.5, y: 8.5 }, src: dot('#e8590c', '#e8590c', 5.2) }),
+      },
+      geometries: this.stops.map((s, i) => ({
+        id: String(i), styleId: i === this.sel ? 'sel' : 'st', position: this.g(s.lat, s.lon),
+      })),
+      zIndex: 6,
+    });
+    this.layers.stops.on('click', evt => pickStop(Number(evt.geometry.id)));
+
+    const n = this.stops.length;
+    this.layers.labels = new TMap.MultiLabel({
+      map: this.map,
+      styles: {
+        l: new TMap.LabelStyle({
+          color: '#33415c', size: 11, offset: { x: 0, y: -13 },
+          alignment: 'center', verticalAlignment: 'bottom',
+          backgroundColor: 'rgba(255,255,255,.86)', backgroundPadding: 2,
+          borderColor: 'rgba(140,158,180,.45)', borderRadius: 3,
+        }),
+        sel: new TMap.LabelStyle({
+          color: '#ffffff', size: 11, offset: { x: 0, y: -14 },
+          alignment: 'center', verticalAlignment: 'bottom',
+          backgroundColor: 'rgba(232,89,12,.95)', backgroundPadding: 3, borderRadius: 3,
+        }),
+      },
+      geometries: this.stops.map((s, i) => (labelWanted(i, n, this.sel) ? {
+        id: 'L' + i, styleId: i === this.sel ? 'sel' : 'l',
+        position: this.g(s.lat, s.lon), content: s.name,
+      } : null)).filter(Boolean),
+      zIndex: 7,
+    });
+  },
+
+  fit() {
+    if (!this.ok || !this.map) return;
+    let minLat = 90, maxLat = -90, minLon = 180, maxLon = -180;
+    const add = (lat, lon) => {
+      minLat = Math.min(minLat, lat); maxLat = Math.max(maxLat, lat);
+      minLon = Math.min(minLon, lon); maxLon = Math.max(maxLon, lon);
+    };
+    this.stops.forEach(s => add(s.lat, s.lon));
+    this.parts.forEach(p => p.forEach(pt => add(pt[1], pt[0])));
+    if (!(maxLat > -90)) return;
+    if (maxLat - minLat < 0.05 && maxLon - minLon < 0.05) {
+      const c = this.stops[0] || { lat: minLat, lon: minLon };
+      this.map.easeTo({ center: this.g(c.lat, c.lon), zoom: 11 });
+      return;
+    }
+    const b = new TMap.LatLngBounds(this.g(minLat, minLon), this.g(maxLat, maxLon));
+    this.map.fitBounds(b, { padding: { top: 80, bottom: 110, left: 90, right: 90 } });
+  },
+
+  zoom(f) {
+    if (!this.ok) return;
+    this.map.easeTo({ zoom: this.map.getZoom() + (f > 1 ? 1 : -1) });
+  },
+
+  resize() {
+    /* 腾讯 GL 自己跟着容器走，切回来时补一枪就行 */
+    if (this.ok && this.map && this.map.resize) this.map.resize();
+  },
+
+  destroy() {
+    try { this.clear(); this.map && this.map.destroy && this.map.destroy(); } catch (_) { /* 忽略 */ }
+    this.map = null; this.ok = false;
+  },
+};
+
+/* ------------------------------------------------------------------ OSM 栅格（Leaflet） */
+
+const MO = {
+  name: 'osm',
+  ok: false, map: null, group: null,
+  stops: [], parts: [], sel: -1,
+
+  /* 瓦片源：官方 tile.openstreetmap.org 在境内连不上，CARTO 现在要 Key（返回 API KEY REQUIRED），
+   * 用德国社区瓦片（带中文地名）；再不行退法国社区瓦片（只有拼音）。 */
+  TILE: 'https://tile.openstreetmap.de/{z}/{x}/{y}.png',
+  TILE2: 'https://a.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png',
+  ATTR: '© OpenStreetMap contributors · tiles: openstreetmap.de',
+
+  async init() {
+    if (this.ok) return;
+    if (!window.L) {
+      await loadCss('vendor/leaflet/leaflet.css');
+      await loadScript('vendor/leaflet/leaflet.js');
+    }
+    if (!window.L) throw new Error('Leaflet 没就绪');
+    this.map = L.map('ldMap', {
+      center: [34.5, 108.9], zoom: 4, zoomControl: false,
+      attributionControl: true, preferCanvas: true, worldCopyJump: true,
+    });
+    const layer = L.tileLayer(this.TILE, {
+      maxZoom: 19, attribution: this.ATTR, detectRetina: false,
+    }).addTo(this.map);
+    /* 主瓦片源出问题（被墙 / 429）就整体换法国源顶上，别留一片灰 */
+    let err = 0, swapped = false;
+    layer.on('tileerror', () => {
+      if (swapped || ++err < 4) return;
+      swapped = true;
+      layer.setUrl(this.TILE2);
+      layer.options.attribution = '© OpenStreetMap contributors · tiles: openstreetmap.fr';
+      toast('openstreetmap.de 瓦片不可用，已换 openstreetmap.fr');
+    });
+    /* 缩放按钮我们自己有（右上角），别再塞一套 Leaflet 的，免得跟图例打架 */
+    this.ok = true;
+  },
+
+  setData(stops, parts) {
+    this.stops = (stops || []).filter(s => s.lat != null && s.lon != null);
+    this.parts = (parts || []).filter(p => p && p.length);
+    this.sel = -1;
+    if (!this.ok) return;
+    this.map.invalidateSize();
+    this.paint();
+    this.fit();
+  },
+
+  select(i) {
+    this.sel = i;
+    if (this.ok) this.paint();
+  },
+
+  paint() {
+    if (!this.map) return;
+    if (this.group) { this.group.remove(); this.group = null; }
+    const g = L.layerGroup().addTo(this.map);
+    this.group = g;
+
+    /* 走向：OSM 几何本身就是 WGS-84，跟瓦片严丝合缝，不用纠偏 */
+    if (this.parts.length) {
+      this.parts.forEach(part => {
+        L.polyline(part.map(p => [p[1], p[0]]), {
+          color: '#ffffff', weight: 7, opacity: .9, lineJoin: 'round',
+        }).addTo(g);
+        L.polyline(part.map(p => [p[1], p[0]]), {
+          color: '#1f6feb', weight: 3.5, opacity: .95, lineJoin: 'round',
+        }).addTo(g);
+      });
+      /* 段与段之间的数据断口，用淡虚线串一下，免得看着像铁路断了 */
+      if (this.parts.length > 1) {
+        for (let i = 0; i < this.parts.length - 1; i++) {
+          const b = this.parts[i][this.parts[i].length - 1];
+          const a = this.parts[i + 1][0];
+          L.polyline([[b[1], b[0]], [a[1], a[0]]], {
+            color: '#1f6feb', weight: 1.5, opacity: .3, dashArray: '3 5',
+          }).addTo(g);
+        }
+      }
+    } else if (this.stops.length > 1) {
+      L.polyline(this.stops.map(s => [s.lat, s.lon]), {
+        color: '#93a2b8', weight: 2, dashArray: '6 5',
+      }).addTo(g);
+    }
+
+    const n = this.stops.length;
+    this.stops.forEach((s, i) => {
+      const on = i === this.sel;
+      const c = L.circleMarker([s.lat, s.lon], {
+        radius: on ? 6 : 4, color: on ? '#e8590c' : '#0f2d52',
+        weight: on ? 2.5 : 1.6, fillColor: on ? '#e8590c' : '#ffffff', fillOpacity: 1,
+      }).addTo(g);
+      c.on('click', () => pickStop(i));
+      if (on) c.bringToFront();
+      if (labelWanted(i, n, this.sel)) {
+        c.bindTooltip(s.name, {
+          permanent: true, direction: 'right', offset: [5, 0],
+          className: on ? 'ld-tip sel' : 'ld-tip',
+        });
+      }
+    });
+    if (this.sel >= 0 && this.stops[this.sel]) {
+      this.map.panTo([this.stops[this.sel].lat, this.stops[this.sel].lon]);
+    }
+  },
+
+  fit() {
+    if (!this.ok) return;
+    const pts = [];
+    this.stops.forEach(s => pts.push([s.lat, s.lon]));
+    this.parts.forEach(p => p.forEach(pt => pts.push([pt[1], pt[0]])));
+    if (!pts.length) return;
+    this.map.fitBounds(L.latLngBounds(pts), { padding: [40, 40], maxZoom: 12 });
+  },
+
+  zoom(f) {
+    if (!this.ok) return;
+    this.map.setZoom(this.map.getZoom() + (f > 1 ? 1 : -1));
+  },
+
+  resize() { if (this.ok && this.map) this.map.invalidateSize(); },
+
+  destroy() {
+    try { this.map && this.map.remove(); } catch (_) { /* 忽略 */ }
+    this.map = null; this.group = null; this.ok = false;
+  },
+};
+
+/* ------------------------------------------------------------------ 底图切换 */
+
+const MAP = {
+  impl: null, mode: '', stops: [], parts: [],
+
+  async use(mode) {
+    mode = mode || basePref() || (mapKey() ? 'tmap' : 'osm');
+    const div = $('#ldMap'), svg = $('#ldSvg'), tip = $('#ldBaseTip');
+
+    if (this.impl && this.mode === mode && this.impl.ok) return;
+    try { this.impl && this.impl.destroy && this.impl.destroy(); } catch (_) { /* 忽略 */ }
+
+    if (mode === 'svg') {
+      div.classList.add('hidden');
+      svg.classList.remove('hidden');
+      M.init();
+      MAP.setData(this.stops, this.parts);
+      this.impl = M; this.mode = 'svg';
+      tip.textContent = '无底图示意';
+    } else {
+      svg.classList.add('hidden');
+      div.classList.remove('hidden');
+      try {
+        if (mode === 'osm') await MO.init(); else await MT.init();
+        this.impl = mode === 'osm' ? MO : MT;
+        this.mode = mode;
+        tip.textContent = mode === 'osm' ? 'OSM 栅格（免 Key）' : '腾讯位置服务';
+      } catch (e) {
+        /* 腾讯要 Key，没配就临时用 OSM 顶上，并把 Key 入口亮出来 */
+        if (mode !== 'osm') {
+          try {
+            await MO.init();
+            this.impl = MO; this.mode = 'osm';
+            tip.innerHTML = '没配腾讯 Key，先用 OSM · <b id="ldKeyAsk">去填 Key</b>';
+            const ask = $('#ldKeyAsk');
+            if (ask) ask.onclick = openKeyModal;
+            toast(e.code === 'NO_KEY' ? '没配腾讯地图 Key，临时用 OSM 底图' : e.message, true);
+          } catch (e2) {
+            div.classList.add('hidden');
+            svg.classList.remove('hidden');
+            M.init(); this.impl = M; this.mode = 'svg';
+            tip.textContent = '底图加载失败，退回示意';
+          }
+        } else {
+          div.classList.add('hidden');
+          svg.classList.remove('hidden');
+          M.init(); this.impl = M; this.mode = 'svg';
+          tip.textContent = 'OSM 瓦片加载失败，退回示意';
+        }
+      }
+      this.impl.resize && this.impl.resize();
+    }
+    this.syncBar();
+    this.impl.setData(this.stops, this.parts);
+  },
+
+  syncBar() {
+    $$('.ld-basebar [data-base]').forEach(b => {
+      b.classList.toggle('on', b.dataset.base === this.mode);
+    });
+  },
+
+  setData(stops, parts) {
+    this.stops = (stops || []).filter(s => s && s.lat != null && s.lon != null);
+    this.parts = (parts || []).filter(p => p && p.length);
+    this.syncOrm();
+    if (!this.impl) return;
+    this.impl.setData(this.stops, this.parts);
+  },
+
+  /* 「ORM 核对」：拿这条线的中心点去 OpenRailwayMap 开一页，
+   * 那边是 OSM 数据按铁路专用样式渲染的，走向对不对一眼能看出来 */
+  syncOrm() {
+    const a = $('#ldOrm');
+    if (!a) return;
+    const pts = this.stops.map(s => [s.lat, s.lon]);
+    this.parts.forEach(p => p.forEach(pt => pts.push([pt[1], pt[0]])));
+    if (!pts.length) { a.removeAttribute('href'); a.style.opacity = '.45'; return; }
+    let la = 0, lo = 0;
+    pts.forEach(([y, x]) => { la += y; lo += x; });
+    la /= pts.length; lo /= pts.length;
+    a.href = 'https://www.openrailwaymap.org/?style=standard&lat=' +
+      la.toFixed(5) + '&lon=' + lo.toFixed(5) + '&zoom=8';
+    a.style.opacity = '1';
+  },
+
+  select(i) {
+    if (this.impl && this.impl.select) this.impl.select(i);
+  },
+
+  zoom(f) { if (this.impl && this.impl.zoom) this.impl.zoom(f); },
+
+  fit() {
+    if (this.impl && this.impl.fit) this.impl.fit();
+    if (this.impl === M) M.draw();
+  },
+
+  resize() { if (this.impl && this.impl.resize) this.impl.resize(); },
+};
+
+function openKeyModal() {
+  openModal('腾讯地图 Key', `
+    <p class="muted">地图底图用腾讯位置服务（GL JS）。到
+      <a href="https://lbs.qq.com/dev/console/application/mine" target="_blank" rel="noreferrer">腾讯位置服务控制台</a>
+      建一个 Web 端 Key 粘到下面，跟主站共用同一个 Key（只存本机 localStorage）。</p>
+    <input id="ldKeyInput" placeholder="粘贴腾讯地图 Key" value="${esc(mapKey())}" style="width:100%">
+    <p class="muted small">不填也能用：右下角切「OSM」用 OpenStreetMap 栅格底图，或「示意」纯折线。</p>`,
+  async () => {
+    const v = ($('#ldKeyInput') || {}).value || '';
+    if (v.trim()) localStorage.setItem('railcn.mapkey', v.trim());
+    else localStorage.removeItem('railcn.mapkey');
+    localStorage.setItem('railcn.ldbase', 'tmap');
+    await MAP.use('tmap');
+    document.querySelectorAll('.modal').forEach(m => m.remove());
+  }, '保存并切换');
+}
 
 /* ------------------------------------------------------------------ 列表 */
 
@@ -394,10 +877,10 @@ async function loadGeom(id) {
     const g = await api('/api/ld/geom?id=' + id);
     if (S.sel !== id) return;
     S.geom = g;
-    M.setData(g.stops || [], (g.geom && g.geom.parts) || []);
+    MAP.setData(g.stops || [], (g.geom && g.geom.parts) || []);
     renderMapInfo();
   } catch (e) {
-    M.setData((S.detail && S.detail.stops) || [], []);
+    MAP.setData((S.detail && S.detail.stops) || [], []);
   }
 }
 
@@ -576,7 +1059,7 @@ function bindPanel() {
     try {
       await api('/api/ld/delete', { id: d.id });
       S.detail = null; S.sel = null; S.geom = null;
-      M.setData([], []);
+      MAP.setData([], []);
       renderPanel(); loadList();
       toast('已删除');
     } catch (e) { toast(e.message, true); }
@@ -601,7 +1084,7 @@ function bindPanel() {
       const r = await api('/api/ld/stops/save', { id: d.id, stops: arr });
       S.detail = r.line;
       renderPanel(); renderMapInfo();
-      M.setData((r.line.stops || []), (S.geom && S.geom.geom && S.geom.geom.parts) || []);
+      MAP.setData((r.line.stops || []), (S.geom && S.geom.geom && S.geom.geom.parts) || []);
       loadList();
     } catch (e) { toast(e.message, true); }
   };
@@ -649,7 +1132,7 @@ function bindPanel() {
         const r = await api('/api/ld/stops/fill', { id: d.id, source: a.source, name: a.name });
         S.detail = r.line;
         renderPanel(); renderMapInfo();
-        M.setData((r.line.stops || []), (S.geom && S.geom.geom && S.geom.geom.parts) || []);
+        MAP.setData((r.line.stops || []), (S.geom && S.geom.geom && S.geom.geom.parts) || []);
         loadList();
         toast(`已导入 ${(r.line.stops || []).length} 站`);
       } catch (e) { toast(e.message, true); }
@@ -910,9 +1393,9 @@ function bindTop() {
   $$('.ld-mapctl button').forEach(b => {
     b.onclick = () => {
       const z = b.dataset.zoom;
-      if (z === 'in') M.zoomAt(1.35, M.W / 2, M.H / 2);
-      else if (z === 'out') M.zoomAt(1 / 1.35, M.W / 2, M.H / 2);
-      else { M.fit(); M.draw(); }
+      if (z === 'in') MAP.zoom(1.35);
+      else if (z === 'out') MAP.zoom(1 / 1.35);
+      else MAP.fit();
     };
   });
 
@@ -926,12 +1409,21 @@ function bindTop() {
 }
 
 (async function boot() {
-  M.init();
+  $$('.ld-basebar [data-base]').forEach(b => {
+    b.onclick = async () => {
+      const m = b.dataset.base;
+      if (m === 'tmap' && !mapKey()) { openKeyModal(); return; }
+      localStorage.setItem('railcn.ldbase', m);
+      await MAP.use(m);
+    };
+  });
+  await MAP.use();
   bindTop();
   renderFilters();
   renderPanel();
-  // ?q= 带关键字、?id= 直接打开某条线（书签 / 从别处跳过来）
+  // ?q= 带关键字、?id= 直接打开某条线（书签 / 从别处跳过来）、?base= 指定底图
   const ps = new URLSearchParams(location.search);
+  if (ps.get('base')) await MAP.use(ps.get('base'));
   if (ps.get('q')) { S.q = ps.get('q'); $('#ldQ').value = S.q; }
   await loadList();
   loadStats();

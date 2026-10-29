@@ -216,6 +216,13 @@ railcn/
   `.suggest > .si` 是联想条目；`.cb-item` 是经由 / 线路下拉项，`.cb-item.node` 是线路所这类
   非客运节点；`.list:empty{display:none}`）——详见 `webapp/README.md` 的同名章节。
 - `cuLoad()` 带请求序号 `CU.loadSeq`，连点筛选 / 搜索时旧响应整包丢弃（否则列表会被旧结果盖住）。
+- **地图底图两套并存**：主站车次详情用腾讯 GL JS（`localStorage.railcn.mapkey`，WGS-84 按 GCJ-02
+  纠偏后画）；整理台 `linedesk.html` 左下角可切腾讯 / OSM / 示意，Key 与主站共用。
+- OSM 走 Leaflet，**库文件随仓库带**（`static/vendor/leaflet/`），不引 CDN——境内 jsDelivr / unpkg
+  全超时，官方 `tile.openstreetmap.org` 也连不通；瓦片用 `tile.openstreetmap.de`（有中文地名），
+  失败 4 次自动换 `tile.openstreetmap.fr`；CARTO 现在返回「API KEY REQUIRED」，别再用。
+- 覆盖层（底图切换条 / 缩放 / 图例 / 信息卡）`z-index:900`：Leaflet 的 pane 是 400~800，
+  不抬上去会被瓦片整个吃掉。
 
 ## 7. 回归脚本（20 个，改完必跑）
 

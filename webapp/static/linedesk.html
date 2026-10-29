@@ -39,7 +39,8 @@
     </aside>
 
     <section class="ld-stage">
-      <svg id="ldMap" xmlns="http://www.w3.org/2000/svg"></svg>
+      <div id="ldMap" class="ld-canvas"></div>
+      <svg id="ldSvg" class="ld-canvas hidden" xmlns="http://www.w3.org/2000/svg"></svg>
 
       <div id="ldMapInfo" class="ld-mapinfo">
         <div class="t" style="color:#77839a">未选线路</div>
@@ -50,6 +51,16 @@
         <button data-zoom="in" title="放大">+</button>
         <button data-zoom="out" title="缩小">−</button>
         <button data-zoom="fit" class="wide" title="整条线放进画面">适应</button>
+      </div>
+
+      <div class="ld-basebar">
+        <span class="lbl">底图</span>
+        <button data-base="tmap" title="腾讯位置服务（需 Key，国内路网 POI 最全）">腾讯</button>
+        <button data-base="osm" title="OpenStreetMap 栅格瓦片（免 Key，与 OSM 走向完全对齐）">OSM</button>
+        <button data-base="svg" title="无底图示意，离线也能用">示意</button>
+        <span id="ldBaseTip" class="tip"></span>
+        <a id="ldOrm" class="orm" target="_blank" rel="noreferrer"
+           title="在 OpenRailwayMap 里打开这条线（OSM 的铁路专用渲染），用来核对走向">ORM 核对</a>
       </div>
 
       <div class="ld-legend">

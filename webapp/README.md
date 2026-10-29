@@ -813,6 +813,31 @@ python scripts/report_line_names.py --out docs/line-names-report.md
 **从 china-emu 导站序时会自动把 K 里程换成段内里程**（整份减掉首站），
 否则陇海铁路西宝段会变成「183 km 的线路，站序一直排到 1256 km」。
 
+#### 底图：左下角切换，三种
+
+| 底图 | 要 Key | 坐标 | 什么时候用 |
+|---|---|---|---|
+| **腾讯**（GL JS） | 要（和主站共用 `localStorage.railcn.mapkey`） | WGS-84 → GCJ-02 纠偏后画 | 看国内路网、站场、周边地名 |
+| **OSM**（Leaflet + 栅格瓦片） | 免 Key | 不纠偏，WGS-84 直接画 | 核对走向：几何本来就是从 OSM 来的，压在同一份数据上最准，能直接看出「这条线的走向到底对不对」 |
+| **示意** | 免 | 自绘墨卡托 | 断网 / 瓦片被墙 / Key 失效时的兜底，只有折线和站点 |
+
+选哪个记在 `localStorage.railcn.ldbase`，下次进来还用它；`?base=tmap|osm|svg` 可以强制指定。
+点「腾讯」但没配 Key 时直接弹 Key 输入框（存本机，不写进仓库）。
+
+瓦片源实测（2026-10，本机直连）：
+
+| 瓦片 | 结果 |
+|---|---|
+| `tile.openstreetmap.de` | **200，有中文地名**（石家庄市 / 保定市），3 s 左右，当前默认 |
+| `a.tile.openstreetmap.fr/osmfr` | 200，1 s，只有拼音 —— 作为主源连续失败 4 次后自动顶上 |
+| `tile.openstreetmap.org`（官方） | 连不通（超时），境内基本不可用 |
+| `basemaps.cartocdn.com` | 返回 2 KB 的「API KEY REQUIRED」图，已经要 Key 了 |
+| `tiles.openrailwaymap.org` | 403（拒绝非浏览器 UA / 空 referer），只在它自己网站上用 |
+| `tile.opentopomap.org` / `openfreemap` / jsDelivr / unpkg | 连不通 |
+
+所以 Leaflet 是**本地随仓库带**的（`static/vendor/leaflet/`，BSD-2，1.9.4），
+不依赖任何 CDN——境内 CDN 全都连不上，写死 CDN 等于写死一个白屏。
+
 回归 `test_linedesk`（35 项），跑的时候库指向临时文件，不碰正在整理的 `linedesk.db`。
 
 ### 地图：经由线路上的全部车站

@@ -97,10 +97,42 @@ main{flex:1;display:flex;min-height:0}
 
 /* ---------- 地图 ---------- */
 .ld-stage{flex:1;position:relative;min-width:0;background:#f8fafc;overflow:hidden}
-#ldMap{width:100%;height:100%;display:block;cursor:grab;touch-action:none}
-#ldMap.dragging{cursor:grabbing}
+.ld-canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+#ldSvg{cursor:grab;touch-action:none}
+#ldSvg.dragging{cursor:grabbing}
+/* Leaflet 自带控件位置调一下，别跟我们的按钮打架 */
+.leaflet-container{background:#eef2f7;font:inherit}
+.leaflet-control-attribution{font-size:10px !important;background:rgba(255,255,255,.82) !important}
+.leaflet-bar a{color:var(--text)}
+.ld-basebar{
+  position:absolute;left:12px;bottom:12px;display:flex;align-items:center;gap:4px;z-index:900;
+  background:rgba(255,255,255,.94);border:1px solid var(--line);border-radius:9px;
+  padding:5px 7px;box-shadow:var(--shadow);font-size:11px;
+}
+.ld-basebar .lbl{color:var(--muted);margin-right:2px}
+.ld-basebar button{
+  border:1px solid var(--line);background:#fff;border-radius:6px;padding:2px 8px;font-size:11px;
+  cursor:pointer;color:var(--text);line-height:1.6;
+}
+.ld-basebar button:hover{background:#f1f5fb}
+.ld-basebar button.on{background:var(--rail);border-color:var(--rail);color:#fff}
+.ld-basebar .tip{color:var(--muted);margin-left:4px;max-width:230px;line-height:1.4}
+.ld-basebar .tip b{color:var(--warn);cursor:pointer;text-decoration:underline}
+.ld-basebar .orm{
+  margin-left:4px;border-left:1px solid var(--line);padding-left:8px;color:var(--muted);
+  text-decoration:none;font-size:11px;
+}
+.ld-basebar .orm:hover{color:var(--rail);text-decoration:underline}
+/* Leaflet 常驻站名标签 */
+.ld-tip{
+  background:rgba(255,255,255,.9)!important;border:1px solid rgba(140,158,180,.45)!important;
+  color:#33415c!important;font-size:10.5px!important;padding:0 3px!important;border-radius:3px!important;
+  box-shadow:none!important;white-space:nowrap;
+}
+.ld-tip.sel{background:#e8590c!important;border-color:#e8590c!important;color:#fff!important;font-weight:700}
+.ld-tip::before{display:none!important}
 .ld-mapctl{
-  position:absolute;right:12px;top:12px;display:flex;flex-direction:column;gap:5px;z-index:3;
+  position:absolute;right:12px;top:12px;display:flex;flex-direction:column;gap:5px;z-index:900;
 }
 .ld-mapctl button{
   width:30px;height:30px;border-radius:8px;border:1px solid var(--line);background:#fff;
@@ -109,7 +141,7 @@ main{flex:1;display:flex;min-height:0}
 .ld-mapctl button:hover{background:#f1f5fb}
 .ld-mapctl button.wide{width:auto;padding:0 8px;font-size:11px}
 .ld-mapinfo{
-  position:absolute;left:12px;top:12px;background:rgba(255,255,255,.94);border:1px solid var(--line);
+  position:absolute;left:12px;top:12px;z-index:900;background:rgba(255,255,255,.94);border:1px solid var(--line);
   border-radius:10px;padding:8px 11px;box-shadow:var(--shadow);min-width:230px;max-width:42%;
 }
 .ld-mapinfo .t{font-weight:700;font-size:13px;display:flex;align-items:center;gap:7px}
@@ -118,7 +150,7 @@ main{flex:1;display:flex;min-height:0}
 .ld-mapinfo .r{font-size:11px;color:var(--muted);margin-top:3px;line-height:1.55}
 .ld-mapinfo .r b{color:var(--text)}
 .ld-legend{
-  position:absolute;right:12px;bottom:12px;background:rgba(255,255,255,.94);border:1px solid var(--line);
+  position:absolute;right:12px;bottom:24px;z-index:900;background:rgba(255,255,255,.94);border:1px solid var(--line);
   border-radius:9px;padding:6px 9px;font-size:11px;color:var(--muted);box-shadow:var(--shadow);
   display:flex;flex-direction:column;gap:3px;
 }

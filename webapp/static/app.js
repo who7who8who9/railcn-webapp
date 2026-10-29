@@ -4439,8 +4439,7 @@ async function cuLoadLineNames() {
     const d = await api('/api/curate/lineNames');
     CU.lines = (d.items || []).map(x => (typeof x === 'string'
       ? { name: x, n: null, totalKm: null } : x));
-    CU.lineMap = new Map(CU.lines.map(l => [l.name, l]));
-  } catch (e) { CU.lines = []; CU.lineMap = new Map(); }
+  } catch (e) { CU.lines = []; }
 }
 
 function cuChainHtml(segs, gaps) {
@@ -5333,10 +5332,11 @@ function cbPaintSta(box, pop, v, noHilite) {
   CB.idx = noHilite ? -1 : (hit >= 0 ? hit : (rows.length ? 0 : -1));
   const base = new Set(box._cands || []);
   pop.innerHTML = rows.map((r, k) => {
+    const node = !r.custom && cuNodeOnly(r.name);
     const mt = r.custom ? '用这个名称'
-      : (!base.has(r.name) ? '车站库'
-        : (box._candsKind === 'line' ? '' : '本次经停'));
-    return `<div class="cb-item${k === CB.idx ? ' active' : ''}${r.custom ? ' custom' : ''}"
+      : (cuNodeLabel(r.name) || (!base.has(r.name) ? '车站库'
+        : (box._candsKind === 'line' ? '' : '本次经停')));
+    return `<div class="cb-item${k === CB.idx ? ' active' : ''}${r.custom ? ' custom' : ''}${node ? ' node' : ''}"
       data-k="${k}"><span class="nm">${esc(r.name)}</span><span class="mt">${esc(mt)}</span></div>`;
   }).join('');
 }
@@ -5393,7 +5393,7 @@ function cbBind(box, i) {
   const field = box.dataset.field || '';
   const write = v => {
     if (i == null || !CU.via[i]) return;
-    if (kind === 'line') { CU.via[i].line = v; cuSyncRowCands(i); }
+    if (kind === 'line') { CU.via[i].line = v; cuQueueRowCands(i); }
     else if (field === 'from') CU.via[i].from = v;
     else CU.via[i].to = v;
     if (CU.via[i].src !== 'manual') {          // 手动改过 → 这一段算人工
@@ -5484,13 +5484,21 @@ function cuRepaintOpen(boxes) {
   cbPlace(CB.box);
 }
 
-/** 线路所 / 中继站不是客运营业站，候选里不列（需要时仍可手打） */
-const cuNotStation = n => /(所|中继站|线路所)$/.test(n);
+/** 「XX所」「XX线路所」「XX乘降所」「XX中继站」不是客运营业站，但经由常常正是在
+ *  这些地方转线（沪春线的春申南所、沈吉线的一面山线路所……），所以候选里照样按
+ *  站序列出来，只是右侧标一句「线路所」，免得被当成能上车的车站。 */
+const cuNodeOnly = n => /(线路所|乘降所|中继站|所)$/.test(n);
+const cuNodeLabel = n => (/中继站$/.test(n) ? '中继站'
+  : (/乘降所$/.test(n) ? '乘降所'
+    : (/所$/.test(n) ? '线路所' : '')));
 
 /**
  * 刷新某一行的车站候选：
- * - 线路命中库内线路 → 该线路的全部车站（含不停车的通过站）
- * - 线路名不在库 / 还没填 → 退回这趟车的经停站
+ * - 线路名填了 → 问后端这条线路的站序（命名线路的站序 + 资料库里补齐的线路所）
+ * - 线路名不属于任何线路 / 还没填 → 退回这趟车的经停站
+ *
+ * 以前这里先看「线路名在不在下拉的线路列表里」，不在就直接退回经停站 ——
+ * 结果只剩在资料库、认不出对应自建线路的那些（银西高铁之于银西高速线）永远选不到通过站。
  */
 async function cuSyncRowCands(i) {
   const row = $$('#ceViaRows .ve-row')[i];
@@ -5499,7 +5507,6 @@ async function cuSyncRowCands(i) {
   if (!boxes.length) return;
   const lineName = ((CU.via[i] && CU.via[i].line) || '').trim();
   const fallback = (CU.detail && CU.detail.stations) || [];
-  const inLib = !!(lineName && CU.lineMap && CU.lineMap.has(lineName));
 
   const apply = (names, kind, loading) => {
     boxes.forEach(b => {
@@ -5509,17 +5516,26 @@ async function cuSyncRowCands(i) {
     cuRepaintOpen(boxes);
   };
 
-  if (!inLib) { apply(fallback, 'stop', false); return; }
+  if (!lineName) { apply(fallback, 'stop', false); return; }
   if (CUSTA.cache.has(lineName)) {
-    apply(CUSTA.cache.get(lineName).filter(n => !cuNotStation(n)), 'line', false);
+    apply(CUSTA.cache.get(lineName), 'line', false);
     return;
   }
 
   apply([], 'line', true);                    // 先把「正在读取」挂上
   const names = await cuLineStops(lineName);
-  const clean = names.filter(n => !cuNotStation(n));
-  apply(clean.length ? clean : fallback, clean.length ? 'line' : 'stop', false);
+  apply(names.length ? names : fallback, names.length ? 'line' : 'stop', false);
   cuCheck();                                  // 车站名单到位后重跑校验，免得误报「不在经停站里」
+}
+
+/** 线路名还在敲的时候别每按一个字都发一次请求 */
+const cuCandTimers = new Map();
+function cuQueueRowCands(i) {
+  clearTimeout(cuCandTimers.get(i));
+  cuCandTimers.set(i, setTimeout(() => {
+    cuCandTimers.delete(i);
+    cuSyncRowCands(i);
+  }, 180));
 }
 
 function cuRenderViaRows() {

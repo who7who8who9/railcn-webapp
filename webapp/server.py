@@ -302,7 +302,17 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/line/stops":
             nm = one("q") or one("name")
             items = cnrail.line_station_names(nm) if nm else None
-            return self.json({"name": nm, "found": items is not None,
+            found = items is not None
+            if nm:
+                if found:
+                    # 命名线路的站序里常常没有线路所（沪春线的春申南所、宝成线的灭火沟线路所），
+                    # 而经由恰恰经常要在这些所转线 —— 用资料库的同名站序把节点补回来
+                    items = railcore.merge_catalog_nodes(nm, items)
+                else:
+                    # 只在资料库里有、认不出对应自建线路的（银西高铁），直接给资料库站序
+                    items = railcore.catalog_stop_names(nm)
+                    found = bool(items)
+            return self.json({"name": nm, "found": found,
                               "items": items or [], "count": len(items or [])})
 
         if path == "/api/line":

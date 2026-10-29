@@ -766,6 +766,9 @@ button.vseg:not(.picked):hover::after{opacity:1}
 .cb-item.active{background:var(--accent-soft);color:var(--accent)}
 .cb-item.custom{color:#0f7a45}
 .cb-item.custom .mt{color:#4c8f68}
+/* 线路所 / 乘降所 / 中继站：能选（经由常在这里转线），但不是客运站，灰一点 */
+.cb-item.node .nm{color:#5b6b85}
+.cb-item.node .mt{color:#b07a2a}
 .cb-empty{padding:8px 9px;font-size:11px;color:var(--muted);line-height:1.6}
 
 /* ---------- 站间里程 ---------- */

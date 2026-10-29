@@ -1223,6 +1223,61 @@ def catalog_detail(lid: str) -> Optional[dict]:
             "coordDone": sum(1 for s in stops if s["lat"] is not None)}
 
 
+_NODE_SUFFIXES = ("线路所", "乘降所", "中继站", "所")
+
+
+def is_node_stop(name: str) -> bool:
+    """线路所 / 乘降所 / 中继站：不是客运站，但经由常在这里转线"""
+    return bool(name) and str(name).endswith(_NODE_SUFFIXES)
+
+
+def catalog_stop_names(line_name: str) -> List[str]:
+    """只在资料库里有、命名线路库里认不出来的线路（银西高铁之于银西高速线）：直接给它的站序"""
+    try:
+        rec = cnrail.catalog_get(line_name) or {}
+    except Exception:                        # noqa: BLE001
+        return []
+    names = [cnrail.station_name(s.get("name")) for s in (rec.get("stops") or [])]
+    return list(dict.fromkeys(n for n in names if n))
+
+
+def merge_catalog_nodes(line_name: str, names: List[str]) -> List[str]:
+    """命名线路的站序里常漏掉线路所（宝成线少了灭火沟线路所、长图线少了西山线路所）。
+
+    资料库里存有同名线路的完整站序时，把这类节点按它在资料库里的前后邻居位置补进来：
+    客运站的顺序一个不动，只是让「选车站」时也能挑到这些所。
+    """
+    names = [n for n in (names or []) if n]
+    try:
+        rec = cnrail.catalog_get(line_name) or {}
+    except Exception:                        # noqa: BLE001
+        return names
+    cat = [cnrail.station_name(s.get("name")) for s in (rec.get("stops") or [])]
+    cat = [n for n in cat if n]
+    if len(cat) < 2:
+        return names
+    out = list(names)
+    have = set(out)
+    for i, nm in enumerate(cat):
+        if nm in have or not is_node_stop(nm):
+            continue
+        pos = None
+        for j in range(i - 1, -1, -1):       # 先找前一个能在现站序里对上的站
+            if cat[j] in have:
+                pos = out.index(cat[j]) + 1
+                break
+        if pos is None:                      # 没有就贴着后一个站
+            for j in range(i + 1, len(cat)):
+                if cat[j] in have:
+                    pos = out.index(cat[j])
+                    break
+        if pos is None:
+            pos = len(out)
+        out.insert(pos, nm)
+        have.add(nm)
+    return out
+
+
 def add_catalog_line(lid: str) -> dict:
     """把资料库里的一条线路（线路库还没有的）加成正式线路，站表与里程照抄资料"""
     rec = cnrail.catalog_get(lid)

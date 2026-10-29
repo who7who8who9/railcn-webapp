@@ -34,7 +34,7 @@ C:/Users/Administrator/AppData/Local/Programs/Python/Python313/python.exe webapp
 ```
 railcn/
 ├─ data/            车站档案 7579、线路 417、坐标索引、huirui 线路资料库
-├─ scripts/         数据导入（crtrain / huirui / 站名归一 / 去重）+ 16 个回归脚本
+├─ scripts/         数据导入（crtrain / huirui / 站名归一 / 去重）+ 17 个回归脚本
 ├─ webapp/
 │  ├─ server.py     HTTP 路由（563 行，所有接口在这一个文件里）
 │  ├─ railcore.py   核心（3036 行）：SQLite 缓存、经由推断、里程、校正存取、同步
@@ -96,21 +96,27 @@ railcn/
    人工坐标写 `coord_override`，优先于档案。
 9. **站名两种写法合并**（`xx` / `xx站`），缺档案的站用 12306 站表兜底。
 10. **不要做全量路网 A\* 寻路**：项目只用「线路 + 车站」两类数据（提交 50c37ee 的边界）。
+11. **经由选站要能选到线路所。** 线路所 / 乘降所 / 中继站不是客运站，但经由常常正是在
+    这些地方转线（沪春线的春申南所、宝成线的灭火沟线路所），所以候选里照列、右侧标「线路所」；
+    命名线路站序里缺的节点由 `merge_catalog_nodes()` 用资料库同名站序按邻居位置补进来，
+    客运站顺序不动。`/api/line/stops` 对只存在资料库的线路（银西高铁）也返回站序。
 
 ## 6. 前端约定
 
 - 5 个页签：`车站/线路`、`站站查询`、`数据下载`、`历史数据`、`数据校对`；状态都在全局 `CU` 对象里。
 - 校对页筛选：`todo / via0 / via / km / coord / pending / manual / synced / clean / all`。
 - **类名别撞车**（`.od-form .od-row` 是查询表单 flex；`.mate-*` 是同起讫点六列 grid；
-  `.suggest > .si` 是联想条目；`.list:empty{display:none}`）——详见 `webapp/README.md` 的同名章节。
+  `.suggest > .si` 是联想条目；`.cb-item` 是经由 / 线路下拉项，`.cb-item.node` 是线路所这类
+  非客运节点；`.list:empty{display:none}`）——详见 `webapp/README.md` 的同名章节。
 - `cuLoad()` 带请求序号 `CU.loadSeq`，连点筛选 / 搜索时旧响应整包丢弃（否则列表会被旧结果盖住）。
 
-## 7. 回归脚本（16 个，改完必跑）
+## 7. 回归脚本（17 个，改完必跑）
 
 ```bash
 for f in test_chain test_line_km test_line_stations test_nm_stations test_osm_extras \
          test_station_loose test_tl_stops test_geo_toggle test_dock_speed test_code_alias \
-         test_routestore test_nm_insert test_curate_refresh test_curate_sync test_net_form; do
+         test_routestore test_nm_insert test_curate_refresh test_curate_sync test_net_form \
+         test_via_nodes; do
   "C:/Users/Administrator/AppData/Local/Programs/Python/Python313/python.exe" scripts/$f.py
 done
 ```
@@ -120,6 +126,7 @@ done
 | `test_curate_sync` | 自动结果要确认才入库、同步落站、站表变化、UI 勾选与同步标记、跑完自动撤销 |
 | `test_curate_refresh` | 线路库改动后重算这趟车的自动经由 |
 | `test_net_form` | 车站/线路查询输入框宽度、联想框宽度与行高、Esc/点空白收起、空列表不占高度 |
+| `test_via_nodes` | 经由选站能选到线路所（沪春线春申南所、宝成线灭火沟线路所）、节点插入位置、只在资料库的线路也出站序 |
 | `test_chain` | 车次合并（中途换号）与检索 |
 | `test_line_km` / `test_line_stations` | 线路里程双模式、站序编辑 |
 | `test_nm_stations` / `test_station_loose` | 新增线路站名并集、站名带「站」也能搜 |

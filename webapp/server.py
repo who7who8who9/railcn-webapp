@@ -342,6 +342,7 @@ class Handler(BaseHTTPRequestHandler):
                         if m:
                             m["kmChain"] = railgeom.spine_km(m["name"], composed.get("totalKm"))
                         return self.json({**composed, "composedFrom": target,
+                                          "info": cnrail.catalog_info(kw),
                                           "osm": m, "osmOther": railcore.osm_extras(kw, 6)})
                 if target:
                     d = cnrail.line_detail(target)
@@ -363,6 +364,7 @@ class Handler(BaseHTTPRequestHandler):
                     if m:
                         m["kmChain"] = railgeom.spine_km(m["name"], composed.get("totalKm"))
                     return self.json({**composed, "composed": True,
+                                      "info": cnrail.catalog_info(kw),
                                       "osm": m, "osmOther": railcore.osm_extras(kw, 6)})
                 return self.err("未找到线路: " + kw, 404)
             m = railgeom.meta(d.get("name") or kw, d.get("totalKm"))

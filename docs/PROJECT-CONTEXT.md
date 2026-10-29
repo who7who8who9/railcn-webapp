@@ -132,6 +132,22 @@ railcn/
     - **不写库**：几何是站序的派生物，只在查询时补，进程内缓存。前端取几何要用 `osm.ask`（本段名），
       用 `osm.name` 会拿到整条。首末站离几何 > 30 km 视为站名坐标指错，不裁（龙烟线龙泉北偏 782 km）。
 
+15. **资料库 ↔ 线路库的对应只认线名，站序重叠只用来复核，不用来新增。**
+    `line_catalog.line_name` 决定「这条资料挂给库内哪条线」。打分曾经写成
+    `len(交集) / min(资料库站数, 库内线站数)`——分母取小值，**库内的小联络线只要几站落在
+    资料库站序里就必然 1.0**：「侯西线」42 站 288.5 km 被挂到了 9 km 的「陇海西成联络线」，
+    搜侯西线出来的是三桥→西安西两站。正确做法：
+    - 分母用资料库站数（`len(交集)/len(资料库)`），覆盖率 ≥0.6 才算
+    - 量级只卡下界、且要**站数与里程同时**不到一半才判死——只小一头的是正常分段关系
+      （京石高铁 7 站 283.7 km 之于京广高速线 42 站 2291 km，京石就是它的一段），加上界会误杀半张表
+    - **不做站序覆盖率的新增匹配**：cover 0.5~0.7 那一档全是噪音（广佛环线→南广线、
+      汉宜高铁→襄荆高铁）。宁可 line_name 留空——`/api/line` 会走 `compose_line`，
+      用资料库站序 + OSM 走向拼出一条完整线路，比挂错线准
+    - 清空后资料卡会丢（`line_detail` 只在库内认得出时才挂 `info`），所以 compose 分支要补
+      `cnrail.catalog_info(kw)`；它得用 `catalog_get` 按资料名查——`_CATALOG` 的键是 **line_name**，
+      资料库自己的线名查不到（这也是「搜陇海西成联络线冒出侯西线资料卡」的原因）
+    - 一次性修正用 `scripts/refix_catalog_match.py`（默认 dry-run，`--apply` 先备份库）
+
 ## 6. 前端约定
 
 - 5 个页签：`车站/线路`、`站站查询`、`数据下载`、`历史数据`、`数据校对`；状态都在全局 `CU` 对象里。
@@ -141,13 +157,13 @@ railcn/
   非客运节点；`.list:empty{display:none}`）——详见 `webapp/README.md` 的同名章节。
 - `cuLoad()` 带请求序号 `CU.loadSeq`，连点筛选 / 搜索时旧响应整包丢弃（否则列表会被旧结果盖住）。
 
-## 7. 回归脚本（17 个，改完必跑）
+## 7. 回归脚本（18 个，改完必跑）
 
 ```bash
 for f in test_chain test_line_km test_line_stations test_nm_stations test_osm_extras \
          test_station_loose test_tl_stops test_geo_toggle test_dock_speed test_code_alias \
          test_routestore test_nm_insert test_curate_refresh test_curate_sync test_net_form \
-         test_via_nodes test_lineseg; do
+         test_via_nodes test_lineseg test_catalog_match; do
   "C:/Users/Administrator/AppData/Local/Programs/Python/Python313/python.exe" scripts/$f.py
 done
 ```
@@ -159,6 +175,7 @@ done
 | `test_net_form` | 车站/线路查询输入框宽度、联想框宽度与行高、Esc/点空白收起、空列表不占高度 |
 | `test_via_nodes` | 经由选站能选到线路所（沪春线春申南所、宝成线灭火沟线路所）、节点插入位置、只在资料库的线路也出站序 |
 | `test_lineseg` | 分段线借整条线的几何并按首末站裁剪（元昆段 257.7 / 成攀段 725.4）、裁不出如实退整条（宁西线断 7 截）、只有 OSM 的线名补站序（成昆 133 站 / 京哈 37 站）、京港两段隔 407 km 拒绝拼、UI 标「借…裁出本段」|
+| `test_catalog_match` | 资料库不会挂到小联络线上（侯西线 42 站不能匹配陇海西成联络线 2 站）、分段关系不被误杀（京石高铁 → 京广高速线）、搜侯西线拿到 42 站 288.5 km 且 OSM 走向在 |
 | `test_chain` | 车次合并（中途换号）与检索 |
 | `test_line_km` / `test_line_stations` | 线路里程双模式、站序编辑 |
 | `test_nm_stations` / `test_station_loose` | 新增线路站名并集、站名带「站」也能搜 |

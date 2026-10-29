@@ -613,10 +613,31 @@ def line_detail(name: str) -> Optional[dict]:
             "coordCoverage": round(sum(1 for p in pts if p["lat"] is not None) / max(n, 1) * 100, 1)}
 
 
+def catalog_info(name: str) -> Optional[dict]:
+    """线路资料库里这条线的参数（线路详情页的资料卡）
+
+    line_detail 只在「库内能认出这条线」时才挂 info。合成出来的线路
+    （侯西线：资料库的 42 站 + OSM 的走向，库里没有对应对象）走不到那段，
+    资料卡会空着，所以单开一个入口。
+    """
+    _ensure()
+    # 注意：_CATALOG 是按「线路库的线名」建的索引（line_name 作键），
+    # 资料库自己的线名查不到 —— 「侯西线」这条资料清掉错误的 line_name 之后
+    # _CATALOG 里就没有这个键了，得用 catalog_get 按资料名/标题去找。
+    rec = catalog_get(name)
+    if not rec:
+        return None
+    info = {k: rec.get(k) for k in (
+        "id", "name", "title", "type", "level", "service", "alias", "foreign",
+        "design_speed", "run_speed", "length_km", "open_date", "from_sta", "to_sta",
+        "intro", "url")}
+    info["matchHow"] = rec.get("match_how")
+    return info
+
+
 # --------------------------------------------------------------------------
 # 经由推断（这趟车走了哪几条线路）
 # --------------------------------------------------------------------------
-
 _LINE_TAIL = re.compile(r"(高速线|客运专线|高速铁路|城际铁路|普速线|铁路|线)$")
 
 

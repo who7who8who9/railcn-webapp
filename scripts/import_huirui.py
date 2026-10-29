@@ -127,14 +127,24 @@ def match_lines(recs: List[dict], our: Dict[str, dict]) -> None:
             rec.update(line_name=cands[0], match_how="family", score=0.95)
             continue
         # 3) 站序重叠（只用来给「资料」挂靠，不用于回填里程）
+        #    分母必须是「资料库的站数」。原来写 min(两边)，等于要求两边都有站，
+        #    于是库内那条小联络线只要两站都落在资料库的站序里，就必然拿 1.0 ——
+        #    「侯西线」42 站 288.5 km 被匹配到了 9 km 的「陇海西成联络线」。
+        #    再卡一头量级：站数和里程**同时**不到一半，才算「小线冒充大线」
+        #    （只卡下界，不加区间上限：资料库那条线本来常常只是整条干线的一段，
+        #      「京石高铁」7 站之于「京广高速线」42 站是对的，不能误杀）
         hset = {cnrail._key(s["name"]) for s in rec["stops"]}
         if not hset:
             continue
+        km0 = rec.get("length_km") or 0
         best, bs = None, 0.0
         for n, oset in our_keys.items():
             if not oset or is_hs(n) != ("高速" in (rec["type"] or "")):
                 continue
-            v = len(hset & oset) / min(len(hset), len(oset))
+            okm = our[n].get("totalKm") or 0
+            if (len(oset) < len(hset) * 0.5) and (okm and km0 and okm < km0 * 0.5):
+                continue
+            v = len(hset & oset) / len(hset)
             if v > bs:
                 best, bs = n, v
         if best and bs >= 0.6:

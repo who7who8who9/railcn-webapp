@@ -153,6 +153,10 @@ Windows 也可以直接双击 `webapp\start.bat`。
 > **地图**：带 Key 时用腾讯位置服务渲染，没有 Key 自动降级为 SVG 示意地图（功能不减，只是没有底图）。
 > Key 填在页面右上角「地图 Key」，存在浏览器 `localStorage`，不会写进代码。
 
+接手开发先看 [`docs/PROJECT-CONTEXT.md`](docs/PROJECT-CONTEXT.md)：跑法、数据模型、
+几条不能改的业务规则（经由确认制 / 同步入库也算已校正 / 同类沿用已删）、踩过的坑、还没做的事，
+一页看完；功能细节再翻本文件与 [`webapp/README.md`](webapp/README.md)。
+
 ## 目录结构
 
 ```

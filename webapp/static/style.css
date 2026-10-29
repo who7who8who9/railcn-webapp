@@ -533,6 +533,9 @@ a{color:var(--accent)}
 .cu-stat b{color:var(--text);margin-left:3px;font-family:ui-monospace,Menlo,monospace}
 .cu-stat.warn{background:#fff4e8;color:#b45a08}
 .cu-stat.ok{background:#e9f7ef;color:#0f7a45}
+/* 「其中同步」是「已校正」的一部分，不是并列项：描边 + 挂个 └ */
+.cu-stat.sub{background:#fff;border:1px dashed #b8dfc9;color:#2f7a4d;cursor:help}
+.cu-stat.sub b{color:#0f7a45}
 .cu-ctrl{display:flex;align-items:center;gap:8px}
 .cu-prog{font-size:11px;color:var(--muted);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cu-filters{display:flex;flex-wrap:wrap;gap:5px;padding:8px 12px;border-bottom:1px solid var(--line-2)}

@@ -43,7 +43,9 @@ FILTERS = {
     "coord": "issues LIKE '%coord%'",
     # 自动推断已经认全、但还没人工确认 —— 这类不写进正式库，只作参考
     "pending": "via_source='auto'",
+    # 已校正＝进了正式库的（人工逐趟填的 + 从同起讫点车次同步过来的），后者的 via_origin='sync'
     "manual": "(via_source='manual' OR km_mode='manual')",
+    # 只是「已校正」的一个子集，单独列出来方便回看同步进来的那批
     "synced": "via_origin='sync'",
     "clean": "issues = ''",
 }
@@ -275,6 +277,7 @@ def od_mates(code: str, limit: int = 60) -> dict:
             "viaSource": r["via_source"],
             "viaCoverage": r["via_cov"],
             "origin": r["via_origin"] or (ov.get("source") or ""),
+            "srcCode": ov.get("srcCode") or "",     # 同步来的：从哪趟车同步的
             "hasOverride": bool(ov.get("via")),
             "overlap": round(shared / len(mine_set) * 100) if mine_set else 0,
             "sameStops": bool(names) and names == mine_names,
@@ -452,6 +455,7 @@ def counts() -> dict:
                 ("coord", "SELECT COUNT(*) FROM curate WHERE issues LIKE '%coord%'"),
                 ("manual", "SELECT COUNT(*) FROM curate WHERE via_source='manual' OR km_mode='manual'"),
                 ("pending", "SELECT COUNT(*) FROM curate WHERE via_source='auto'"),
+                # 同步入库也算已校正，这里是它其中的一部分，不是并列的另一个数
                 ("synced", "SELECT COUNT(*) FROM curate WHERE via_origin='sync'"),
                 ("clean", "SELECT COUNT(*) FROM curate WHERE issues = ''"),
                 ("lastScan", "SELECT MAX(scanned_at) FROM curate"),

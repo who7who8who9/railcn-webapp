@@ -112,6 +112,10 @@ def check_api(src, dst):
     assert ov.get("source") == "sync", f"{dst} 的校正来源不是 sync：{ov}"
     pm = get(f"/api/route?code={dst}&date={m['date']}")
     assert pm["viaSource"] == "manual" and pm["viaConfirmed"], "同步后目标车次没走人工经由"
+    # 行车详情里的「已校正 · 同步」徽标读的是这两个字段
+    pman = pm.get("manual") or {}
+    assert pman.get("source") == "sync" and pman.get("srcCode") == src, \
+        f"route payload 没带同步来源：{pman.get('source')} / {pman.get('srcCode')}"
     segs = [(s["line"], s["from"], s["to"]) for s in pm["viaSegs"]]
     print(f"  {dst} 入库：source={ov['source']} 依据 {ov.get('basedDate')} · {segs}")
 
@@ -127,10 +131,15 @@ def check_api(src, dst):
         assert po["viaSource"] == "auto", f"{others[0]} 自动沿用了别人的校正"
         print(f"  同组第三趟 {others[0]} 仍是 auto（没有自动沿用）")
 
-    # 6) 清单里能按来源筛出来
+    # 6) 清单里能按来源筛出来，而且同步的算「已校正」（是它的一部分，不是并列项）
     lst = get("/api/curate/list?filter=synced&limit=200")
     hit = [x["code"] for x in lst["items"] if x["code"] == dst]
     print(f"  「同步入库」筛选：total={lst['total']}，本组 {dst} 在不在 {bool(hit)}")
+    man = get("/api/curate/list?filter=manual&limit=500")
+    assert any(x["code"] == dst for x in man["items"]), "同步入库的没算进「已校正」"
+    st = get("/api/curate/stats")["counts"]
+    assert st["synced"] <= st["manual"], f"同步数 {st['synced']} 超过了已校正 {st['manual']}"
+    print(f"  已校正 {man['total']} ⊇ 同步 {lst['total']}（统计 {st['manual']} / {st['synced']}）")
     return dst
 
 
@@ -186,6 +195,25 @@ def check_ui(src, dst):
         msg = pg.inner_text("#ceMsg")
         print("  保存提示：" + msg.replace("\n", " ")[:120])
         assert "已同步到" in msg, "保存提示里没说同步了几趟"
+
+        # 同步入库的算「已校正」：统计条是「已校正 / 其中同步」，行上标「已校正 · 同步」
+        pg.click('#cuFilters .cu-filter[data-f="synced"]')
+        pg.wait_for_selector('#cuList .cu-row[data-code="%s"]' % dst, timeout=20000)
+        pg.wait_for_timeout(400)
+        stats = pg.inner_text("#cuStats").replace("\n", " ")
+        print("  统计条：" + stats[:90])
+        assert "其中同步" in stats, f"统计条没把同步标成已校正的一部分：{stats}"
+        flag = pg.evaluate("""code => { const r=[...document.querySelectorAll('#cuList .cu-row')]
+            .find(x => x.dataset.code === code);
+            const f = r && r.querySelector('.cu-flag.manual');
+            return f ? f.textContent.trim() : ''; }""", dst)
+        print(f"  {dst} 行标记：「{flag}」")
+        if not flag:
+            print("  DEBUG rows:", pg.evaluate("""() => [...document.querySelectorAll('#cuList .cu-row')]
+                .map(r => r.dataset.code + ' / ' + r.querySelector('.flags').innerHTML)"""))
+            print("  DEBUG filter:", pg.evaluate("() => CU.filter"))
+        assert "已校正" in flag and "同步" in flag, f"同步行没标成已校正：{flag}"
+
         assert not errs, "页面 JS 报错：" + "; ".join(errs)
         print("  页面无 JS 报错")
         b.close()

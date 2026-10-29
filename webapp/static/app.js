@@ -793,7 +793,10 @@ function renderDetail(route) {
         const span = [s.from, s.to].filter(Boolean).join('–');
         return `<button class="chip" data-line="${esc(s.line)}" title="${esc(span)}">${esc(s.line)}</button>`;
       }).join('')}${route.viaSource === 'manual'
-        ? '<span class="tag manual">人工校正</span>'
+        ? ((route.manual || {}).source === 'sync'
+          ? `<span class="tag manual" title="已校正：经由是从同起讫点车次 ${
+              esc((route.manual || {}).srcCode || '')} 同步过来的，一样在正式库里">已校正 · 同步</span>`
+          : '<span class="tag manual" title="已校正：人工填写的经由，已存进正式库">已校正</span>')
         : (route.viaSource === 'auto'
           ? '<span class="tag auto" title="经由是按线路库临时推断的，还没人工确认，不算正式数据">自动推断</span>'
           : '')}</div>`
@@ -4165,14 +4168,16 @@ async function boot() {
 const ISSUE_CN = { via: '经由待补', km: '里程估算', coord: '缺坐标' };
 const CU_FILTERS = [
   ['todo', '待补全'], ['via0', '经由全无'], ['via', '经由缺口'], ['km', '里程估算'],
-  ['coord', '缺坐标'], ['pending', '自动待确认'], ['manual', '已校正'],
-  ['synced', '同步入库'], ['clean', '无问题'], ['all', '全部'],
+  ['coord', '缺坐标'], ['pending', '自动待确认', '自动推断认全了，但还没人工确认，不算正式数据'],
+  ['manual', '已校正', '人工校正过的车次，含从同起讫点车次同步进来的'],
+  ['synced', '同步入库', '已校正里的一部分：经由是从同起讫点车次同步过来的'],
+  ['clean', '无问题'], ['all', '全部'],
 ];
 const CU = {
   filter: 'todo', q: '', items: [], total: 0, limit: 60,
   sel: null, detail: null, via: [], segKm: {}, lines: null, poll: null,
   coordQ: '', coordOnlyMiss: false, mode: 'seg', linesStale: false,
-  mates: new Set(), mateOpen: new Set(),
+  mates: new Set(), mateOpen: new Set(), loadSeq: 0,
 };
 
 const esc = s => String(s == null ? '' : s)
@@ -4207,18 +4212,24 @@ function cuWire() {
 }
 
 async function cuLoad() {
+  // 连点筛选/搜索时会并发几次请求，先回来的旧结果不能盖住新的：
+  // 每次加载领一个号，回来时号不是最新的就整包丢掉
+  const seq = ++CU.loadSeq;
   try {
-    cuRenderStats(await api('/api/curate/stats'));
+    const st = await api('/api/curate/stats');
+    if (seq === CU.loadSeq) cuRenderStats(st);
   } catch (e) { /* 统计失败不影响列表 */ }
   const box = $('#cuList');
   if (!CU.items.length) box.innerHTML = '<div class="empty">正在载入校对清单…</div>';
   try {
     const d = await api('/api/curate/list', { filter: CU.filter, q: CU.q, limit: CU.limit });
+    if (seq !== CU.loadSeq) return;
     CU.items = d.items || [];
     CU.total = d.total || 0;
     cuRenderFilters();
     cuRenderList();
   } catch (e) {
+    if (seq !== CU.loadSeq) return;
     box.innerHTML = `<div class="empty">清单载入失败：${esc(e.message)}<br><br>`
       + '如果还没扫过，点上面「重新扫描」生成清单。</div>';
   }
@@ -4226,11 +4237,15 @@ async function cuLoad() {
 
 function cuRenderStats(st) {
   const c = st.counts || {};
+  /* 「已校正」是总数，「其中同步」是它的一部分（从同起讫点车次同步过来的），
+     两个不是并列关系，别把它们相加 */
   $('#cuStats').innerHTML = [
     ['待补全', c.todo, 'warn'], ['经由全无', c.via0, 'warn'], ['经由缺口', c.via, ''],
     ['里程', c.km, ''], ['缺坐标', c.coord, ''], ['已校正', c.manual, 'ok'],
-    ['自动待确认', c.pending, ''], ['同步入库', c.synced, ''], ['已扫描', c.scanned, ''],
-  ].map(([k, v, cls]) => `<span class="cu-stat ${cls}">${k}<b>${nfmt(v || 0)}</b></span>`).join('');
+    ['其中同步', c.synced, 'ok sub'], ['自动待确认', c.pending, ''], ['已扫描', c.scanned, ''],
+  ].map(([k, v, cls]) => `<span class="cu-stat ${cls}"${
+    cls.includes('sub') ? ' title="同步入库也算已校正，是已校正里从同起讫点车次同步过来的那部分"'
+                        : ''}>${k}<b>${nfmt(v || 0)}</b></span>`).join('');
 
   const p = $('#cuProg');
   const btn = $('#cuScan');
@@ -4262,8 +4277,9 @@ function cuPoll() {
 }
 
 function cuRenderFilters() {
-  $('#cuFilters').innerHTML = CU_FILTERS.map(([k, label]) =>
-    `<button class="cu-filter${k === CU.filter ? ' active' : ''}" data-f="${k}">${label}</button>`).join('');
+  $('#cuFilters').innerHTML = CU_FILTERS.map(([k, label, tip]) =>
+    `<button class="cu-filter${k === CU.filter ? ' active' : ''}" data-f="${k}"${
+      tip ? ` title="${esc(tip)}"` : ''}>${label}</button>`).join('');
   $$('#cuFilters .cu-filter').forEach(b => b.addEventListener('click', () => {
     CU.filter = b.dataset.f;
     CU.limit = 60;
@@ -4284,7 +4300,10 @@ function cuRenderList() {
       return `<span class="cu-flag ${x}">${label}</span>`;
     }).join('');
     const manual = (it.viaSource === 'manual' || it.kmMode === 'manual')
-      ? `<span class="cu-flag manual">${it.viaOrigin === 'sync' ? '同步入库' : '已校正'}</span>` : '';
+      ? (it.viaOrigin === 'sync'
+        ? '<span class="cu-flag manual" title="同步入库的经由也算已校正，一样在正式库里">已校正 · 同步</span>'
+        : '<span class="cu-flag manual">已校正</span>')
+      : '';
     // 自动推断出来的经由只是「算出来的」，没人工确认就不算正式数据
     const pend = it.viaSource === 'auto'
       ? '<span class="cu-flag pending" title="经由是按线路库自动推断的，还没人工确认；确认后才会写进正式库">待确认</span>' : '';
@@ -4574,8 +4593,11 @@ function odRowHtml(it) {
     ? '<span class="mate-tag same" title="站序和这趟车完全一样，经套过去最准">站序相同</span>'
     : `<span class="mate-tag" title="和这趟车共有的停站占比">重合 ${it.overlap}%</span>`);
   if (it.hasOverride) {
-    tags.push(`<span class="mate-tag manual" title="已有一条自己的校正，勾选同步会覆盖它">${
-      it.origin === 'sync' ? '同步入库' : '已校正'}</span>`);
+    // 同步入库的和人工校正一样算「已校正」，来源只作补充说明
+    tags.push(it.origin === 'sync'
+      ? `<span class="mate-tag manual" title="已校正（同步自 ${
+          esc(it.srcCode || '同起讫点车次')}），勾选同步会覆盖它">已校正 · 同步</span>`
+      : '<span class="mate-tag manual" title="已校正，勾选同步会覆盖它">已校正</span>');
   } else if (it.viaSource === 'auto') {
     tags.push('<span class="mate-tag pending">待确认</span>');
   }
@@ -4728,7 +4750,7 @@ function cuRenderEditor() {
       <span class="ce-badge">${esc(d.date || '')}</span>
       ${ovVia.length
         ? `<span class="ce-badge manual" title="${esc(ovNote)}">${
-            ov.source === 'sync' ? '同步入库' : '已校正'}</span>` : ''}
+            ov.source === 'sync' ? '已校正 · 同步' : '已校正'}</span>` : ''}
       ${kmManual && !ovVia.length ? '<span class="ce-badge manual">里程人工</span>' : ''}
       ${staleText ? `<span class="ce-badge warn" title="${esc(staleText)}">站表已变</span>` : ''}
       ${autoPending ? '<span class="ce-badge warn" title="自动推断结果只是算出来的，要人工确认才进正式库">自动待确认</span>' : ''}

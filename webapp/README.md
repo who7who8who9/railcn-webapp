@@ -357,13 +357,17 @@ G1 北京南→上海虹桥 因此从「直线 1176 km」修正为 **1318 km**�
 ### 自动推断的经由要「确认」才进正式库
 
 `build_route_payload()` 每次查询都按线路库现算一份经由 —— 那是**算出来的参考结果**，
-不是库里的数据。正式库（`train_override`）里只有人工确认过的：
+不是库里的数据。正式库（`train_override`）里只有确认过的，而「确认」有两条路：
+逐趟人工填，或者从同起讫点车次同步过来。**两条路都算「已校正」**，区别只在 `manual.source`：
 
-| 来源 | `viaSource` | 进正式库 | 界面 |
-|---|---|---|---|
-| 逐趟人工补全 / 确认 | `manual` | 是 | 绿标「已校正」 |
-| 从同起讫点车次同步过来 | `manual`（`manual.source=sync`） | 是 | 蓝标「同步入库」 |
-| 自动推断 | `auto` | 否 | 灰标「自动推断」「待确认」 |
+| 来源 | `viaSource` | 进正式库 | 算不算已校正 | 界面 |
+|---|---|---|---|---|
+| 逐趟人工补全 / 确认 | `manual`（`manual.source=manual`） | 是 | 是 | 绿标「已校正」 |
+| 从同起讫点车次同步过来 | `manual`（`manual.source=sync`） | 是 | 是 | 绿标「已校正 · 同步」，悬停看同步自哪趟 |
+| 自动推断 | `auto` | 否 | 否 | 灰标「自动推断」「待确认」 |
+
+所以统计条里「其中同步」是「已校正」的**子集**，两个数不能相加；
+`filter=manual` 含同步的，`filter=synced` 只是把同步进来的那批单独捞出来回看。
 
 校对清单里凡是 `via_source='auto'` 的都挂「待确认」，`filter=pending` 只看这一类；
 编辑器「确认自动结果并入库」把整趟认全的自动结果一次确认为人工并保存，
@@ -601,7 +605,7 @@ python scripts\import_crtrain.py     :: 归集成 data\crtrain\lines.json + geom
 
 ### 校对页
 
-左列按问题筛选（待补全 / 经由全无 / 经由缺口 / 里程 / 缺坐标 / 自动待确认 / 已校正 / 同步入库 / 无问题 / 全部），
+左列按问题筛选（待补全 / 经由全无 / 经由缺口 / 里程 / 缺坐标 / 自动待确认 / 已校正 / 同步入库（已校正的子集） / 无问题 / 全部），
 右侧编辑器做四件事：
 
 1. **分段填经由** —— 线路名是下拉选择（`▾` 展开全部线路，打字即时过滤，`↑↓` 移动、`Enter` 选中、
@@ -711,7 +715,7 @@ python scripts\import_crtrain.py     :: 归集成 data\crtrain\lines.json + geom
 | `GET /api/collect/chain/stop` | — | 暂停连跑（当天进度保留） |
 | `GET /api/collect/download` | `date`、`fmt=json\|csv` | 导出并直接下载 |
 | `GET /api/collect/files` | — | 已导出的文件清单 |
-| `GET /api/curate/stats` | — | 校对统计（待补全 / 经由 / 里程 / 坐标 / 已校正 / 自动待确认 / 同步入库）+ 扫描进度 |
+| `GET /api/curate/stats` | — | 校对统计（待补全 / 经由 / 里程 / 坐标 / 已校正 / 其中同步（已校正的子集）/ 自动待确认）+ 扫描进度 |
 | `GET /api/curate/list` | `filter`、`q`、`limit`、`offset` | 校对清单，`filter=todo\|via\|via0\|km\|coord\|pending\|manual\|synced\|clean\|all`；每项带 `codeLabel` / `codes` / `viaOrigin` |
 | `GET /api/curate/detail` | `code` | 某车次的**自动推断基线**（绕开人工校正）+ 已有校正（含 `source` / `basedDate`）+ 经停站 + `gapCands`（缺口候选线路）+ `odMates`（同起讫点的其它车次与停站概况）+ `overrideStale`（站表变没变） |
 | `GET /api/curate/mate` | `code` | 某趟车的停站明细（站名 / 到发时刻 / 跨日 / 每站车次号），给「同起讫点 → 停站详情」展开用 |

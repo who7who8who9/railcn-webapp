@@ -1593,7 +1593,9 @@ function nmRender() {
         <input id="nmName" placeholder="比如 沪宁沿江高速线" autocomplete="off"
                value="${esc(p.name || '')}"${fixed ? ' readonly' : ''}>
         <span class="nm-tip">${p.libStations
-          ? '保存后按这份站序覆盖本机（原始档案不动），随时可「恢复档案站序」'
+          ? (p.loose
+            ? '这条线还没进线路库，保存会先按资料库的线名把它收进线路库（站序一起存），之后就是普通线路'
+            : '保存后按这份站序覆盖本机（原始档案不动），随时可「恢复档案站序」')
           : p.replace
             ? '这是自建线路，保存会用下面这份站表整体替换现有的'
             : '档案里已有的线路不能重名；重名会提示改用「编辑里程」'}</span>
@@ -2593,7 +2595,10 @@ function lnRenderHead() {
       <span class="tag">${d.n} 站</span>
       <span class="tag${d.totalKm == null ? ' warn' : ''}">${lnKmText(d.totalKm)}</span>
       ${d.info && d.info.type ? `<span class="tag type">${esc(d.info.type)}</span>` : ''}
-      ${d.kmManual ? '<span class="tag manual">人工里程</span>' : ''}
+      ${d.kmManual
+        ? `<span class="tag manual"${d.kmTotalOnly ? ' title="只有总里程，来自资料库；逐站里程还没填"' : ''}>${
+            d.kmTotalOnly ? '总里程来自资料库' : '人工里程'}</span>`
+        : ''}
       ${d.kmComplete ? '' : (d.stopsFrom === 'parts'
         ? '<span class="tag warn" title="站序由同前缀的分段线拼成，档案里没有里程；要里程走「编辑里程」">无里程</span>'
         : `<span class="tag warn" title="这些站资料里没有里程，站间里程留空，不做插值">缺 ${
@@ -3124,6 +3129,7 @@ function openLineStops(d) {
     rows,
     note: (d.override && d.override.note) || '',
     libStations: true,
+    loose,
     hint: loose
       ? `这条线<b>还没进线路库</b>，站序现在取自${srcName}。`
         + `保存时会按资料库的线名整条收进线路库（本站序一起存），之后就是普通线路。`

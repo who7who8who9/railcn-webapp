@@ -604,6 +604,9 @@ def line_detail(name: str) -> Optional[dict]:
         km_check = _km_check(ln, rec)
     return {**ln, "stations": pts, "segKm": seg,
             "stopsManual": bool(ln.get("stopsManual")),
+            # 只有总里程、没有任何分段 / 站里程：这类是「资料库给的总长」（库外线路收编时
+            # 带过来的），界面别写成「人工里程」，免得以为有人手填过站距
+            "kmTotalOnly": bool(ov.get("totalKm")) and not (ov.get("segKm") or ov.get("staKm")),
             "override": {"segKm": ov.get("segKm") or {}, "staKm": ov.get("staKm") or {},
                          "stops": ov.get("stops") or [],
                          "totalKm": ov.get("totalKm"),

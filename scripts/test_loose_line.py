@@ -84,6 +84,10 @@ def main():
     after = line_of(LINE)
     ck(after.get("custom") is True, "再查已经是自建线路")
     ck(after["n"] == 5, "站数跟保存的一致：%s" % after["n"])
+    ck(after.get("totalKm") == d.get("totalKm"),
+       "总里程没丢（资料库那条的总长继续用）：%s" % after.get("totalKm"))
+    ck(all(s.get("km") is None for s in after["stations"][1:]),
+       "没有逐站里程就仍然是空，不拿总长均分出假里程")
 
     print("== 再改一次：走覆盖，不再收编")
     stops2 = stops + [{"name": base[5]}]

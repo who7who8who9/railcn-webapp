@@ -1974,6 +1974,15 @@ def _adopt_loose_line(name: str) -> Optional[dict]:
         got.get("source") or "", "分段线拼")
     save_custom_line(canon, rows,
                      f"改站序时按{src}的站序收进线路库", replace=False)
+    # 自建线路的总里程只能从站里程算，而这类线的资料常常只有总长没有逐站里程
+    # （侯西线 42 站一个都没有）→ 总里程会变「-」。把资料库给的总长存成人工里程：
+    # _rebuild_km 在站里程全空时不会均分，站里程仍然是缺的，不会造出假数据。
+    km = got.get("totalKm")
+    if km:
+        try:
+            save_line_override(canon, None, km, "", None)
+        except (ValueError, sqlite3.Error):      # 总长不合法就算了，不影响站序
+            pass
     return cnrail.line(canon)
 
 

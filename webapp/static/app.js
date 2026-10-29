@@ -2586,8 +2586,18 @@ function lnRenderHead() {
       <span class="tag${d.totalKm == null ? ' warn' : ''}">${lnKmText(d.totalKm)}</span>
       ${d.info && d.info.type ? `<span class="tag type">${esc(d.info.type)}</span>` : ''}
       ${d.kmManual ? '<span class="tag manual">人工里程</span>' : ''}
-      ${d.kmComplete ? '' : '<span class="tag warn">里程不完整</span>'}
+      ${d.kmComplete ? '' : (d.stopsFrom === 'parts'
+        ? '<span class="tag warn" title="站序由同前缀的分段线拼成，档案里没有里程；要里程走「编辑里程」">无里程</span>'
+        : `<span class="tag warn" title="这些站资料里没有里程，站间里程留空，不做插值">缺 ${
+            (d.stations || []).filter(s => s.km == null).length} 站里程</span>`)}
       ${d.source === 'huirui' ? '<span class="tag manual">资料库</span>' : ''}
+      ${d.stopsFrom === 'catalog'
+        ? `<span class="tag manual" title="这条线线路库里没有（或者只收了其中一段），站序取自线路资料库${
+            d.composedFrom ? `「${esc(d.composedFrom)}」那条资料` : ''}">站序来自资料库</span>`
+        : ''}
+      ${d.stopsFrom === 'parts'
+        ? `<span class="tag manual" title="站序由同名前缀的分段线接起来：${esc((d.stopsParts || []).join(' + '))}">站序由分段拼</span>`
+        : ''}
       ${d.custom ? '<span class="tag manual">自建</span>' : ''}
       ${d.stopsManual ? '<span class="tag manual">站序人工</span>' : ''}
       <span class="ln-acts">
@@ -2838,7 +2848,7 @@ function lnGeomOn() {
 /** 拉一条线的几何，缓存到 LN.gdata */
 async function lnLoadGeom(osmName, expectKm) {
   if (!osmName) return null;
-  if (LN.gdata && LN.gdata.name === osmName) return LN.gdata;
+  if (LN.gdata && LN.gdata.name === osmName && LN.gdata.ask === osmName) return LN.gdata;
   try {
     // expectKm 用来挡掉同名残段：osm 里「潍烟高速铁路」只剩 2 km，和 585 km 的线对不上
     LN.gdata = await api('/api/line/osm', { q: osmName, km: expectKm });
@@ -2871,18 +2881,36 @@ function lnOsmBlock(d) {
       <div class="ln-osm-none">OSM 数据里没有能对上这条线的线名，地图只能画站点直连</div></div>`;
   }
   const fam = o.match === 'family' ? `　<span class="ln-osm-tag">同族匹配</span>` : '';
+  // 分段线名在 OSM 里不存在（成昆线元昆段 ↔ 成昆线）：几何借整条线、再按本段首末站裁
+  const borrow = o.borrowed
+    ? `<span class="ln-osm-tag${o.clipped ? '' : ' warn'}" title="${
+        o.clipped ? `从「${esc(o.parent)}」的整条走向里裁出本段，两端按首末站对齐`
+          : `借的是「${esc(o.parent)}」整条走向，没有裁出本段`}">${
+        o.clipped ? `借 ${esc(o.name)} 裁出本段` : `借 ${esc(o.name)} 整条`}</span>`
+    : '';
   // kmChain 是把上下行复线并掉的单线里程；源数据的 km 会把复线各算一遍
   const geomKm = (o.kmChain && o.km && Math.abs(o.kmChain - o.km) > 0.5) ? o.kmChain : o.km;
   const diff = (d.totalKm != null && geomKm) ? Math.round(geomKm - d.totalKm) : null;
+  const c = o.clip || {};
   const rows = [
     ['OSM 线名', o.name],
     ['几何里程', `${o.km} km${o.kmChain && o.kmChain !== o.km ? `（单线 ${o.kmChain}）`
       : (o.kmMain && o.kmMain < o.km ? `（最长一段 ${o.kmMain}）` : '')}`],
-    ['连通段', `${o.nPart} 段 · ${o.nFrag} 节折线`],
+    ['连通段', o.clipped
+      ? `${o.nPart} 段 · ${o.nPt || 0} 点`
+      : `${o.nPart} 段 · ${o.nFrag} 节折线`],
     ['桥 / 隧', `${o.nBridge} / ${o.nTunnel} 处`],
   ];
+  if (o.borrowed) {
+    rows.push([o.clipped ? '裁出区间' : '未裁原因',
+      o.clipped
+        ? `${c.from} → ${c.to}${c.full ? '（本段就是整条，没有可裁的余量）' : ''}${
+            c.gaps ? `；中间 ${c.gaps} 处断口按直线接上` : ''}`
+        : (o.why || '—')]);
+  }
   return `<div class="ln-osm">
     <div class="ln-i-head"><b>真实走向</b><span class="ln-i-src">OSM${fam}</span>
+      ${borrow}
       ${diff != null ? `<span class="ln-osm-diff${Math.abs(diff) > 40 ? ' warn' : ''}">几何比档案 ${diff > 0 ? '+' : ''}${diff} km</span>` : ''}
       <button class="btn sm ghost" id="lnGeomBtn">${lnGeomOn() ? '改站点直连' : '按真实走向'}</button>
     </div>
@@ -2897,7 +2925,7 @@ function lnBindGeom() {
   btn.addEventListener('click', async () => {
     const on = !lnGeomOn();
     localStorage.setItem('railcn.lineGeom', on ? '1' : '0');
-    if (on && LN.data && LN.data.osm && !LN.gdata) await lnLoadGeom(LN.data.osm.name, LN.data.totalKm);
+    if (on && LN.data && LN.data.osm && !LN.gdata) await lnLoadGeom(LN.data.osm.ask || LN.data.osm.name, LN.data.totalKm);
     lnDrawMap();
     lnRenderInfo();
   });
@@ -2911,7 +2939,7 @@ async function showLine(q) {
     const d = await api('/api/line', { q });
     LN.data = d;                       // 先挂上，lnDrawMap 要靠它取站点
     LN.gdata = null;
-    if (d.osm && lnGeomOn()) await lnLoadGeom(d.osm.name, d.totalKm);
+    if (d.osm && lnGeomOn()) await lnLoadGeom(d.osm.ask || d.osm.name, d.totalKm);
     lnDrawMap();
     $('#hud').classList.add('hidden');
     $('#dock').classList.add('hidden');
@@ -2987,7 +3015,9 @@ async function showOsmList(q, box) {
     box.innerHTML = `<div class="cat-head">线路库和资料库都没有「${esc(q)}」，`
       + `OSM 铁路数据里找到 ${d.items.length} 条：</div>`
       + d.items.map(it => `<div class="cat-row" data-nm="${esc(it.name)}">
-          <div class="cat-n">${esc(it.name)}<i>${it.km} km</i></div>
+          <div class="cat-n">${esc(it.name)}<i>${it.km} km</i>${
+            it.stopsN ? `<b class="cat-fit" title="这条线能补出站表：${
+              it.stopsFrom === 'catalog' ? '取自线路资料库' : '由同名前缀的分段线拼成'}">可补 ${it.stopsN} 站</b>` : ''}</div>
           <div class="cat-m">${[`桥 ${it.nBridge}`, `隧 ${it.nTunnel}`,
             `${it.nPart} 段`, `${it.nFeat} 个要素`].join(' · ')}</div>
         </div>`).join('')
@@ -2999,6 +3029,12 @@ async function showOsmList(q, box) {
 }
 
 async function showOsmLine(name) {
+  // 线路库、资料库都没有这条线，但它可能能补出站序（成昆线 ← 资料库 133 站；
+  // 京哈高速线 ← 京沈段 + 沈哈段）：能补就直接走正式线路页，走向和站表一起给
+  try {
+    await api('/api/line', { q: name });
+    return showLine(name);
+  } catch (_) { /* 补不出来，按纯 OSM 几何展示 */ }
   const box = $('#netList'), det = $('#netDetail');
   $('#paneNet').classList.add('line-only');
   lnWide(false);

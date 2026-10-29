@@ -31,6 +31,7 @@ import collector  # noqa: E402
 import historyq  # noqa: E402
 import curate   # noqa: E402
 import railgeom  # noqa: E402
+import lineseg   # noqa: E402  分段线 ↔ 整线的站序 / 走向互补
 
 mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("text/css", ".css")
@@ -303,6 +304,7 @@ class Handler(BaseHTTPRequestHandler):
             nm = one("q") or one("name")
             items = cnrail.line_station_names(nm) if nm else None
             found = items is not None
+            stopsFrom = "lib" if found else ""
             if nm:
                 if found:
                     # 命名线路的站序里常常没有线路所（沪春线的春申南所、宝成线的灭火沟线路所），
@@ -312,7 +314,16 @@ class Handler(BaseHTTPRequestHandler):
                     # 只在资料库里有、认不出对应自建线路的（银西高铁），直接给资料库站序
                     items = railcore.catalog_stop_names(nm)
                     found = bool(items)
-            return self.json({"name": nm, "found": found,
+                    stopsFrom = "catalog" if found else ""
+                if not found:
+                    # OSM 有这条线、线路库和资料库都没收（京哈高速线由京沈 + 沈哈两段组成）：
+                    # 按同名前缀的分段线把站序拼出来，供「选经由」和后期自动解析路径用
+                    seg = lineseg.stations_for(nm) or {}
+                    got = [x["name"] for x in (seg.get("stops") or [])]
+                    if got:
+                        items, found = got, True
+                        stopsFrom = seg.get("source") or "parts"
+            return self.json({"name": nm, "found": found, "from": stopsFrom,
                               "items": items or [], "count": len(items or [])})
 
         if path == "/api/line":
@@ -322,17 +333,44 @@ class Handler(BaseHTTPRequestHandler):
                 # 资料库里另有叫法（京沪高铁 → 京沪高速线），指到库里对应的那条
                 alt = railcore.catalog_detail(kw) or {}
                 target = alt.get("line_name")
+                # 库内那条只是整条线的一段（成昆线 → 成昆线成攀段），别把半条当整条给出去：
+                # 站序改从资料库取全线，走向用 OSM 的整条几何，两侧一次补齐
+                if target and lineseg.split(target):
+                    composed = lineseg.compose_line(kw)
+                    if composed:
+                        m = railgeom.meta(kw, composed.get("totalKm"))
+                        if m:
+                            m["kmChain"] = railgeom.spine_km(m["name"], composed.get("totalKm"))
+                        return self.json({**composed, "composedFrom": target,
+                                          "osm": m, "osmOther": railcore.osm_extras(kw, 6)})
                 if target:
                     d = cnrail.line_detail(target)
                     if d:
                         m = (railgeom.meta(kw, d.get("totalKm"))
                              or railgeom.meta(target, d.get("totalKm")))
+                        if not m:
+                            # 分段线名在 OSM 里不存在，借整条线的几何再裁到本段
+                            m = lineseg.borrow_geometry(target, d.get("stations"),
+                                                        d.get("totalKm"))
                         if m:
                             m["kmChain"] = railgeom.spine_km(m["name"], d.get("totalKm"))
                         return self.json({**d, "aliasOf": kw, "osm": m,
                                           "osmOther": railcore.osm_extras(kw, 6)})
+                # 线路库、资料库都没有：OSM 有整条几何的话，站序也能从资料库/分段拼出来
+                composed = lineseg.compose_line(kw)
+                if composed:
+                    m = railgeom.meta(kw, composed.get("totalKm"))
+                    if m:
+                        m["kmChain"] = railgeom.spine_km(m["name"], composed.get("totalKm"))
+                    return self.json({**composed, "composed": True,
+                                      "osm": m, "osmOther": railcore.osm_extras(kw, 6)})
                 return self.err("未找到线路: " + kw, 404)
             m = railgeom.meta(d.get("name") or kw, d.get("totalKm"))
+            if not m:
+                # 库里按段命名、OSM 只有整条（成昆线元昆段 ← 成昆线），借来再按
+                # 本段首末站裁掉两头，免得地图把整条线的走向画到半条线头上
+                m = lineseg.borrow_geometry(d.get("name") or kw, d.get("stations"),
+                                            d.get("totalKm"))
             if m:
                 m["kmChain"] = railgeom.spine_km(m["name"], d.get("totalKm"))
             # 同名前缀下、线路库没收录的 OSM 线（「津霸线」之于「津霸客运专线」）
@@ -341,9 +379,18 @@ class Handler(BaseHTTPRequestHandler):
         # OSM 线路几何（CRTrainRoute 整理）：真实走向 + 几何里程 + 桥隧统计
         if path == "/api/line/osm":
             # km 给了已知里程时，几何里程差太多的残段会被排除
-            g = railgeom.geom(one("q") or one("name"), expect_km=one("km") or None)
+            nm = one("q") or one("name")
+            g = railgeom.geom(nm, expect_km=one("km") or None)
             if not g:
-                return self.err("OSM 数据里没有这条线路: " + (one("q") or one("name")), 404)
+                # 分段线名（成昆线元昆段）在 OSM 里没有独立线名：借父线的几何，
+                # 按本段首末站裁出那一截
+                d = cnrail.line_detail(nm) if nm else None
+                g = lineseg.borrow_geometry(nm, (d or {}).get("stations"),
+                                            (d or {}).get("totalKm"))
+                if g:
+                    g["kmChain"] = g.get("km")
+            if not g:
+                return self.err("OSM 数据里没有这条线路: " + (nm or ""), 404)
             return self.json(g)
 
         if path == "/api/line/osm/list":
@@ -353,6 +400,14 @@ class Handler(BaseHTTPRequestHandler):
             for it in items:
                 it["inLib"] = it["name"] in used
                 it["libName"] = used.get(it["name"]) if it["name"] in used else None
+                if not it["inLib"]:
+                    # 线路库没有、但能补出站序的（资料库同名 / 同前缀分段线拼）：
+                    # 列表里先标出来，点进去就不会只剩一条光走向
+                    s = lineseg.stations_for(it["name"]) or {}
+                    n = len(s.get("stops") or [])
+                    if n:
+                        it["stopsN"] = n
+                        it["stopsFrom"] = s.get("source")
             return self.json({"items": items, "stats": railgeom.stats()})
 
         # OSM-only 线路补站：按走向反查车站库，给「新增线路」弹窗预填站点与里程

@@ -117,6 +117,21 @@ railcn/
     真的没抓过的（全库还剩 3 趟）行上标红「无停站数据」且勾选框禁用；
     本车自己没站序时同伴标「无法比对」（`odMates.items[].canCompare=false`），不显示「重合 0%」。
 
+14. **站序与走向互补（`webapp/lineseg.py`），只补不合并。** 线名在两套数据里常对不齐：
+    库内按段收、OSM 只有整条（成昆线成攀段 / 元昆段 ↔ OSM 成昆线），或 OSM 有整条、库内没这条线（成昆线）。
+    - **借几何**：`borrow_geometry(段名, stations, totalKm)` 拿父线几何，按本段首末站裁出区间。
+      13 条分段能借，11 条精确（元昆段 260→257.7、成攀段 734→725.4）。裁不出就**退整条并写 `why`**，
+      不许硬裁（宁西线西合段几何断 7 截，硬连要横跨 294 km 空白 → 退整条）。
+    - **补站序**：`stations_for(OSM 名)` 先查线路资料库同名（成昆线 133 站），再拿同前缀分段拼
+      （京哈高速线 = 京沈段 + 沈哈段 37 站）。拼接只认硬接缝（≤25 km），
+      京港高速线商合段与赣深段隔 407 km → 拒绝并说明。
+    - **裁剪算法不用 `railgeom._chain`**：它按「接完会不会离起点更近」判复线，长干线会把该接的段全丢掉
+      （成昆线只串出 313 km）。正确做法：复线去重（首尾都对上、容差 0.35 km）→ **按连通分量做最小生成树缝合**
+      （不能「每端点就近连几个」，小分量永远连不出去）→ Dijkstra 走最短路，断口按直线补并记数，
+      缝合半径 8→25→60→200 km 逐级试，里程差 > 25% 判借错线退整条。
+    - **不写库**：几何是站序的派生物，只在查询时补，进程内缓存。前端取几何要用 `osm.ask`（本段名），
+      用 `osm.name` 会拿到整条。首末站离几何 > 30 km 视为站名坐标指错，不裁（龙烟线龙泉北偏 782 km）。
+
 ## 6. 前端约定
 
 - 5 个页签：`车站/线路`、`站站查询`、`数据下载`、`历史数据`、`数据校对`；状态都在全局 `CU` 对象里。
@@ -132,7 +147,7 @@ railcn/
 for f in test_chain test_line_km test_line_stations test_nm_stations test_osm_extras \
          test_station_loose test_tl_stops test_geo_toggle test_dock_speed test_code_alias \
          test_routestore test_nm_insert test_curate_refresh test_curate_sync test_net_form \
-         test_via_nodes; do
+         test_via_nodes test_lineseg; do
   "C:/Users/Administrator/AppData/Local/Programs/Python/Python313/python.exe" scripts/$f.py
 done
 ```
@@ -143,6 +158,7 @@ done
 | `test_curate_refresh` | 线路库改动后重算这趟车的自动经由 |
 | `test_net_form` | 车站/线路查询输入框宽度、联想框宽度与行高、Esc/点空白收起、空列表不占高度 |
 | `test_via_nodes` | 经由选站能选到线路所（沪春线春申南所、宝成线灭火沟线路所）、节点插入位置、只在资料库的线路也出站序 |
+| `test_lineseg` | 分段线借整条线的几何并按首末站裁剪（元昆段 257.7 / 成攀段 725.4）、裁不出如实退整条（宁西线断 7 截）、只有 OSM 的线名补站序（成昆 133 站 / 京哈 37 站）、京港两段隔 407 km 拒绝拼、UI 标「借…裁出本段」|
 | `test_chain` | 车次合并（中途换号）与检索 |
 | `test_line_km` / `test_line_stations` | 线路里程双模式、站序编辑 |
 | `test_nm_stations` / `test_station_loose` | 新增线路站名并集、站名带「站」也能搜 |

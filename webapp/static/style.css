@@ -637,6 +637,7 @@ button.vseg:not(.picked):hover::after{opacity:1}
 .mate-tag.same{background:#e8f6ee;color:#0f7a45}
 .mate-tag.manual{background:#eef4fd;color:#1f5fae}
 .mate-tag.pending{background:#fff2e6;color:#b45309}
+.mate-tag.fits{background:#eef7f6;color:#0d6f6a;border:1px solid #cfe7e4}
 .mate-via{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
   text-align:right}
 .mate-more{border:1px solid var(--line);background:#fff;color:#5a6b83;border-radius:6px;

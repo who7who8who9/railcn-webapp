@@ -384,7 +384,11 @@ G1 北京南→上海虹桥 因此从「直线 1176 km」修正为 **1318 km**�
 - 勾选后保存（`POST /api/override` 带 `syncCodes`），刚存好的经由会**逐趟套过去**，
   每趟各存一条自己的 `train_override`（`source=sync`，`src_code` 记来源车次）。
   同步是「一次性把已确认的结论复制给选中的车」，复制完各自独立，不再互相影响
-- 区间端点按对方经停站落站：对方少停某一站时，按「第几站」的比例就近并入相邻段，首尾必然相接
+- **对方的每一站都在这条经由走过的路上 → 原样照抄**（`mode=direct`）：区间端点一个不动，
+  连转线的所（春申南所、灭火沟线路所）也照留，**不重新落站、不重算**。
+  这类车次在列表里挂「停站全在经由内」青标，一眼能看出勾了会怎么存
+- 只有它停了经由**之外**的站，才按它的停站重新落站（`mode=adapt`）：端点对不上时按
+  「第几站」的比例就近并入相邻段，首尾必然相接。哪种方式都会在保存提示里说明
 - 只同步**覆盖全程**的经由；对方已有自己的校正默认不覆盖（勾了会在保存前确认一次）
 - 站间里程不跟着同步 —— 它按「第 i 段」记下标，站数不同就对不上
 
@@ -722,13 +726,13 @@ python scripts\import_crtrain.py     :: 归集成 data\crtrain\lines.json + geom
 | `GET /api/collect/files` | — | 已导出的文件清单 |
 | `GET /api/curate/stats` | — | 校对统计（待补全 / 经由 / 里程 / 坐标 / 已校正 / 其中同步（已校正的子集）/ 自动待确认）+ 扫描进度 |
 | `GET /api/curate/list` | `filter`、`q`、`limit`、`offset` | 校对清单，`filter=todo\|via\|via0\|km\|coord\|pending\|manual\|synced\|clean\|all`；每项带 `codeLabel` / `codes` / `viaOrigin` |
-| `GET /api/curate/detail` | `code` | 某车次的**自动推断基线**（绕开人工校正）+ 已有校正（含 `source` / `basedDate`）+ 经停站 + `gapCands`（缺口候选线路）+ `odMates`（同起讫点的其它车次与停站概况）+ `overrideStale`（站表变没变） |
+| `GET /api/curate/detail` | `code` | 某车次的**自动推断基线**（绕开人工校正）+ 已有校正（含 `source` / `basedDate`）+ 经停站 + `gapCands`（缺口候选线路）+ `odMates`（同起讫点的其它车次与停站概况，每项带 `viaFits`：它的停站是否全在这条经由上）+ `overrideStale`（站表变没变） |
 | `GET /api/curate/mate` | `code` | 某趟车的停站明细（站名 / 到发时刻 / 跨日 / 每站车次号），给「同起讫点 → 停站详情」展开用 |
 | `GET /api/curate/lineNames` | — | 全部线路（带站数 / 总里程，给编辑器下拉用；`items[]` 为对象，`names[]` 是纯名字） |
 | `POST /api/curate/refresh` | `code` | 线路库改过之后重算这趟车：重载线路库 → 重算自动基线 → 刷新清单摘要；返回详情 + `library`（线路库条数）+ `summary` |
 | `GET /api/curate/cands` | `from`、`to` | 两站之间的候选线路（`line` / `src` / `srcCn`），给「点选候选段」用 |
 | `POST /api/curate/scan` · `GET /api/curate/stop` | — | 全量扫描开始 / 停止（后台线程，进度可轮询） |
-| `POST /api/override` | `code`、`via[]`、`totalKm`、`segKm`、`note`、`date`、`syncCodes[]`、`syncOverwrite` | 保存人工校正；`segKm` 形如 `{"0":205,"2":230}`（键是区间序号）；`date` 记成 `based_date`（校正依据哪天的站表）；全为空即撤销。`syncCodes` 是勾选的同起讫点车次，保存后逐趟套过去、各存一条自己的校正，返回 `synced[]`（每项 `ok` / `reason` / `segs`）；对方已有校正默认跳过，`syncOverwrite=1` 才覆盖 |
+| `POST /api/override` | `code`、`via[]`、`totalKm`、`segKm`、`note`、`date`、`syncCodes[]`、`syncOverwrite` | 保存人工校正；`segKm` 形如 `{"0":205,"2":230}`（键是区间序号）；`date` 记成 `based_date`（校正依据哪天的站表）；全为空即撤销。`syncCodes` 是勾选的同起讫点车次，保存后逐趟套过去、各存一条自己的校正，返回 `synced[]`（每项 `ok` / `reason` / `segs` / `mode`：`direct` = 停站全在经由内、原样照抄，`adapt` = 按它的停站重新落站）；对方已有校正默认跳过，`syncOverwrite=1` 才覆盖 |
 | `POST /api/line/km` | `name`、`segKm`、`totalKm`、`note` | 保存线路里程人工校正，返回最新线路详情；全为空即撤销 |
 | `POST /api/line/km/clear` | `name` | 线路里程恢复档案值 |
 | `POST /api/line/new` | `name`、`stations[]`（`{name, km}`，km 可空）、`note`、`replace` | 新增线路，返回线路详情 + `filledStations`（这次补进车站库的沿线站）；`replace=1` 允许覆盖同名**自建**线路（改站表用） |

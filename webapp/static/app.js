@@ -4600,6 +4600,10 @@ function odRowHtml(it) {
   } else if (it.viaSource === 'auto') {
     tags.push('<span class="mate-tag pending">待确认</span>');
   }
+  if (it.viaFits) {
+    tags.push('<span class="mate-tag fits" title="它的每一站都在这条经由走过的路上：'
+      + '勾选同步会原样照抄，不重新落站">停站全在经由内</span>');
+  }
   const time = it.startTime ? `${esc(it.startTime)}–${esc(it.endTime || '')}` : '';
   return `<div class="mate-row${on ? ' on' : ''}" data-code="${esc(it.code)}">
     <label class="mate-chk"><input type="checkbox"${on ? ' checked' : ''}></label>
@@ -4627,7 +4631,8 @@ function cuMatesHtml(d) {
     </h4>
     <div class="mate-list" id="ceMates">${items.map(odRowHtml).join('')}</div>
     <div class="ve-note">同步只带动经由：站间里程按「第几站」记下标，站数不同就对不上，所以不跟着同步。
-      已经有自己校正的车次默认不覆盖，勾了会在保存前问一句。</div>
+      标「停站全在经由内」的，它的每一站都在这条经由走过的路上，保存时原样照抄（转线的所也不改）；
+      其余车次只有停了经由外的站，才按它的停站重新落站。已经有自己校正的车次默认不覆盖，勾了会在保存前问一句。</div>
   </div>`;
 }
 
@@ -5992,7 +5997,13 @@ async function cuSave() {
     if (virtCount) parts.push(`${virtCount} 段自动推断没确认，未保存`);
     const synced = (r && r.synced) || [];
     const okc = synced.filter(x => x.ok);
-    if (okc.length) parts.push(`已同步到 ${okc.length} 趟（${okc.map(x => x.code).join('、')}）`);
+    if (okc.length) {
+      const dir = okc.filter(x => x.mode === 'direct').length;
+      const ad = okc.length - dir;
+      parts.push(`已同步到 ${okc.length} 趟（${okc.map(x => x.code).join('、')}）`
+        + (dir ? `，${dir} 趟停站全在经由内、原样照抄` : '')
+        + (ad ? `，${ad} 趟停了经由外的站、按它的停站重新落站` : ''));
+    }
     const bad = synced.filter(x => !x.ok);
     cuMsg(bad.length ? 'bad' : 'ok', '已保存 · ' + parts.join('；')
       + (bad.length ? `；这几趟没同步：${bad.map(x => `${x.code}（${x.reason}）`).join('、')}` : ''));

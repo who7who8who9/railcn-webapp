@@ -665,6 +665,64 @@ def adapt_via_to_stops(segs: List[dict], stops: List[dict]) -> List[dict]:
     return out
 
 
+def _line_span_names(line: str, cache: Dict[str, Optional[List[str]]]) -> Optional[List[str]]:
+    """某条线的完整站序（含线路所这类节点）。线路库、资料库都查不到 → None"""
+    key = cnrail._key(line or "")
+    if key in cache:
+        return cache[key]
+    names: Optional[List[str]] = None
+    try:
+        names = cnrail.line_station_names(line)
+        if names:
+            names = merge_catalog_nodes(line, names)
+        else:
+            names = catalog_stop_names(line) or None
+    except Exception:                                # noqa: BLE001
+        names = None
+    cache[key] = names
+    return names
+
+
+def _span_slice(names: List[str], a: str, b: str) -> Optional[List[str]]:
+    """站序里 a→b 之间（含两端）的站名；有一端对不上就是 None"""
+    keys = [cnrail._key(n) for n in names]
+    ka, kb = cnrail._key(a or ""), cnrail._key(b or "")
+    if ka not in keys or kb not in keys:
+        return None
+    i, j = keys.index(ka), keys.index(kb)
+    if i > j:
+        i, j = j, i
+    return names[i:j + 1]
+
+
+def via_covers_stops(segs: List[dict], stops: List[dict],
+                     cache: Optional[Dict[str, Optional[List[str]]]] = None) -> Optional[bool]:
+    """
+    这条经由是不是已经把 stops 里的每一站都走过了？
+
+    True  → 原样照抄就是对的：转线的所、区间端点都不用改，不必重新落站；
+    False → 目标车停了经由之外的站，得按它的停站重新落站；
+    None  → 线路站序查不到，判断不了，走重新落站那条路（老办法）。
+
+    `cache` 是「线路名 → 站序」的记忆表：一次列几十趟同起讫点车次时传一个进来，
+    别每趟都把线路站序重新读一遍。
+    """
+    n = len(stops or [])
+    if n < 2 or not segs:
+        return None
+    cache = {} if cache is None else cache
+    seen: set = set()
+    for s in segs:
+        names = _line_span_names(str(s.get("line") or ""), cache)
+        if not names:
+            return None
+        part = _span_slice(names, s.get("from") or "", s.get("to") or "")
+        if part is None:
+            return None
+        seen.update(cnrail._key(x) for x in part)
+    return all(cnrail._key(s.get("name") or "") in seen for s in stops)
+
+
 # ---------------------------------------------------------------------------
 # 同起讫点车次：列停站明细、按勾选同步已校正的经由
 # ---------------------------------------------------------------------------
@@ -739,8 +797,9 @@ def sync_via(codes, segs, src_code: str, note: str = "", date: Optional[str] = N
     把一趟车的已校正经由同步到勾选的同起讫点车次。
 
     逐趟各存一条 `train_override`（和车次号绑定，不是抄进一份「同类」表）：
-    区间按对方的经停站重新落站，中间没停的站会被并进相邻段。返回每趟的结果，
-    同步不过去的（没数据 / 已有自己的校正 / 站序对不上）如实说明，不硬写。
+    对方的每一站都在这条经由走过的路上 → 原样照抄，区间端点、转线的所一个不动；
+    只有它停了经由之外的站，才按它的停站重新落站（`mode=adapt`）。
+    返回每趟的结果，同步不过去的（没数据 / 已有自己的校正 / 站序对不上）如实说明，不硬写。
     """
     src = (src_code or "").strip().upper()
     clean = _clean_via(segs)
@@ -789,15 +848,25 @@ def sync_via(codes, segs, src_code: str, note: str = "", date: Optional[str] = N
         if (prev.get("via") or []) and not overwrite:
             out.append({"code": c, "ok": False, "reason": "它已有自己的校正，未覆盖"})
             continue
-        adapted = adapt_via_to_stops(routed, stops)
-        if not adapted:
-            out.append({"code": c, "ok": False, "reason": "经由和它的停站对不上，未同步"})
-            continue
         text = f"{note}（同起讫点同步自 {src}）" if note else f"同起讫点同步自 {src}"
+        # 它的每一站都在这条经由走过的路上 → 直接照抄，不用重新落站、不用重算
+        direct = via_covers_stops(clean, stops)
+        if direct:
+            via = [dict(s) for s in clean]
+            mode = "direct"
+        else:
+            via = adapt_via_to_stops(routed, stops)
+            mode = "adapt"
+            if not via:
+                out.append({"code": c, "ok": False,
+                            "reason": ("经由和它的停站对不上" if direct is False
+                                       else "线路站序查不到，没法按它的停站落站") + "，未同步"})
+                continue
         # 站间里程按「第 i 站」记下标，站数不同就对不上，所以同步只带总里程不带段里程
-        saved = save_override(c, adapted, prev.get("totalKm"), text, {}, brief.get("date"),
+        saved = save_override(c, via, prev.get("totalKm"), text, {}, brief.get("date"),
                               source="sync", src_code=src)
-        out.append({"code": c, "ok": True, "segs": len(saved.get("via") or []),
+        out.append({"code": c, "ok": True, "mode": mode,
+                    "segs": len(saved.get("via") or []),
                     "date": brief.get("date"), "srcCode": src,
                     "stops": len(stops)})
     return out

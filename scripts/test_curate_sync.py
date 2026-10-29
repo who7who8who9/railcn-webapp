@@ -7,7 +7,8 @@
   2. 校正和车次号绑定，并记下「依据哪一天的站表」；站表变了要能提示
   3. 「同类沿用」已经取消：同起讫点的车次不会再自动套用别人的经由
   4. 只能人工勾选同步；同步过去的每趟各存一条自己的校正（source=sync）
-  5. 同步时区间按对方的停站重新落站（对方少停的站并进相邻段）
+  5. 对方的每一站都在这条经由走过的路上 → 原样照抄（mode=direct，不重新落站）；
+     只有它停了经由之外的站，才按它的停站重新落站（mode=adapt）
 
 自带清理：测试用到的校正跑完全部撤销。
 用法：python scripts/test_curate_sync.py [来源车次 目标车次]
@@ -87,6 +88,10 @@ def check_api(src, dst):
     assert dst != src, "来源和目标是同一趟"
     print(f"  同步目标：{dst}")
 
+    # 0) 同起讫点列表里先标出来「哪几趟停站全在经由里」（勾选后原样照抄）
+    print("  列表标记 viaFits：" + "、".join(
+        f"{m['code']}={m.get('viaFits')}" for m in mates[:6]))
+
     # 1) 自动结果还没入库：payload 里是 auto、viaConfirmed=False
     p = get(f"/api/route?code={src}&date={d['date']}")
     assert p["viaSource"] == "auto" and p["viaConfirmed"] is False, "自动结果不该算已校正"
@@ -119,7 +124,19 @@ def check_api(src, dst):
     segs = [(s["line"], s["from"], s["to"]) for s in pm["viaSegs"]]
     print(f"  {dst} 入库：source={ov['source']} 依据 {ov.get('basedDate')} · {segs}")
 
-    # 4) 区间按对方的停站落站：首末段必须正好是它的首末站
+    # 4) 它的每一站都在这条经由走过的路上 → 原样照抄（不重新落站）；否则才重新落站
+    import railcore as _rc                              # noqa: E402  （已在 find_pair 里塞好路径）
+    tgt_stops = _rc.route_stops_brief(dst).get("stops") or []
+    expect = _rc.via_covers_stops(r.get("via") or [], tgt_stops)
+    mode = synced[0].get("mode")
+    print(f"  覆盖判定 {expect} → 落站方式 {mode}")
+    if expect:
+        assert mode == "direct", f"停站全在经由里，却重新落站了：{mode}"
+        src_via = [(x["line"], x["from"], x["to"]) for x in r["via"]]
+        assert segs == src_via, f"原样照抄的经由被改了：{segs} ≠ {src_via}"
+    else:
+        assert mode == "adapt", f"有站不在经由里，却原样照抄了：{mode}"
+    # 首末段无论如何都要正好是它的首末站
     assert segs[0][1] == m["from"] and segs[-1][2] == m["to"], "同步后的区间没覆盖对方全程"
     assert len(m["stops"]) == len(pm["stops"]), "停站数被改了"
 
@@ -183,7 +200,6 @@ def check_ui(src, dst):
         print(f"  停站详情 {nst} 行")
         assert nst >= 2, "停站详情没内容"
         pg.screenshot(path=os.path.join(SHOT, "cu-sync.png"))
-        pg.query_selector("#ceMatesCard").screenshot(path=os.path.join(DOC, "curate-od.png"))
 
         # 确认自动结果并入库（此时已勾选同伴，会一起同步）
         accept = pg.query_selector("#ceAccept")
@@ -195,6 +211,21 @@ def check_ui(src, dst):
         msg = pg.inner_text("#ceMsg")
         print("  保存提示：" + msg.replace("\n", " ")[:120])
         assert "已同步到" in msg, "保存提示里没说同步了几趟"
+        assert "原样照抄" in msg or "重新落站" in msg, "保存提示没说这次是照抄还是重新落站"
+
+        # 保存后来源车有了经由：列表里该标出哪几趟「停站全在经由内」
+        pg.wait_for_timeout(800)
+        fits = pg.eval_on_selector_all("#ceMates .mate-row .mate-tag.fits", "els => els.length")
+        want = sum(1 for x in (get("/api/curate/detail?code=" + src)["odMates"]["items"])
+                   if x.get("viaFits"))
+        print(f"  标「停站全在经由内」的行 {fits} 个（接口 {want} 个）")
+        assert fits == want, "「停站全在经由内」标记和接口对不上"
+
+        # 文档截图：此时列表已标出「停站全在经由内」，再展开一趟的停站详情
+        pg.query_selector('#ceMates .mate-row[data-code="%s"] input[type=checkbox]' % dst).check()
+        pg.query_selector('#ceMates .mate-row[data-code="%s"] .mate-more' % dst).click()
+        pg.wait_for_timeout(900)
+        pg.query_selector("#ceMatesCard").screenshot(path=os.path.join(DOC, "curate-od.png"))
 
         # 同步入库的算「已校正」：统计条是「已校正 / 其中同步」，行上标「已校正 · 同步」
         pg.click('#cuFilters .cu-filter[data-f="synced"]')
@@ -249,6 +280,25 @@ def check_stale():
         clear(code)
 
 
+def check_rule():
+    """「停站全在经由里就原样照抄」这条判定本身（纯函数，不碰库）"""
+    print("== 覆盖判定")
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "webapp"))
+    import railcore                                    # noqa: E402
+
+    segs = [{"line": "京沪线", "from": "北京", "to": "上海"}]
+    on = [{"name": "北京"}, {"name": "天津西"}, {"name": "徐州"}, {"name": "上海"}]
+    off = [{"name": "北京"}, {"name": "大连"}, {"name": "上海"}]
+    unknown = [{"line": "查不到的线", "from": "甲", "to": "乙"}]
+    print("  京沪线上走天津西/徐州 →", railcore.via_covers_stops(segs, on),
+          "｜停了线外的大连 →", railcore.via_covers_stops(segs, off),
+          "｜线名查不到 →", railcore.via_covers_stops(unknown, on))
+    assert railcore.via_covers_stops(segs, on) is True, "全在线上的停站没认出来"
+    assert railcore.via_covers_stops(segs, off) is False, "线外的停站没被拦下"
+    assert railcore.via_covers_stops(unknown, on) is None, "线名查不到时应返回 None（退回重新落站）"
+
+
 def main():
     if SRC:
         src, dst = SRC, DST
@@ -258,6 +308,7 @@ def main():
         src, dst, f, t = picked
         print(f"样本：{src} / {dst}（{f} → {t}）")
     try:
+        check_rule()
         dst = check_api(src, dst)
         check_stale()
         # 前面 API 已经写过校正，跑 UI 前先清掉，让页面回到「自动待确认」状态

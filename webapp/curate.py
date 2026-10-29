@@ -222,16 +222,21 @@ def gap_candidates(stops: List[str], gaps: List[dict], segs: List[dict]) -> List
 
 
 
-def od_mates(code: str, limit: int = 60) -> dict:
+def od_mates(code: str, limit: int = 60, via: Optional[List[dict]] = None) -> dict:
     """
     同起讫点的**其它车次**，连同停站概况一起列出来，供人工勾选后同步经由。
 
     以前是「同起讫站 + 同车种自动沿用」，看着省事，但同 OD 的车走法未必一样，
     悄悄套过去反而把数据改坏。现在只列出候选，勾哪趟由人定，同步下去的也各存
     一条自己的校正（和车次号绑定）。
+
+    `via` 给来源车次当前的经由：算一下对方的每一站是不是都在这条经由走过的路上
+    （`viaFits=True` 的那几趟，同步时原样照抄就行，不必重新落站）。
     """
     code = (code or "").strip().upper()
     out: Dict[str, object] = {"from": None, "to": None, "items": [], "total": 0}
+    segs = [s for s in (via or []) if isinstance(s, dict) and s.get("line")]
+    span_cache: Dict[str, Optional[List[str]]] = {}
     if not code:
         return out
     try:
@@ -263,6 +268,8 @@ def od_mates(code: str, limit: int = 60) -> dict:
         ov = ov_map.get(r["code"]) or {}
         info = labels.get(r["code"]) or {}
         shared = len(mine_set & set(names)) if mine_set else 0
+        # 它的每一站都在这条经由走过的路上 → 同步时原样照抄，不用重新落站
+        fits = railcore.via_covers_stops(segs, brief.get("stops") or [], span_cache) if segs else None
         items.append({
             "code": r["code"],
             "codeLabel": info.get("codeLabel") or r["code"],
@@ -282,6 +289,7 @@ def od_mates(code: str, limit: int = 60) -> dict:
             "overlap": round(shared / len(mine_set) * 100) if mine_set else 0,
             "sameStops": bool(names) and names == mine_names,
             "stopsMissing": not names,
+            "viaFits": bool(fits),                  # 停站全在来源经由里：同步即原样照抄
         })
     # 站序一模一样的排最前（套过去最准），其次按重合站数
     items.sort(key=lambda x: (not x["sameStops"], -x["overlap"], x["code"]))
@@ -626,7 +634,7 @@ def detail(code: str) -> dict:
 
     # ---- 同起讫点的其它车次（人工勾选后同步经由，不再自动沿用）----
     try:
-        out["odMates"] = od_mates(code)
+        out["odMates"] = od_mates(code, via=(out.get("override") or {}).get("via") or [])
     except Exception:                                # noqa: BLE001
         out["odMates"] = {"from": out.get("from"), "to": out.get("to"), "items": [], "total": 0}
 

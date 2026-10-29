@@ -11,6 +11,7 @@
      只有它停了经由之外的站，才按它的停站重新落站（mode=adapt）
   6. 已经校正或同步过的车次不再出现在同起讫点候选里（只报 hidden 趟数），
      保存同步之后那几趟立刻从列表消失
+  7. 换号车（C344/5）的站序按 train_no 取，本号下没有缓存也要有站数和到发时刻
 
 自带清理：测试用到的校正跑完全部撤销。
 用法：python scripts/test_curate_sync.py [来源车次 目标车次]
@@ -335,6 +336,37 @@ def check_rule():
     assert railcore.via_covers_stops(unknown, on) is None, "线名查不到时应返回 None（退回重新落站）"
 
 
+def check_alias():
+    """
+    换号车（C344/5、C4326/7）的站序只落在「到达号」那一行缓存里：
+    `route_day` 是按 train_no 存的，按出发号查 code 会一无所获。
+    校对页拿到的每一行都必须有站数和到发时刻，否则同起讫点列表就出现「0 站」。
+    """
+    print("== 换号车按 train_no 取站序")
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "webapp"))
+    import railcore                                    # noqa: E402
+
+    with railcore.db() as conn:
+        rows = [r["code"] for r in conn.execute(
+            """SELECT c.code FROM curate c
+                 JOIN trains t ON t.code = c.code
+                WHERE NOT EXISTS (SELECT 1 FROM routes r WHERE r.code = c.code)
+                  AND EXISTS (SELECT 1 FROM route_day d WHERE d.train_no = t.train_no)
+                GROUP BY c.code LIMIT 5""").fetchall()]
+    if not rows:
+        print("  库里没有『站序不在本号下』的车次，跳过")
+        return
+    for code in rows:
+        b = railcore.route_stops_brief(code)
+        st = b.get("stops") or []
+        head = f"{st[0]['name']} {st[0].get('dep') or ''}" if st else "-"
+        tail = f"{st[-1]['name']} {st[-1].get('arr') or ''}" if st else "-"
+        print(f"  {code}（本号下没有缓存）：{len(st)} 站 · {head} → {tail}")
+        assert len(st) >= 2, f"{code} 只按本号查 code，取不到站序"
+        assert st[0].get("dep") or st[0].get("arr"), f"{code} 首站没有到发时刻"
+
+
 def main():
     if SRC:
         src, dst = SRC, DST
@@ -345,6 +377,7 @@ def main():
         print(f"样本：{src} / {dst}（{f} → {t}）")
     try:
         check_rule()
+        check_alias()
         dst = check_api(src, dst)
         check_stale()
         # 前面 API 已经写过校正，跑 UI 前先清掉，让页面回到「自动待确认」状态

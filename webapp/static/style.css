@@ -626,6 +626,8 @@ button.vseg:not(.picked):hover::after{opacity:1}
 .mate-row{display:grid;grid-template-columns:24px 78px 120px auto minmax(0,1fr) auto;
   gap:7px;align-items:center;padding:5px 9px;border-bottom:1px solid var(--line-2)}
 .mate-row.on{background:#f3f8ff}
+.mate-row.off{opacity:.62}
+.mate-row.off .mate-chk{cursor:default}
 .mate-chk{display:flex;justify-content:center;cursor:pointer}
 .mate-chk input{margin:0;cursor:pointer}
 .mate-code{font-family:ui-monospace,Menlo,monospace;font-weight:700;font-size:12.5px;color:var(--rail);
@@ -636,6 +638,7 @@ button.vseg:not(.picked):hover::after{opacity:1}
   white-space:nowrap}
 .mate-tag.same{background:#e8f6ee;color:#0f7a45}
 .mate-tag.pending{background:#fff2e6;color:#b45309}
+.mate-tag.warn{background:#fdeeee;color:#b02a2a}
 .mate-tag.fits{background:#eef7f6;color:#0d6f6a;border:1px solid #cfe7e4}
 .mate-via{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
   text-align:right}

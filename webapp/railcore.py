@@ -738,6 +738,10 @@ def route_stops_brief(code: str, date: Optional[str] = None) -> dict:
 
     校对页拿它比对「同起讫点的车次」：站序、到发时刻、换号点都在这里，
     也用来把已校正的经由套到别的车次上（只需要站名顺序）。
+
+    注意缓存是按 **train_no** 存一天的（`route_day`），不是按车次号：中途换号的车
+    （C344/5、C4326/7）整趟站序只落在到达号 C345/C4327 那一行里，
+    按出发号 C344 查 code 会一无所获——所以先按 train_no 找，找不到再退回按 code 找。
     """
     code = (code or "").strip().upper()
     out: Dict[str, object] = {"code": code, "date": None, "stops": [], "from": None, "to": None}
@@ -745,16 +749,33 @@ def route_stops_brief(code: str, date: Optional[str] = None) -> dict:
         return out
     try:
         with db() as conn:
+            # 换号车两个号共用一个 train_no，用它才能把这趟车的整趟站序找全
+            t = conn.execute(
+                "SELECT train_no FROM trains WHERE code=? ORDER BY date DESC LIMIT 1",
+                (code,)).fetchone()
+            train_no = (t["train_no"] if t else "") or ""
             d = (date or "").strip()
             if not d:
-                row = conn.execute(
-                    "SELECT MAX(date) AS d FROM routes WHERE code=? AND raw IS NOT NULL",
-                    (code,)).fetchone()
-                d = row["d"] if row else ""
+                row = None
+                if train_no:
+                    row = conn.execute(
+                        "SELECT MAX(date) AS d FROM routes WHERE train_no=? AND raw IS NOT NULL",
+                        (train_no,)).fetchone()
+                if not (row and row["d"]):
+                    row = conn.execute(
+                        "SELECT MAX(date) AS d FROM routes WHERE code=? AND raw IS NOT NULL",
+                        (code,)).fetchone()
+                d = (row["d"] if row else "") or ""
             if not d:
                 return out
-            row = conn.execute(
-                "SELECT raw FROM routes WHERE code=? AND date=?", (code, d)).fetchone()
+            row = None
+            if train_no:
+                row = conn.execute(
+                    "SELECT raw FROM routes WHERE train_no=? AND date=? LIMIT 1",
+                    (train_no, d)).fetchone()
+            if not (row and row["raw"]):
+                row = conn.execute(
+                    "SELECT raw FROM routes WHERE code=? AND date=?", (code, d)).fetchone()
     except sqlite3.Error:
         return out
     if not row or not row["raw"]:

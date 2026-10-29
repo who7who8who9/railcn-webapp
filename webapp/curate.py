@@ -293,6 +293,7 @@ def od_mates(code: str, limit: int = 60, via: Optional[List[dict]] = None) -> di
             "viaSource": r["via_source"],
             "viaCoverage": r["via_cov"],
             "overlap": round(shared / len(mine_set) * 100) if mine_set else 0,
+            "canCompare": bool(mine_set),           # 本车自己有没有站序：没有就算不了重合度
             "sameStops": bool(names) and names == mine_names,
             "stopsMissing": not names,
             "viaFits": bool(fits),                  # 停站全在来源经由里：同步即原样照抄

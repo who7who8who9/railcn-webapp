@@ -4587,10 +4587,21 @@ function cuRowsFromAuto(auto) {
 /** 一行候选：车次 / 车种 / 站数 / 起止时刻 / 站序是否相同 / 现在的经由 */
 function odRowHtml(it) {
   const on = CU.mates.has(it.code);
+  // 库里压根没有它的站序（没抓到过）：勾了也同步不了，直接把勾选框关掉
+  const noStops = !!it.stopsMissing || !it.stops;
   const tags = [];
-  tags.push(it.sameStops
-    ? '<span class="mate-tag same" title="站序和这趟车完全一样，经套过去最准">站序相同</span>'
-    : `<span class="mate-tag" title="和这趟车共有的停站占比">重合 ${it.overlap}%</span>`);
+  if (noStops) {
+    tags.push('<span class="mate-tag warn" title="本地库里没有这趟车的经停站，'
+      + '同步不了；在行车页打开它一次就会去 12306 抓回来">无停站数据</span>');
+  } else if (it.canCompare === false) {
+    // 本车自己没站序（库里没抓到），重叠度算不出来，别显示成「重合 0%」
+    tags.push('<span class="mate-tag warn" title="这趟车本地没有停站数据，'
+      + '重合度和站序都比不了">无法比对</span>');
+  } else {
+    tags.push(it.sameStops
+      ? '<span class="mate-tag same" title="站序和这趟车完全一样，经套过去最准">站序相同</span>'
+      : `<span class="mate-tag" title="和这趟车共有的停站占比">重合 ${it.overlap}%</span>`);
+  }
   // 已校正/已同步的车次不会进这份列表，所以这里只剩「还没定稿」的标记
   if (it.viaSource === 'auto') {
     tags.push('<span class="mate-tag pending">待确认</span>');
@@ -4600,10 +4611,11 @@ function odRowHtml(it) {
       + '勾选同步会原样照抄，不重新落站">停站全在经由内</span>');
   }
   const time = it.startTime ? `${esc(it.startTime)}–${esc(it.endTime || '')}` : '';
-  return `<div class="mate-row${on ? ' on' : ''}" data-code="${esc(it.code)}">
-    <label class="mate-chk"><input type="checkbox"${on ? ' checked' : ''}></label>
+  const meta = noStops ? '站序未知' : `${it.stops} 站${time ? ' · ' + time : ''}`;
+  return `<div class="mate-row${on ? ' on' : ''}${noStops ? ' off' : ''}" data-code="${esc(it.code)}">
+    <label class="mate-chk"><input type="checkbox"${on ? ' checked' : ''}${noStops ? ' disabled' : ''}></label>
     <span class="mate-code">${esc(it.codeLabel || it.code)}</span>
-    <span class="mate-meta">${it.stops} 站${time ? ' · ' + time : ''}</span>
+    <span class="mate-meta">${meta}</span>
     <span class="mate-tags">${tags.join('')}</span>
     <span class="mate-via" title="${esc(it.via || '')}">${esc(it.via || '经由未识别')}</span>
     <button type="button" class="mate-more">停站详情</button>
@@ -4674,8 +4686,9 @@ function cuBindMates() {
     same.addEventListener('change', () => {
       $$('#ceMates .mate-row').forEach(row => {
         const it = items.find(x => x.code === row.dataset.code) || {};
-        const want = same.checked ? !!it.sameStops : false;
+        const want = same.checked ? !!it.sameStops && !it.stopsMissing : false;
         const cb = row.querySelector('input[type=checkbox]');
+        if (cb.disabled) return;              // 没有站序的根本同步不了，不参与「选同站序」
         if (cb.checked === want) return;
         cb.checked = want;
         if (want) CU.mates.add(row.dataset.code); else CU.mates.delete(row.dataset.code);

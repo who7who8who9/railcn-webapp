@@ -1,10 +1,14 @@
 """回归：地图事件层不再抢走 dock 命中 + 倍速自选可用。"""
 import json
+import os
+import tempfile
 
 from playwright.sync_api import sync_playwright
 
 BASE = "http://127.0.0.1:8686/"
 WITH_MAP = "--with-map" in __import__("sys").argv
+# 调试截图放临时目录，不要落进仓库的 docs/
+SHOT = os.path.join(tempfile.gettempdir(), "railcn-dock-speed")
 
 
 def run(p, with_map):
@@ -70,7 +74,10 @@ def run(p, with_map):
     pg.click('.btn.speed[data-speed="1"]')
     print("  1× :", pg.evaluate("() => S.speed"), "| 入口文本 =", pg.text_content("#btnSpeedMore"))
 
-    pg.screenshot(path=f"D:/railcn/docs/dock-speed-{'map' if with_map else 'nomap'}.png")
+    os.makedirs(SHOT, exist_ok=True)
+    shot = os.path.join(SHOT, "map.png" if with_map else "nomap.png")
+    pg.screenshot(path=shot)
+    print("  截图:", shot)
     print("  pageerror:", errs)
     b.close()
 

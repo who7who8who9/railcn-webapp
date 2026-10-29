@@ -5,11 +5,15 @@
     python scripts/test_line_km.py           # 累计模式：曹庄 -、杨柳青 163
     python scripts/test_line_km.py --seg     # 段距模式：标 - 后点 ≈ 估算值
 """
+import os
 import sys
+import tempfile
 from playwright.sync_api import sync_playwright
 
 MODE = "seg" if "--seg" in sys.argv else "cum"
 URL = "http://127.0.0.1:8686/"
+# 调试截图放临时目录，不要落进仓库的 docs/
+SHOT = os.path.join(tempfile.gettempdir(), "railcn-line-km")
 
 
 def rows(pg, tag, names="曹庄|杨柳青|天津西|周李庄"):
@@ -109,8 +113,10 @@ def main():
         print("侧栏站点列表:", pg.evaluate("""() => [...document.querySelectorAll('#lnStops .stop')]
             .filter(li => /曹庄|杨柳青|周李庄/.test(li.querySelector('.name').textContent))
             .map(li => li.querySelector('.name').textContent.trim() + ' = ' + li.querySelector('.km').textContent.trim())"""))
-        pg.screenshot(path="D:/railcn/docs/line-km-test.png",
-                      clip={"x": 0, "y": 58, "width": 620, "height": 820})
+        os.makedirs(SHOT, exist_ok=True)
+        shot = os.path.join(SHOT, f"{MODE}.png")
+        pg.screenshot(path=shot, clip={"x": 0, "y": 58, "width": 620, "height": 820})
+        print("截图:", shot)
         print("err:", errs)
         b.close()
 

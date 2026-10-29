@@ -41,7 +41,10 @@ FILTERS = {
     "via0": "issues LIKE '%via%' AND via_cov < 1",   # 整趟都没认出线路
     "km": "issues LIKE '%km%'",
     "coord": "issues LIKE '%coord%'",
+    # 自动推断已经认全、但还没人工确认 —— 这类不写进正式库，只作参考
+    "pending": "via_source='auto'",
     "manual": "(via_source='manual' OR km_mode='manual')",
+    "synced": "via_origin='sync'",
     "clean": "issues = ''",
 }
 
@@ -90,6 +93,7 @@ def summarize(code: str, date: str) -> Optional[dict]:
         "via_json": json.dumps(segs, ensure_ascii=False),
         "via_unknown": json.dumps(unknown, ensure_ascii=False),
         "via_source": d.get("viaSource") or "none",
+        "via_origin": ((d.get("manual") or {}).get("source") or "") if d.get("viaSource") == "manual" else "",
         "via_cov": float(d.get("viaCoverage") or 0),
         "km_mode": d.get("kmMode") or "estimate",
         "km_matched": d.get("kmMatched") or "0/0",
@@ -104,16 +108,17 @@ def summarize(code: str, date: str) -> Optional[dict]:
 def _upsert(conn, r: dict) -> None:
     conn.execute(
         """INSERT INTO curate(code, date, from_sta, to_sta, stops, via_text, via_json,
-                              via_unknown, via_source, via_cov, km_mode, km_matched,
+                              via_unknown, via_source, via_origin, via_cov, km_mode, km_matched,
                               total_km, missing, missing_json, issues, scanned_at)
            VALUES(:code,:date,:from_sta,:to_sta,:stops,:via_text,:via_json,
-                  :via_unknown,:via_source,:via_cov,:km_mode,:km_matched,
+                  :via_unknown,:via_source,:via_origin,:via_cov,:km_mode,:km_matched,
                   :total_km,:missing,:missing_json,:issues,:scanned_at)
            ON CONFLICT(code) DO UPDATE SET
              date=excluded.date, from_sta=excluded.from_sta, to_sta=excluded.to_sta,
              stops=excluded.stops, via_text=excluded.via_text, via_json=excluded.via_json,
              via_unknown=excluded.via_unknown, via_source=excluded.via_source,
-             via_cov=excluded.via_cov, km_mode=excluded.km_mode,
+             via_origin=excluded.via_origin, via_cov=excluded.via_cov,
+             km_mode=excluded.km_mode,
              km_matched=excluded.km_matched, total_km=excluded.total_km,
              missing=excluded.missing, missing_json=excluded.missing_json,
              issues=excluded.issues, scanned_at=excluded.scanned_at""",
@@ -215,54 +220,90 @@ def gap_candidates(stops: List[str], gaps: List[dict], segs: List[dict]) -> List
 
 
 
-def _sibling_codes(from_sta: str, to_sta: str, code: str,
-                   exclude_manual: bool = False) -> List[str]:
-    """同起讫站 + 同车种的车次（不含自己）：人工校正经由后它们会自动沿用"""
-    if not from_sta or not to_sta:
-        return []
-    cat = railcore.train_class(code)
+def od_mates(code: str, limit: int = 60) -> dict:
+    """
+    同起讫点的**其它车次**，连同停站概况一起列出来，供人工勾选后同步经由。
+
+    以前是「同起讫站 + 同车种自动沿用」，看着省事，但同 OD 的车走法未必一样，
+    悄悄套过去反而把数据改坏。现在只列出候选，勾哪趟由人定，同步下去的也各存
+    一条自己的校正（和车次号绑定）。
+    """
+    code = (code or "").strip().upper()
+    out: Dict[str, object] = {"from": None, "to": None, "items": [], "total": 0}
+    if not code:
+        return out
     try:
         with railcore.db() as conn:
+            me = conn.execute(
+                "SELECT from_sta, to_sta, date FROM curate WHERE code=?", (code,)
+            ).fetchone()
+            if not me or not me["from_sta"] or not me["to_sta"]:
+                return out
             rows = conn.execute(
-                "SELECT code FROM curate WHERE from_sta=? AND to_sta=?",
-                (from_sta, to_sta),
+                """SELECT code, date, stops, via_text, via_source, via_origin, via_cov
+                     FROM curate WHERE from_sta=? AND to_sta=? AND code<>?""",
+                (me["from_sta"], me["to_sta"], code),
             ).fetchall()
     except Exception:                                # noqa: BLE001
-        return []
-    out = [r["code"] for r in rows
-           if r["code"] != code and railcore.train_class(r["code"]) == cat]
-    if exclude_manual:
-        keep = []
-        for c in out:
-            ov = railcore.get_override(c) or {}
-            if not ov.get("via"):
-                keep.append(c)
-        out = keep
-    return sorted(out)
+        return out
+
+    out["from"], out["to"] = me["from_sta"], me["to_sta"]
+    mine = railcore.route_stops_brief(code, me["date"])
+    mine_names = [s["name"] for s in mine.get("stops") or []]
+    mine_set = set(mine_names)
+    labels = railcore.code_infos([r["code"] for r in rows])
+    ov_map = railcore.override_map()
+
+    items: List[dict] = []
+    for r in rows:
+        brief = railcore.route_stops_brief(r["code"])
+        names = [s["name"] for s in brief.get("stops") or []]
+        ov = ov_map.get(r["code"]) or {}
+        info = labels.get(r["code"]) or {}
+        shared = len(mine_set & set(names)) if mine_set else 0
+        items.append({
+            "code": r["code"],
+            "codeLabel": info.get("codeLabel") or r["code"],
+            "codes": info.get("codes") or [r["code"]],
+            "date": brief.get("date") or r["date"],
+            "trainClass": railcore.train_class(r["code"]),
+            "stops": len(names),
+            "stopsText": " · ".join(names),
+            "startTime": (brief.get("stops") or [{}])[0].get("dep") if brief.get("stops") else None,
+            "endTime": (brief.get("stops") or [{}])[-1].get("arr") if brief.get("stops") else None,
+            "via": r["via_text"] or "",
+            "viaSource": r["via_source"],
+            "viaCoverage": r["via_cov"],
+            "origin": r["via_origin"] or (ov.get("source") or ""),
+            "hasOverride": bool(ov.get("via")),
+            "overlap": round(shared / len(mine_set) * 100) if mine_set else 0,
+            "sameStops": bool(names) and names == mine_names,
+            "stopsMissing": not names,
+        })
+    # 站序一模一样的排最前（套过去最准），其次按重合站数
+    items.sort(key=lambda x: (not x["sameStops"], -x["overlap"], x["code"]))
+    out["total"] = len(items)
+    out["items"] = items[:max(1, int(limit))]
+    return out
 
 
-def refresh_class(code: str) -> int:
-    """人工保存经由后，把同类车次的摘要一起重算 —— 它们读的时候就会自动沿用"""
+def mate_detail(code: str) -> dict:
+    """勾选前的「停站详情」：直接读 12306 缓存，含到发时刻与换号点"""
     code = (code or "").strip().upper()
-    if not code:
-        return 0
-    try:
-        with railcore.db() as conn:
-            row = conn.execute(
-                "SELECT from_sta, to_sta FROM curate WHERE code=?", (code,)
-            ).fetchone()
-    except Exception:                                # noqa: BLE001
-        return 0
-    if not row or not row["from_sta"] or not row["to_sta"]:
-        return 0
-    n = 0
-    for c in _sibling_codes(row["from_sta"], row["to_sta"], code, exclude_manual=True)[:200]:
-        try:
-            if refresh_one(c):
-                n += 1
-        except Exception:                            # noqa: BLE001
-            continue
-    return n
+    brief = railcore.route_stops_brief(code)
+    info = railcore.code_info(code)
+    ov = railcore.get_override(code) or {}
+    return {
+        "code": code,
+        "codeLabel": info.get("codeLabel") or code,
+        "codes": info.get("codes") or [code],
+        "date": brief.get("date"),
+        "from": brief.get("from"),
+        "to": brief.get("to"),
+        "stops": brief.get("stops") or [],
+        "override": {"via": len(ov.get("via") or []), "source": ov.get("source"),
+                     "basedDate": ov.get("basedDate"), "note": ov.get("note")} if ov else None,
+    }
 
 
 def refresh_station(name: str) -> int:
@@ -399,7 +440,7 @@ def stop() -> dict:
 
 def counts() -> dict:
     out = {"scanned": 0, "todo": 0, "via": 0, "via0": 0, "km": 0, "coord": 0,
-           "manual": 0, "clean": 0, "lastScan": None}
+           "manual": 0, "pending": 0, "synced": 0, "clean": 0, "lastScan": None}
     try:
         with railcore.db() as conn:
             for key, sql in (
@@ -410,6 +451,8 @@ def counts() -> dict:
                 ("km", "SELECT COUNT(*) FROM curate WHERE issues LIKE '%km%'"),
                 ("coord", "SELECT COUNT(*) FROM curate WHERE issues LIKE '%coord%'"),
                 ("manual", "SELECT COUNT(*) FROM curate WHERE via_source='manual' OR km_mode='manual'"),
+                ("pending", "SELECT COUNT(*) FROM curate WHERE via_source='auto'"),
+                ("synced", "SELECT COUNT(*) FROM curate WHERE via_origin='sync'"),
                 ("clean", "SELECT COUNT(*) FROM curate WHERE issues = ''"),
                 ("lastScan", "SELECT MAX(scanned_at) FROM curate"),
             ):
@@ -441,7 +484,8 @@ def listing(mode: str = "todo", q: str = "", limit: int = 60, offset: int = 0) -
             total = conn.execute(f"SELECT COUNT(*) FROM curate WHERE {where}", args).fetchone()[0]
             rows = conn.execute(
                 f"""SELECT code, date, from_sta, to_sta, stops, via_text, via_source,
-                           via_cov, via_unknown, km_mode, km_matched, total_km, missing, issues
+                           via_origin, via_cov, via_unknown, km_mode, km_matched, total_km,
+                           missing, issues
                       FROM curate WHERE {where}
                      ORDER BY (issues = '') ASC, (via_source = 'none') DESC,
                               via_cov ASC, code ASC
@@ -466,6 +510,7 @@ def listing(mode: str = "todo", q: str = "", limit: int = 60, offset: int = 0) -
             "codes": info.get("codes") or [r["code"]],
             "from": r["from_sta"], "to": r["to_sta"], "stops": r["stops"],
             "via": r["via_text"], "viaSource": r["via_source"],
+            "viaOrigin": r["via_origin"] or "",
             "viaCoverage": r["via_cov"], "gaps": gaps,
             "kmMode": r["km_mode"],
             "kmMatched": r["km_matched"], "totalKm": r["total_km"],
@@ -575,22 +620,32 @@ def detail(code: str) -> dict:
         "manual": sum(1 for s in stop_rows if s["coordSource"] == "manual"),
     }
 
-    # ---- 同类沿用：同起讫站 + 同车种的人工经由 ----
+    # ---- 同起讫点的其它车次（人工勾选后同步经由，不再自动沿用）----
     try:
-        cls = railcore.get_via_class(out.get("from") or "", out.get("to") or "", code)
+        out["odMates"] = od_mates(code)
     except Exception:                                # noqa: BLE001
-        cls = None
-    out["classVia"] = ({"from": cls["from"], "to": cls["to"],
-                        "category": cls.get("category"), "srcCode": cls.get("srcCode"),
-                        "segs": len(cls.get("via") or [])} if cls else None)
-    out["classCount"] = len(_sibling_codes(out.get("from") or "", out.get("to") or "", code))
-    # 这趟车实际生效的经由（可能来自同类沿用）—— 编辑器拿它做初始值，
-    # 否则面板上写着「未识别」、地图上却已经画出正确走向，看着自相矛盾
+        out["odMates"] = {"from": out.get("from"), "to": out.get("to"), "items": [], "total": 0}
+
+    # ---- 校正和「校正时的站表」绑定：调图换了站序就提醒重校 ----
+    ov = out.get("override") or {}
+    stale = {"changed": False, "basedDate": ov.get("basedDate") or "",
+             "currentDate": date, "missing": [], "added": []}
+    if ov.get("via") and stale["basedDate"]:
+        old = railcore.route_stops_brief(code, stale["basedDate"])
+        old_names = [s["name"] for s in old.get("stops") or []]
+        new_names = out["stations"]
+        if old_names and old_names != new_names:
+            stale.update(changed=True,
+                         missing=[n for n in old_names if n not in new_names],
+                         added=[n for n in new_names if n not in old_names])
+    out["overrideStale"] = stale
+
+    # 这趟车实际生效的经由（人工校正优先，否则自动推断）
     try:
         eff = railcore.build_route_payload(code, date, cache_only=True, with_path=False)
         out["effective"] = {"viaSource": eff.get("viaSource"),
                             "viaSegs": eff.get("viaSegs") or [],
-                            "viaClass": eff.get("viaClass")}
+                            "viaConfirmed": eff.get("viaConfirmed")}
     except Exception:                                # noqa: BLE001
-        out["effective"] = {"viaSource": "none", "viaSegs": [], "viaClass": None}
+        out["effective"] = {"viaSource": "none", "viaSegs": [], "viaConfirmed": False}
     return out

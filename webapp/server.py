@@ -130,21 +130,26 @@ class Handler(BaseHTTPRequestHandler):
                     payload.get("totalKm"),
                     payload.get("note") or "",
                     payload.get("segKm") or {},
+                    date=payload.get("date") or "",
+                    source="manual",
                 )
-                # 人工经由存好后，记一份「同类」副本：同起讫站 + 同车种的车次自动沿用
-                cls = None
-                if res.get("cleared"):
-                    cls = {"ok": False, "reason": "已撤销，同类副本一并撤掉"}
-                elif res.get("via"):
-                    if payload.get("propagate") is False:
-                        cls = {"ok": False, "reason": "没有勾选「同类沿用」"}
-                    else:
-                        date = payload.get("date") or railcore.latest_date(code)
-                        cls = railcore.learn_via_class(
-                            code, date or "", res["via"], res.get("note") or "")
+                # 勾了「同起讫点的车次」：把刚存好的经由逐趟套过去，各存一条自己的校正。
+                # 不再有「同类自动沿用」——同步哪些车、同步到哪，全由这次勾选决定。
+                synced = []
+                if res.get("via") and (payload.get("syncCodes") or []):
+                    synced = railcore.sync_via(
+                        payload.get("syncCodes") or [], res["via"], code,
+                        res.get("note") or "", payload.get("date") or "",
+                        bool(payload.get("syncOverwrite")),
+                    )
+                    for it in synced:
+                        if it.get("ok"):
+                            try:
+                                curate.refresh_one(it["code"])
+                            except Exception:        # noqa: BLE001
+                                pass
                 curate.refresh_one(code)
-                n = curate.refresh_class(code)
-                return self.json({"ok": True, **res, "viaClass": cls, "classRefreshed": n})
+                return self.json({"ok": True, **res, "synced": synced})
 
             if path == "/api/line/km":
                 res = railcore.save_line_override(
@@ -450,6 +455,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/curate/detail":
             return self.json(curate.detail(one("code")))
+
+        if path == "/api/curate/mate":
+            # 同起讫点某趟车的停站详情（勾选前展开看）
+            return self.json(curate.mate_detail(one("code")))
 
         if path == "/api/curate/cands":
             a, b = one("from"), one("to")

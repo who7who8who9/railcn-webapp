@@ -99,26 +99,18 @@ def init_db() -> None:
             );
 
             -- 人工校正：经由 / 总里程 / 站间里程 / 备注（按车次，与日期无关）
+            -- 校正和车次号绑定：同一趟车换别的一天开行也照这套走；
+            -- based_date 记下「当时是照哪一天的站表校的」，站表换了能提醒重校。
             CREATE TABLE IF NOT EXISTS train_override (
                 code        TEXT PRIMARY KEY,
                 via_json    TEXT,          -- [{"line":"陇海线","from":"郑州","to":"兰州"}]
                 total_km    REAL,          -- 手工总里程，各站按比例缩放
                 seg_km_json TEXT,          -- {"0":203.4} 站间里程，键是区间序号（第 i 站 → 第 i+1 站）
                 note        TEXT,
+                source      TEXT,          -- manual = 逐趟人工校正；sync = 从同起讫点车次同步来的
+                src_code    TEXT,          -- sync 时记「同步自哪趟车」
+                based_date  TEXT,          -- 校正时依据的经停站日期（站表变了要提醒）
                 updated_at  REAL
-            );
-
-            -- 人工经由的「同类」副本：同起讫站 + 同车种的车次自动沿用
-            -- （同 OD 的普速与动车走的常常不是一条线，所以车种也进主键）
-            CREATE TABLE IF NOT EXISTS via_class (
-                from_name   TEXT NOT NULL,
-                to_name     TEXT NOT NULL,
-                category    TEXT NOT NULL DEFAULT '',
-                via_json    TEXT NOT NULL,  -- [{"line","from","to","f0","f1"}]，f 是区间端点在全程中的占比
-                note        TEXT,
-                src_code    TEXT,          -- 学自哪趟车，界面上标「沿用 XX」
-                updated_at  REAL,
-                PRIMARY KEY (from_name, to_name, category)
             );
 
             -- 人工校正：线路里程（按线路，站间 / 总里程 / 站累计）
@@ -167,7 +159,8 @@ def init_db() -> None:
                 via_text    TEXT,
                 via_json    TEXT,
                 via_unknown TEXT,
-                via_source  TEXT,
+                via_source  TEXT,          -- 这次生效的经由是哪来的：manual / auto / none
+                via_origin  TEXT,          -- 人工校正的来源：manual（逐趟校）/ sync（同起讫点同步）
                 via_cov     REAL,
                 km_mode     TEXT,
                 km_matched  TEXT,
@@ -186,6 +179,14 @@ def init_db() -> None:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(train_override)")}
         if "seg_km_json" not in cols:
             conn.execute("ALTER TABLE train_override ADD COLUMN seg_km_json TEXT")
+        # 老库迁移：校正的来源 / 依据日期（同步入库、站表变了以后要能区分）
+        for col in ("source", "src_code", "based_date"):
+            if col not in cols:
+                conn.execute(f"ALTER TABLE train_override ADD COLUMN {col} TEXT")
+        # 老库迁移：清单里区分「逐趟人工校正」和「同起讫点同步入库」
+        ccols = {r[1] for r in conn.execute("PRAGMA table_info(curate)")}
+        if "via_origin" not in ccols:
+            conn.execute("ALTER TABLE curate ADD COLUMN via_origin TEXT")
         # 老库迁移：线路里程的「站累计」也是后加的列
         lcols = {r[1] for r in conn.execute("PRAGMA table_info(line_override)")}
         if "sta_km_json" not in lcols:
@@ -345,8 +346,8 @@ def _order_pair(a: float, b: float) -> Tuple[float, float]:
 def _clean_via(via) -> List[dict]:
     """把前端传来的经由整理成 [{line, from, to}]，丢掉没有线路名的空行
 
-    `src="auto"`（自动推断）和 `src="class"`（沿用同类车次）的段都是「虚拟经由」，
-    只在校对页里给人看；正式经由只收人工填写的段，这两类在这里一律丢弃。
+    `src="auto"` 是自动推断出来的「虚拟经由」，只在校对页里给人看；正式经由
+    只收人工确认过的段，这一类在这里一律丢弃（保存时再兜一道底）。
     """
     out: List[dict] = []
     for seg in via or []:
@@ -354,7 +355,7 @@ def _clean_via(via) -> List[dict]:
             seg = {"line": seg}
         if not isinstance(seg, dict):
             continue
-        if str(seg.get("src") or "").strip().lower() in ("auto", "class"):
+        if str(seg.get("src") or "").strip().lower() == "auto":
             continue
         name = str(seg.get("line") or "").strip()
         if not name:
@@ -485,10 +486,13 @@ def _drop_override_cache() -> None:
 
 
 def save_override(code: str, via, total_km=None, note: str = "",
-                  seg_km=None) -> dict:
+                  seg_km=None, date: Optional[str] = None,
+                  source: str = "manual", src_code: str = "") -> dict:
     """
     保存人工校正。via / total_km / seg_km / note 都为空时视作撤销（删除记录）。
     seg_km: {"区间序号": 公里数}，区间序号 i 表示「第 i 站 → 第 i+1 站」。
+    date:   这次校正依据的是哪一天的经停站（站表变了要能提醒重校）。
+    source: manual = 逐趟人工校正；sync = 从同起讫点车次同步来的。
     """
     code = (code or "").strip().upper()
     if not code:
@@ -507,23 +511,30 @@ def save_override(code: str, via, total_km=None, note: str = "",
         clear_override(code)
         return {"code": code, "cleared": True}
 
+    src = (source or "manual").strip().lower()
+    if src not in ("manual", "sync"):
+        src = "manual"
     with _db_lock, db() as conn:
         conn.execute(
-            """INSERT INTO train_override(code, via_json, total_km, seg_km_json, note, updated_at)
-               VALUES(?,?,?,?,?,?)
+            """INSERT INTO train_override(code, via_json, total_km, seg_km_json, note,
+                                          source, src_code, based_date, updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?)
                ON CONFLICT(code) DO UPDATE SET
                  via_json=excluded.via_json, total_km=excluded.total_km,
                  seg_km_json=excluded.seg_km_json,
-                 note=excluded.note, updated_at=excluded.updated_at""",
+                 note=excluded.note, source=excluded.source, src_code=excluded.src_code,
+                 based_date=excluded.based_date, updated_at=excluded.updated_at""",
             (code, json.dumps(clean, ensure_ascii=False), km,
-             json.dumps(segs, ensure_ascii=False), note, time.time()),
+             json.dumps(segs, ensure_ascii=False), note, src,
+             (src_code or "").strip().upper(), (date or "").strip() or None, time.time()),
         )
     _drop_override_cache()
     # 线路库里没有的线名，展开中间站时用不上，回给界面提个醒
     outside = sorted({(s.get("line") or "").strip() for s in clean
                       if (s.get("line") or "").strip() and not cnrail.line(s.get("line"))})
     return {"code": code, "via": clean, "totalKm": km, "segKm": segs, "note": note,
-            "outsideLines": outside}
+            "source": src, "srcCode": (src_code or "").strip().upper(),
+            "basedDate": (date or "").strip() or None, "outsideLines": outside}
 
 
 def clear_override(code: str) -> bool:
@@ -532,8 +543,6 @@ def clear_override(code: str) -> bool:
         cur = conn.execute("DELETE FROM train_override WHERE code=?", (code,))
         hit = cur.rowcount > 0
     _drop_override_cache()
-    if hit:
-        forget_via_class(code)          # 从这趟车学到的同类经由也一并撤掉
     return hit
 
 
@@ -541,8 +550,8 @@ def list_overrides() -> Dict[str, dict]:
     try:
         with db() as conn:
             rows = conn.execute(
-                "SELECT code, via_json, total_km, seg_km_json, note, updated_at "
-                "FROM train_override"
+                "SELECT code, via_json, total_km, seg_km_json, note, source, src_code, "
+                "based_date, updated_at FROM train_override"
             ).fetchall()
     except sqlite3.Error:
         return {}
@@ -559,107 +568,21 @@ def list_overrides() -> Dict[str, dict]:
         out[row["code"]] = {
             "via": via, "totalKm": row["total_km"], "segKm": seg,
             "note": row["note"], "updatedAt": row["updated_at"],
+            "source": row["source"] or "manual",
+            "srcCode": row["src_code"] or "",
+            "basedDate": row["based_date"] or "",
         }
     return out
 
 
 # ---------------------------------------------------------------------------
-# 经由的「同类」沿用：同起讫站 + 同车种，人工校正过一次，其余车次自动套用
+# 车种
 # ---------------------------------------------------------------------------
-#
-# 为什么按「起讫站 + 车种」而不是只按起讫站：同 OD 的 K/T 与 G/D 常常走的
-# 是完全不同的两条线（沈阳→丹东的 4325 走沈丹线，D7603 走沈丹客运专线），
-# 只看起讫站会把普速的经由套到动车上，反而把正确的数据改坏。
 
 def train_class(code: str) -> str:
     """车种 = 车次号首字母（G / D / K / T / Z / S / C / L / Y …）"""
     m = re.match(r"^([A-Za-z])", (code or "").strip())
     return m.group(1).upper() if m else ""
-
-
-def _class_key(from_name: str, to_name: str, category: str) -> Tuple[str, str, str]:
-    return (_norm(from_name), _norm(to_name), (category or "").upper())
-
-
-_via_class_cache: Optional[Dict[Tuple[str, str, str], dict]] = None
-
-
-def _via_class_map() -> Dict[Tuple[str, str, str], dict]:
-    global _via_class_cache
-    if _via_class_cache is None:
-        _via_class_cache = list_via_classes()
-    return _via_class_cache
-
-
-def _drop_via_class_cache() -> None:
-    global _via_class_cache
-    _via_class_cache = None
-
-
-def list_via_classes() -> Dict[Tuple[str, str, str], dict]:
-    try:
-        with db() as conn:
-            rows = conn.execute(
-                "SELECT from_name, to_name, category, via_json, note, src_code, updated_at "
-                "FROM via_class"
-            ).fetchall()
-    except sqlite3.Error:
-        return {}
-    out: Dict[Tuple[str, str, str], dict] = {}
-    for row in rows:
-        try:
-            via = json.loads(row["via_json"] or "[]")
-        except (TypeError, ValueError):
-            continue
-        if not isinstance(via, list) or not via:
-            continue
-        out[_class_key(row["from_name"], row["to_name"], row["category"] or "")] = {
-            "from": row["from_name"], "to": row["to_name"], "category": row["category"] or "",
-            "via": [s for s in via if isinstance(s, dict) and s.get("line")],
-            "note": row["note"], "srcCode": row["src_code"], "updatedAt": row["updated_at"],
-        }
-    return out
-
-
-def get_via_class(from_name: str, to_name: str, code: str) -> Optional[dict]:
-    """查这趟车的「同类」经由；没有就返回 None"""
-    if not from_name or not to_name:
-        return None
-    return _via_class_map().get(_class_key(from_name, to_name, train_class(code)))
-
-
-def save_via_class(from_name: str, to_name: str, category: str,
-                   segs: List[dict], note: str = "", src_code: str = "") -> dict:
-    clean = [s for s in (segs or []) if s.get("line")]
-    if not from_name or not to_name or not clean:
-        raise ValueError("同类经由需要起讫站和至少一段线路")
-    with _db_lock, db() as conn:
-        conn.execute(
-            """INSERT INTO via_class(from_name, to_name, category, via_json, note, src_code, updated_at)
-               VALUES(?,?,?,?,?,?,?)
-               ON CONFLICT(from_name, to_name, category) DO UPDATE SET
-                 via_json=excluded.via_json, note=excluded.note,
-                 src_code=excluded.src_code, updated_at=excluded.updated_at""",
-            (_norm(from_name), _norm(to_name), (category or "").upper(),
-             json.dumps(clean, ensure_ascii=False), (note or "").strip(),
-             (src_code or "").strip().upper(), time.time()),
-        )
-    _drop_via_class_cache()
-    return {"from": _norm(from_name), "to": _norm(to_name),
-            "category": (category or "").upper(), "segs": clean}
-
-
-def forget_via_class(src_code: str) -> int:
-    """撤销某趟车的人工校正时，把从它身上学到的同类副本一起删掉"""
-    code = (src_code or "").strip().upper()
-    if not code:
-        return 0
-    with _db_lock, db() as conn:
-        cur = conn.execute("DELETE FROM via_class WHERE src_code=?", (code,))
-        n = cur.rowcount
-    if n:
-        _drop_via_class_cache()
-    return n
 
 
 def _match_stop(stops: List[dict], name: Optional[str], frac: Optional[float]) -> Optional[int]:
@@ -677,15 +600,18 @@ def _match_stop(stops: List[dict], name: Optional[str], frac: Optional[float]) -
     if frac is None:
         return None
     total = float(stops[-1].get("km") or 0.0)
-    if total <= 0:
-        return None
-    target = frac * total
-    return min(range(len(stops)), key=lambda i: abs(float(stops[i].get("km") or 0.0) - target))
+    if total > 0:
+        target = frac * total
+        return min(range(len(stops)), key=lambda i: abs(float(stops[i].get("km") or 0.0) - target))
+    # 停站明细没带里程（同步别人的经由时只有站名）→ 按「第几站」的比例就近落站，
+    # 对方少停的站就是这么并进相邻段的
+    target = frac * max(1, len(stops) - 1)
+    return min(range(len(stops)), key=lambda i: abs(i - target))
 
 
-def adapt_via_class(segs: List[dict], stops: List[dict]) -> List[dict]:
+def adapt_via_to_stops(segs: List[dict], stops: List[dict]) -> List[dict]:
     """
-    把「同类」经由套到这趟车的经停站上：
+    把一条经由套到**另一趟车**的经停站上（同起讫点同步、人工选中的车次）：
 
     - 区间端点在它的经停站里就按站名对；
     - 对不上（比如它跳过那一站没停）就按区间端点在全程里的占比，就近落到某一站；
@@ -734,84 +660,147 @@ def adapt_via_class(segs: List[dict], stops: List[dict]) -> List[dict]:
         while j + 1 < n - 1 and steps[j + 1] == steps[i]:
             j += 1
         out.append({"line": steps[i], "from": stops[i]["name"], "to": stops[j + 1]["name"],
-                    "i0": i, "src": "class"})
+                    "i0": i, "src": "manual"})
         i = j + 1
     return out
 
 
-_LINE_HI = re.compile(r"(高速|高铁|客专|客运专线|城际)")
+# ---------------------------------------------------------------------------
+# 同起讫点车次：列停站明细、按勾选同步已校正的经由
+# ---------------------------------------------------------------------------
+
+def override_map() -> Dict[str, dict]:
+    """整表（只读）。批量判断「这趟车有没有自己的校正」时用它，别一行一个查询"""
+    return _override_map()
 
 
-def _line_key(line: str) -> Tuple[str, str]:
+def route_stops_brief(code: str, date: Optional[str] = None) -> dict:
     """
-    比较线路是否「同一条」用的键：(主干名, 高速/普速)。
+    一条车次的停站明细（只读 12306 原始缓存，不做线路推断，很快）。
 
-    只按主干名会把「京沪线」和「京沪高速线」当成一条，可这两条根本不是一条路；
-    只按全名又会把「沈丹客专」和「沈丹客运专线」当成两条。所以两头都归一。
-    """
-    n = _norm_line_name(line)
-    grade = "high" if _LINE_HI.search(n) else "normal"
-    base = re.sub(r"(客运专线|客专线|客专|高速铁路|高速线|高铁|城际线|城际|铁路|线)$", "", n)
-    return (base or n, grade)
-
-
-def _via_conflicts(cls: dict, auto: dict) -> bool:
-    """
-    自动推断已经整趟认全、而且跟同类校正一条线都对不上 —— 多半不是同一条径路
-    （同起讫站但一个是普速一个是高铁），这种情况不硬套，保留自动结果。
-    """
-    if (auto.get("unknown") or []):
-        return False                                 # 自动结果本就有缺口，正好用同类补
-    auto_k = {_line_key(s.get("line")) for s in (auto.get("segs") or []) if s.get("line")}
-    cls_k = {_line_key(s.get("line")) for s in (cls.get("via") or []) if s.get("line")}
-    if not auto_k or not cls_k:
-        return False
-    return not (auto_k & cls_k)
-
-
-def learn_via_class(code: str, date: str, segs: List[dict], note: str = "") -> dict:
-    """
-    把一趟车刚保存的人工经由记成「同类」副本。
-
-    只收**首尾相接、覆盖全程**的经由：只填了中间某一段就套给别的车，
-    别的车的其余段会被硬接上，反而更糟。
+    校对页拿它比对「同起讫点的车次」：站序、到发时刻、换号点都在这里，
+    也用来把已校正的经由套到别的车次上（只需要站名顺序）。
     """
     code = (code or "").strip().upper()
+    out: Dict[str, object] = {"code": code, "date": None, "stops": [], "from": None, "to": None}
+    if not code:
+        return out
     try:
-        d = build_route_payload(code, date, cache_only=True, with_path=False)
-    except Exception as exc:                         # noqa: BLE001
-        return {"ok": False, "reason": f"取不到经停站：{exc}"}
-    stops = d.get("stops") or []
-    if len(stops) < 2:
-        return {"ok": False, "reason": "没有经停站数据"}
-    if not segs:
-        return {"ok": False, "reason": "没有人工段"}
+        with db() as conn:
+            d = (date or "").strip()
+            if not d:
+                row = conn.execute(
+                    "SELECT MAX(date) AS d FROM routes WHERE code=? AND raw IS NOT NULL",
+                    (code,)).fetchone()
+                d = row["d"] if row else ""
+            if not d:
+                return out
+            row = conn.execute(
+                "SELECT raw FROM routes WHERE code=? AND date=?", (code, d)).fetchone()
+    except sqlite3.Error:
+        return out
+    if not row or not row["raw"]:
+        return out
+    try:
+        raw = json.loads(row["raw"]) or []
+    except (TypeError, ValueError):
+        return out
 
-    total = float(stops[-1].get("km") or 0.0)
-    if total <= 0:
-        return {"ok": False, "reason": "里程不全，算不出区间位置"}
+    stops: List[dict] = []
+    for s in raw:
+        if not isinstance(s, dict):
+            continue
+        name = _norm(s.get("station_name") or "")
+        if not name:
+            continue
+        arr = (s.get("arrive_time") or "").strip()
+        dep = (s.get("start_time") or "").strip()
+        try:
+            day = int(s.get("arrive_day_diff") or 0)
+        except (TypeError, ValueError):
+            day = 0
+        stops.append({
+            "name": name,
+            "arr": arr if re.match(r"^\d{1,2}:\d{2}$", arr) else None,
+            "dep": dep if re.match(r"^\d{1,2}:\d{2}$", dep) else None,
+            "day": max(0, day),
+            "trainCode": (s.get("station_train_code") or "").strip().upper(),
+        })
+    out["date"] = d
+    out["stops"] = stops
+    out["from"] = stops[0]["name"] if stops else None
+    out["to"] = stops[-1]["name"] if stops else None
+    return out
 
-    idx = {_norm(s["name"]): i for i, s in enumerate(stops)}
-    rows: List[dict] = []
-    for s in segs:
-        a = idx.get(_norm(s.get("from") or ""))
-        b = idx.get(_norm(s.get("to") or ""))
-        if a is None or b is None or b <= a:
-            return {"ok": False, "reason": "人工经由的区间和经停站对不上，没有沿用"}
-        rows.append({"line": s.get("line"), "from": stops[a]["name"], "to": stops[b]["name"],
-                     "f0": round(float(stops[a].get("km") or 0.0) / total, 5),
-                     "f1": round(float(stops[b].get("km") or 0.0) / total, 5)})
 
-    if rows[0]["from"] != stops[0]["name"] or rows[-1]["to"] != stops[-1]["name"]:
-        return {"ok": False, "reason": "经由没有覆盖全程，没有沿用"}
-    for prev, cur in zip(rows, rows[1:]):
-        if prev["to"] != cur["from"]:
-            return {"ok": False, "reason": "经由区间没首尾相接，没有沿用"}
+def sync_via(codes, segs, src_code: str, note: str = "", date: Optional[str] = None,
+             overwrite: bool = False) -> List[dict]:
+    """
+    把一趟车的已校正经由同步到勾选的同起讫点车次。
 
-    saved = save_via_class(stops[0]["name"], stops[-1]["name"], train_class(code),
-                           rows, note, code)
-    saved["ok"] = True
-    return saved
+    逐趟各存一条 `train_override`（和车次号绑定，不是抄进一份「同类」表）：
+    区间按对方的经停站重新落站，中间没停的站会被并进相邻段。返回每趟的结果，
+    同步不过去的（没数据 / 已有自己的校正 / 站序对不上）如实说明，不硬写。
+    """
+    src = (src_code or "").strip().upper()
+    clean = _clean_via(segs)
+    marks = []
+    for c in (codes or []):
+        c = (c or "").strip().upper()
+        if c and c != src and c not in marks:
+            marks.append(c)
+    if not marks:
+        return []
+    if not clean:
+        return [{"code": c, "ok": False, "reason": "当前车次还没有已校正的经由"} for c in marks]
+
+    # 只同步「覆盖全程」的经由：只填了中间一段就套给别人，别人的首末段会被硬接上
+    mine = route_stops_brief(src, date)
+    cover = (mine.get("stops") or [])
+    if len(cover) >= 2 and (clean[0].get("from") != cover[0]["name"]
+                            or clean[-1].get("to") != cover[-1]["name"]):
+        return [{"code": c, "ok": False, "reason": "经由没有覆盖全程，没有同步"} for c in marks]
+
+    # 区间端点在自己这趟车的第几站 → 折成比例：对方少停某站时按比例就近落站
+    idx = {s["name"]: i for i, s in enumerate(cover)}
+    span = max(1, len(cover) - 1)
+    routed: List[dict] = []
+    for s in clean:
+        s = dict(s)
+        a, b = idx.get(s.get("from") or ""), idx.get(s.get("to") or "")
+        if a is not None:
+            s["f0"] = round(a / span, 5)
+        if b is not None:
+            s["f1"] = round(b / span, 5)
+        routed.append(s)
+
+    out: List[dict] = []
+    for c in marks:
+        brief = route_stops_brief(c)
+        stops = brief.get("stops") or []
+        if len(stops) < 2:
+            out.append({"code": c, "ok": False, "reason": "本地库里没有它的经停站数据"})
+            continue
+        if cover and (brief.get("from") != cover[0]["name"]
+                      or brief.get("to") != cover[-1]["name"]):
+            out.append({"code": c, "ok": False, "reason": "起讫点和这趟车不一样"})
+            continue
+        prev = get_override(c) or {}
+        if (prev.get("via") or []) and not overwrite:
+            out.append({"code": c, "ok": False, "reason": "它已有自己的校正，未覆盖"})
+            continue
+        adapted = adapt_via_to_stops(routed, stops)
+        if not adapted:
+            out.append({"code": c, "ok": False, "reason": "经由和它的停站对不上，未同步"})
+            continue
+        text = f"{note}（同起讫点同步自 {src}）" if note else f"同起讫点同步自 {src}"
+        # 站间里程按「第 i 站」记下标，站数不同就对不上，所以同步只带总里程不带段里程
+        saved = save_override(c, adapted, prev.get("totalKm"), text, {}, brief.get("date"),
+                              source="sync", src_code=src)
+        out.append({"code": c, "ok": True, "segs": len(saved.get("via") or []),
+                    "date": brief.get("date"), "srcCode": src,
+                    "stops": len(stops)})
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1038,8 +1027,7 @@ def _fill_line_stations(line_name: str, names: Sequence[str]) -> List[str]:
 def backfill_line_stations() -> int:
     """把自建线路（含资料库带进来的）的沿线站统一补一遍，返回补了几站
 
-    和 `backfill_via_class()` 一个用法：老库里已经存下的线路不可能回头重存，
-    启动时顺手补一次，补过就什么都不写。
+    老库里已经存下的线路不可能回头重存，启动时顺手补一次，补过就什么都不写。
     """
     n = 0
     for it in list_custom_lines():
@@ -2568,11 +2556,14 @@ def build_route_payload(code: str, date: str, force: bool = False,
     # ---- 人工校正覆盖（优先于自动结果）----
     km_mode = km_info.get("mode", "estimate")
     manual = {"via": False, "km": False, "segKm": False, "note": None, "updatedAt": None,
-              "viaClass": None}
+              "source": None, "srcCode": None, "basedDate": None}
     ov = get_override(code) if use_override else None
     if ov:
         manual["note"] = ov.get("note")
         manual["updatedAt"] = ov.get("updatedAt")
+        manual["source"] = ov.get("source") or "manual"
+        manual["srcCode"] = ov.get("srcCode")
+        manual["basedDate"] = ov.get("basedDate")
         if ov.get("via"):
             via = {"segs": [dict(s, src="manual") for s in ov["via"]],
                    "unknown": [], "pairs": via.get("pairs", 0),
@@ -2629,19 +2620,8 @@ def build_route_payload(code: str, date: str, force: bool = False,
                 km_mode = "manual"
                 manual["km"] = True
 
-    # ---- 同类沿用：同起讫站 + 同车种的车次，人工校正过的经由直接套用 ----
-    # 只在这趟车自己没有人工经由时生效；自己的校正永远优先。
-    if use_override and not manual["via"] and len(stops) > 1:
-        cls = get_via_class(stops[0]["name"], stops[-1]["name"], code)
-        if cls:
-            segs = adapt_via_class(cls.get("via") or [], stops)
-            if segs and not _via_conflicts(cls, via):
-                via = {"segs": segs, "unknown": [], "pairs": via.get("pairs", 0),
-                       "resolved": via.get("pairs", 0), "coverage": 100.0,
-                       "sources": ["class"]}
-                manual["viaClass"] = {"from": cls["from"], "to": cls["to"],
-                                      "code": cls.get("srcCode") or "",
-                                      "category": cls.get("category") or ""}
+    # 经由只有两种来源：这趟车自己的人工校正（已确认，写入正式库），
+    # 或者读的时候按线路库临时推断（自动，未确认）。不再从别的车次「借用」。
 
     # ---- 车站档案（路局 / 电报码 / 连接线路）----
     for s in stops:
@@ -2742,10 +2722,8 @@ def build_route_payload(code: str, date: str, force: bool = False,
         "viaLines": _via_line_names(via.get("segs") or []),
         "viaSegs": via.get("segs") or [],
         "viaUnknown": via.get("unknown") or [],
-        "viaSource": ("manual" if manual["via"]
-                      else ("class" if manual.get("viaClass")
-                            else ("auto" if via.get("segs") else "none"))),
-        "viaClass": manual.get("viaClass"),
+        "viaSource": ("manual" if manual["via"] else ("auto" if via.get("segs") else "none")),
+        "viaConfirmed": bool(manual["via"]),        # 进正式库（train_override）的才算已校正
         "viaCoverage": via.get("coverage", 0.0),
         "manual": manual,
         "kmMatched": f"{km_info.get('matched', 0)}/{km_info.get('segments', 0)}",
@@ -3043,48 +3021,10 @@ except Exception:                    # 库坏了也不能让服务起不来
 
 
 # ---------------------------------------------------------------------------
-# 一次性升级：老库里已经有的人工经由，补记成「同类」副本
-# （不补的话，升级前改过的车次不会自动带给同起讫站的车次，得再存一次才生效）
+# 启动时的一次性补齐
 # ---------------------------------------------------------------------------
 
-def backfill_via_class() -> int:
-    try:
-        with db() as conn:
-            ver = conn.execute("PRAGMA user_version").fetchone()[0]
-    except sqlite3.Error:
-        return 0
-    if ver >= 1:
-        return 0
-    n = 0
-    try:
-        for code, ov in list_overrides().items():
-            via = ov.get("via") or []
-            if not via:
-                continue
-            date = latest_date(code)
-            if not date:
-                continue
-            try:
-                if learn_via_class(code, date, via, ov.get("note") or "").get("ok"):
-                    n += 1
-            except Exception:                        # noqa: BLE001
-                continue
-    finally:
-        try:
-            with db() as conn:
-                conn.execute("PRAGMA user_version = 1")
-        except sqlite3.Error:
-            pass
-    return n
-
-
 def _startup_backfill() -> None:
-    try:
-        n = backfill_via_class()
-        if n:
-            print(f"[railcore] 已把 {n} 趟车的人工经由补记为同类副本")
-    except Exception:                                # noqa: BLE001
-        pass
     try:
         k = backfill_line_stations()
         if k:

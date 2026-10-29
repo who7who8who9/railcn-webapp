@@ -792,9 +792,10 @@ function renderDetail(route) {
     ? `<div class="l3 chips">经由 ${segs.map(s => {
         const span = [s.from, s.to].filter(Boolean).join('–');
         return `<button class="chip" data-line="${esc(s.line)}" title="${esc(span)}">${esc(s.line)}</button>`;
-      }).join('')}${route.viaSource === 'manual' ? '<span class="tag manual">人工校正</span>'
-        : (route.viaSource === 'class'
-          ? `<span class="tag cls" title="同起讫站、同车种的车次已有校正，这趟车直接沿用${route.viaClass && route.viaClass.code ? '（学自 ' + esc(route.viaClass.code) + '）' : ''}">同类沿用</span>`
+      }).join('')}${route.viaSource === 'manual'
+        ? '<span class="tag manual">人工校正</span>'
+        : (route.viaSource === 'auto'
+          ? '<span class="tag auto" title="经由是按线路库临时推断的，还没人工确认，不算正式数据">自动推断</span>'
           : '')}</div>`
     : '';
   const gapsHtml = gaps.length
@@ -4152,12 +4153,14 @@ async function boot() {
 const ISSUE_CN = { via: '经由待补', km: '里程估算', coord: '缺坐标' };
 const CU_FILTERS = [
   ['todo', '待补全'], ['via0', '经由全无'], ['via', '经由缺口'], ['km', '里程估算'],
-  ['coord', '缺坐标'], ['manual', '已校正'], ['clean', '无问题'], ['all', '全部'],
+  ['coord', '缺坐标'], ['pending', '自动待确认'], ['manual', '已校正'],
+  ['synced', '同步入库'], ['clean', '无问题'], ['all', '全部'],
 ];
 const CU = {
   filter: 'todo', q: '', items: [], total: 0, limit: 60,
   sel: null, detail: null, via: [], segKm: {}, lines: null, poll: null,
   coordQ: '', coordOnlyMiss: false, mode: 'seg', linesStale: false,
+  mates: new Set(), mateOpen: new Set(),
 };
 
 const esc = s => String(s == null ? '' : s)
@@ -4214,7 +4217,7 @@ function cuRenderStats(st) {
   $('#cuStats').innerHTML = [
     ['待补全', c.todo, 'warn'], ['经由全无', c.via0, 'warn'], ['经由缺口', c.via, ''],
     ['里程', c.km, ''], ['缺坐标', c.coord, ''], ['已校正', c.manual, 'ok'],
-    ['已扫描', c.scanned, ''],
+    ['自动待确认', c.pending, ''], ['同步入库', c.synced, ''], ['已扫描', c.scanned, ''],
   ].map(([k, v, cls]) => `<span class="cu-stat ${cls}">${k}<b>${nfmt(v || 0)}</b></span>`).join('');
 
   const p = $('#cuProg');
@@ -4269,11 +4272,12 @@ function cuRenderList() {
       return `<span class="cu-flag ${x}">${label}</span>`;
     }).join('');
     const manual = (it.viaSource === 'manual' || it.kmMode === 'manual')
-      ? '<span class="cu-flag manual">已校正</span>' : '';
-    const clsFlag = it.viaSource === 'class'
-      ? '<span class="cu-flag cls" title="经由沿用了同起讫站、同车种的人工校正">同类沿用</span>' : '';
+      ? `<span class="cu-flag manual">${it.viaOrigin === 'sync' ? '同步入库' : '已校正'}</span>` : '';
+    // 自动推断出来的经由只是「算出来的」，没人工确认就不算正式数据
+    const pend = it.viaSource === 'auto'
+      ? '<span class="cu-flag pending" title="经由是按线路库自动推断的，还没人工确认；确认后才会写进正式库">待确认</span>' : '';
     const via = it.via ? esc(it.via) : '<span class="warn">经由未识别</span>';
-    const cov = (it.viaSource === 'manual' || it.viaSource === 'class')
+    const cov = (it.viaSource === 'manual')
       ? '' : ` · ${Math.round(it.viaCoverage || 0)}%`;
     const gap = it.gaps ? `<span class="warn"> · 缺 ${it.gaps} 段</span>` : '';
     const miss = it.missing ? ` · 缺 ${it.missing} 站坐标` : '';
@@ -4281,7 +4285,7 @@ function cuRenderList() {
       <div class="r1"><span class="code">${esc(it.codeLabel || it.code)}</span>
         <span class="od">${esc(it.from || '—')} → ${esc(it.to || '—')}</span></div>
       <div class="r2">${via}${cov}${gap} · ${it.totalKm} km${miss}</div>
-      <div class="flags">${manual}${clsFlag}${flags}</div>
+      <div class="flags">${manual}${pend}${flags}</div>
     </div>`;
   }).join('');
 
@@ -4296,6 +4300,8 @@ function cuRenderList() {
 async function cuOpen(code) {
   CU.sel = code;
   CU.detail = null;
+  CU.mates.clear();                 // 换了车次，之前勾选的同起讫点车次作废
+  CU.mateOpen.clear();
   $('#cuEditor').innerHTML = `<div class="cu-empty">正在载入 <b>${esc(code)}</b> …</div>`;
   cuRenderList();
   try {
@@ -4314,16 +4320,11 @@ async function cuOpen(code) {
   }
 }
 
-/** 编辑器里的经由初始值：有人工校正照抄；没有就用「同类沿用」或自动结果（都只是虚拟段） */
+/** 编辑器里的经由初始值：这趟车自己的校正照抄；没有就摆自动推断结果（虚拟段，待确认） */
 function cuInitVia(d) {
   const ovVia = (d.override && d.override.via) || [];
-  const eff = d.effective || {};
   if (ovVia.length) {
     return ovVia.map(x => ({ line: x.line || '', from: x.from || '', to: x.to || '', src: 'manual' }));
-  }
-  if (eff.viaSource === 'class' && (eff.viaSegs || []).length) {
-    // 这趟车的经由是「沿用同类车次」来的：照原样摆出来，标「同类」，保存时不写入
-    return eff.viaSegs.map(x => ({ line: x.line || '', from: x.from || '', to: x.to || '', src: 'class' }));
   }
   return cuRowsFromAuto(d.auto || {});
 }
@@ -4377,6 +4378,29 @@ async function cuRefreshAuto() {
     cuMsg('bad', '重算失败：' + e.message);
     if (btn) { btn.disabled = false; btn.textContent = '重算自动经由'; }
   }
+}
+
+/**
+ * 「确认自动结果并入库」：自动推断整趟认全时，一把把每段都确认为人工并立即保存。
+ * 这就是「自动计算的经由等待确认再入正式库」的确认动作，省得一段段点。
+ */
+async function cuAcceptAuto() {
+  const d = CU.detail;
+  if (!d) return;
+  const auto = (d.auto && d.auto.viaSegs) || [];
+  if (!auto.length) { cuMsg('bad', '这趟车没有自动推断的经由，先手工填'); return; }
+  if (((d.auto || {}).viaUnknown || []).length) {
+    cuMsg('bad', '自动结果还有缺口，补全之后再确认');
+    return;
+  }
+  if (!confirm(`把自动推断的 ${auto.length} 段确认为正式经由，并入库到 ${d.codeLabel || d.code}？`)) return;
+  CU.via = auto.map(s => ({
+    line: s.line || '', from: s.from || '', to: s.to || '', src: 'manual',
+  }));
+  if ($('#ceNote') && !$('#ceNote').value.trim()) $('#ceNote').value = '确认自动推断结果';
+  cuRenderViaRows();
+  cuMsg('', '正在按自动结果入库…');
+  await cuSave();
 }
 
 async function cuLoadLineNames() {
@@ -4528,29 +4552,149 @@ function cuRowsFromAuto(auto) {
   return items.map(x => ({ line: x.line, from: x.from, to: x.to, src: 'auto' }));
 }
 
-/** 同类车次沿用的经由 → 编辑行；同样是虚拟经由，保存时不写入 */
-function cuRowsFromClass(segs) {
-  return (segs || []).map(s => ({
-    line: s.line || '', from: s.from || '', to: s.to || '', src: 'class',
-  }));
+/* ---------- 同起讫点的车次：勾选后把已校正的经由同步过去 ---------- */
+
+/** 一行候选：车次 / 车种 / 站数 / 起止时刻 / 站序是否相同 / 现在的经由 */
+function odRowHtml(it) {
+  const on = CU.mates.has(it.code);
+  const tags = [];
+  tags.push(it.sameStops
+    ? '<span class="od-tag same" title="站序和这趟车完全一样，经套过去最准">站序相同</span>'
+    : `<span class="od-tag" title="和这趟车共有的停站占比">重合 ${it.overlap}%</span>`);
+  if (it.hasOverride) {
+    tags.push(`<span class="od-tag manual" title="已有一条自己的校正，勾选同步会覆盖它">${
+      it.origin === 'sync' ? '同步入库' : '已校正'}</span>`);
+  } else if (it.viaSource === 'auto') {
+    tags.push('<span class="od-tag pending">待确认</span>');
+  }
+  const time = it.startTime ? `${esc(it.startTime)}–${esc(it.endTime || '')}` : '';
+  return `<div class="od-row${on ? ' on' : ''}" data-code="${esc(it.code)}">
+    <label class="od-chk"><input type="checkbox"${on ? ' checked' : ''}></label>
+    <span class="od-code">${esc(it.codeLabel || it.code)}</span>
+    <span class="od-meta">${it.stops} 站${time ? ' · ' + time : ''}</span>
+    <span class="od-tags">${tags.join('')}</span>
+    <span class="od-via" title="${esc(it.via || '')}">${esc(it.via || '经由未识别')}</span>
+    <button type="button" class="od-more">停站详情</button>
+  </div>
+  <div class="od-detail hidden" data-for="${esc(it.code)}"></div>`;
+}
+
+function cuMatesHtml(d) {
+  const m = d.odMates || {};
+  const items = m.items || [];
+  if (!m.from || !m.to || !items.length) return '';
+  return `<div class="ce-card" id="ceMatesCard">
+    <h4>同起讫点的车次
+      <span class="hint">${esc(m.from)} → ${esc(m.to)} · ${items.length} 趟；勾选后保存时把这趟车的经由同步过去，
+        每趟各存一条自己的校正（和车次号绑定）</span>
+      <span class="right">
+        <label class="cu-mini" title="只勾停站完全一样的，套过去最准"><input type="checkbox" id="ceMateSame"> 选同站序</label>
+        <span class="hint" id="ceMateCount"></span>
+      </span>
+    </h4>
+    <div class="od-list" id="ceMates">${items.map(odRowHtml).join('')}</div>
+    <div class="ve-note">同步只带动经由：站间里程按「第几站」记下标，站数不同就对不上，所以不跟着同步。
+      已经有自己校正的车次默认不覆盖，勾了会在保存前问一句。</div>
+  </div>`;
+}
+
+/** 勾选计数：按钮旁边也要显示，免得忘了会同步到哪几趟 */
+function cuMateCount() {
+  const n = CU.mates.size;
+  const el = $('#ceMateCount');
+  if (el) el.textContent = n ? `已勾选 ${n} 趟` : '';
+  const c = $('#ceSyncCount');
+  if (c) c.textContent = n ? `· 保存时同步到 ${n} 趟` : '';
+}
+
+function cuBindMates() {
+  const box = $('#ceMates');
+  if (!box) return;
+  // 重算 / 重新打开后候选可能变了：勾选集合里只留还列得出来的车次
+  const items = ((CU.detail || {}).odMates || {}).items || [];
+  const valid = new Set(items.map(x => x.code));
+  [...CU.mates].forEach(c => { if (!valid.has(c)) CU.mates.delete(c); });
+  cuMateCount();
+  $$('#ceMates .od-row').forEach(row => {
+    const code = row.dataset.code;
+    row.querySelector('input[type=checkbox]').addEventListener('change', e => {
+      if (e.target.checked) CU.mates.add(code); else CU.mates.delete(code);
+      row.classList.toggle('on', e.target.checked);
+      cuMateCount();
+    });
+    row.querySelector('.od-more').addEventListener('click', () => cuToggleMateDetail(code));
+  });
+  const same = $('#ceMateSame');
+  if (same) {
+    same.addEventListener('change', () => {
+      $$('#ceMates .od-row').forEach(row => {
+        const it = items.find(x => x.code === row.dataset.code) || {};
+        const want = same.checked ? !!it.sameStops : false;
+        const cb = row.querySelector('input[type=checkbox]');
+        if (cb.checked === want) return;
+        cb.checked = want;
+        if (want) CU.mates.add(row.dataset.code); else CU.mates.delete(row.dataset.code);
+        row.classList.toggle('on', want);
+      });
+      cuMateCount();
+    });
+  }
+}
+
+/** 展开/收起某趟车的停站详情（第一次展开才去取，取过就留着） */
+async function cuToggleMateDetail(code) {
+  const box = $(`.od-detail[data-for="${code}"]`);
+  if (!box) return;
+  if (!box.classList.contains('hidden')) { box.classList.add('hidden'); return; }
+  if (!box.dataset.loaded) {
+    box.innerHTML = '<div class="od-loading">正在读取停站…</div>';
+    try {
+      const d = await api('/api/curate/mate', { code });
+      const last = (d.stops || []).length - 1;
+      const rows = (d.stops || []).map((s, i) => {
+        const arr = s.arr ? `到 ${s.arr}` : '';
+        const dep = i === last ? '' : (s.dep ? `开 ${s.dep}` : '');
+        return `<div class="od-st">
+          <span class="i">${i + 1}</span>
+          <span class="n">${esc(s.name)}</span>
+          <span class="t">${[arr, dep].filter(Boolean).join(' / ')}</span>
+          ${s.day ? `<span class="d">+${s.day}</span>` : ''}
+        </div>`;
+      }).join('');
+      box.innerHTML = `<div class="od-sthead">${esc(d.codeLabel || d.code)} · ${esc(d.date || '')} ·
+          ${esc(d.from || '—')} → ${esc(d.to || '—')} · ${(d.stops || []).length} 站${
+          d.override && d.override.via ? ` · 已有 ${d.override.via} 段校正` : ''}</div>
+        <div class="od-stops">${rows || '<div class="od-loading">没有停站数据</div>'}</div>`;
+      box.dataset.loaded = '1';
+    } catch (e) {
+      box.innerHTML = `<div class="od-loading">读取失败：${esc(e.message)}</div>`;
+    }
+  }
+  box.classList.remove('hidden');
 }
 
 function cuRenderEditor() {
   const d = CU.detail;
   const a = d.auto || {};
   const ov = d.override;
-  const isManual = !!(ov && ((ov.via || []).length || ov.totalKm
-    || Object.keys(ov.segKm || {}).length));
+  const kmManual = !!(ov && (ov.totalKm || Object.keys(ov.segKm || {}).length));
   const kmModeCn = { manual: '人工填写', real: '线路实测', hybrid: '部分实测', estimate: '直线估算' }[a.kmMode] || a.kmMode;
   const covText = a.viaSource === 'none' || !(a.viaSegs || []).length
     ? '整趟都没认出线路'
     : `覆盖 ${a.viaCoverage}%（${(a.viaUnknown || []).length ? (a.viaUnknown || []).length + ' 段未识别' : '全部识别'}）`;
   const stops = d.stops || [];
   const eff = d.effective || {};
-  const clsVia = d.classVia || null;
-  const clsApplied = eff.viaSource === 'class';
-  const clsOd = clsVia ? `${clsVia.from}→${clsVia.to}` : '';
-  const clsSrc = (eff.viaClass && eff.viaClass.code) || (clsVia && clsVia.srcCode) || '';
+  const ovVia = (ov && ov.via) || [];
+  const ovNote = ovVia.length
+    ? `已校正${ov.source === 'sync' ? `（同步自 ${ov.srcCode || '同起讫点车次'}）` : ''}`
+      + (ov.basedDate ? ` · 依据 ${ov.basedDate} 站表` : '')
+    : '';
+  const stale = d.overrideStale || {};
+  const staleText = stale.changed
+    ? `校正时的站表已经变了：少 ${(stale.missing || []).length} 站、多 ${(stale.added || []).length} 站`
+      + `（校正依据 ${stale.basedDate}，现在 ${stale.currentDate}）`
+    : '';
+  const autoPending = !ovVia.length && eff.viaSource === 'auto';
   const coord = d.coordSummary || {
     total: stops.length,
     missing: stops.filter(s => s.lat == null).length,
@@ -4570,10 +4714,12 @@ function cuRenderEditor() {
         ? `<span class="ce-badge warn" title="${esc((d.codeSwitches || []).map(w =>
             `${w.at} 换向 ${w.from}→${w.to}`).join('；'))}">中途换号</span>` : ''}
       <span class="ce-badge">${esc(d.date || '')}</span>
-      ${isManual ? '<span class="ce-badge manual">已人工校正</span>' : ''}
-      ${clsApplied
-        ? `<span class="ce-badge class" title="同起讫站、同车种已有校正，这趟车直接沿用，不用再填">沿用同类${clsSrc ? ' · 学自 ' + esc(clsSrc) : ''}</span>`
-        : (clsVia ? `<span class="ce-badge class-dim" title="同起讫站、同车种已有校正（${esc(clsOd)}${clsSrc ? ' · 学自 ' + esc(clsSrc) : ''}），但没套到这趟车上：自动推断已整趟认全且线路对不上，可能真的不是同一条径路">同类有校正未套用</span>` : '')}
+      ${ovVia.length
+        ? `<span class="ce-badge manual" title="${esc(ovNote)}">${
+            ov.source === 'sync' ? '同步入库' : '已校正'}</span>` : ''}
+      ${kmManual && !ovVia.length ? '<span class="ce-badge manual">里程人工</span>' : ''}
+      ${staleText ? `<span class="ce-badge warn" title="${esc(staleText)}">站表已变</span>` : ''}
+      ${autoPending ? '<span class="ce-badge warn" title="自动推断结果只是算出来的，要人工确认才进正式库">自动待确认</span>' : ''}
       ${(a.viaUnknown || []).length ? '<span class="ce-badge warn">经由有缺口</span>' : ''}
       ${d.variants > 1 ? `<span class="ce-badge warn" title="这个车次号在库里有 ${d.variants} 套不同走法（调图/缩线/改号）。校正按车次号保存，会同时作用到其它日期的运行">该号有 ${d.variants} 套走法</span>` : ''}
       <span class="ce-spacer"></span>
@@ -4583,18 +4729,19 @@ function cuRenderEditor() {
     <div class="ce-actions">
       <button id="ceSave" class="btn primary">保存校正</button>
       <button id="ceReset" class="btn ghost">撤销校正</button>
-      ${d.classCount > 0 ? `<label class="cu-mini ce-prop" title="同起讫站、同车种的车次，人工修正过一次后其余车次自动沿用；不勾选就只改这一趟">
-        <input type="checkbox" id="ceProp" checked> 同类 ${d.classCount} 趟一并沿用</label>` : ''}
+      <span id="ceSyncCount" class="cu-mini"></span>
       <span id="ceMsg" class="ce-msg"></span>
     </div>
 
     <div class="ce-card">
-      <h4>自动推断的经由 <span class="hint">（虚拟经由，仅供参考，不会保存）</span>
+      <h4>自动推断的经由 <span class="hint">（按线路库临时算的，不写库；确认为已校正后才进正式库）</span>
         <span class="hint">${covText} · 总里程 ${a.totalKm} km（${kmModeCn}）· 线路里程配对 ${esc(a.kmMatched)}</span>
-        ${clsApplied ? `<span class="hint cls">这趟车实际用的是同类校正${clsSrc ? '（学自 ' + esc(clsSrc) + '）' : ''}，见下方手工填写</span>` : ''}
         <span class="right">
           <span class="hint" id="ceLibInfo">${d.library
             ? `线路库 ${d.library.lines} 条（自建 ${d.library.customLines}）` : ''}</span>
+          <button id="ceAccept" class="btn sm primary"
+            title="整趟都认全了才可用：把自动推断的每一段都确认为人工，并立即保存入库"
+            ${(a.viaUnknown || []).length || !(a.viaSegs || []).length ? 'disabled' : ''}>确认自动结果并入库</button>
           <button id="ceRefresh" class="btn sm ghost"
             title="按当前线路库重新推断（新加的线路会立刻参与计算）；未保存的手工填写会先问你">重算自动经由</button>
         </span>
@@ -4606,10 +4753,10 @@ function cuRenderEditor() {
 
     <div class="ce-card">
       <h4>手工填写经由
-        <span class="hint">按运行顺序；标「人工」的段会存为正式经由，标「自动 / 同类」的段只作参考、不保存</span>
+        <span class="hint">按运行顺序；标「人工」的段会存为正式经由，标「自动」的段只作参考、不保存</span>
         <span class="right">
           <button id="ceFill" class="btn sm ghost">按自动结果填充</button>
-          <button id="ceAllManual" class="btn sm ghost">全部定为人工</button>
+          <button id="ceAllManual" class="btn sm ghost">全部确认为人工</button>
           <button id="ceClear" class="btn sm ghost">清空</button>
         </span>
       </h4>
@@ -4617,6 +4764,8 @@ function cuRenderEditor() {
       <div class="ve-actions"><button id="ceAdd" class="btn sm">+ 添加一段</button></div>
       <div class="ve-note" id="ceViaCheck"></div>
     </div>
+
+    ${cuMatesHtml(d)}
 
     <div class="ce-card">
       <h4>${CU.mode === 'cum' ? '累计里程' : '站间里程'}
@@ -4676,9 +4825,12 @@ function cuRenderEditor() {
   cuRenderViaRows();
   cuRenderSegKm();
   cuRenderStops();
+  cuBindMates();
 
   // 线路库变了以后按新线路重算（自动经由 / 里程都跟着变）
   $('#ceRefresh').addEventListener('click', cuRefreshAuto);
+  const accept = $('#ceAccept');
+  if (accept) accept.addEventListener('click', cuAcceptAuto);
   const chainEl = $('#ceViaChain');
   if (chainEl) {
     chainEl.addEventListener('click', e => {
@@ -4715,14 +4867,14 @@ function cuRenderEditor() {
   $('#ceFill').addEventListener('click', () => {
     CU.via = cuRowsFromAuto(a);
     cuRenderViaRows();
-    cuMsg('', '已填入自动推断结果 —— 只作参考；改过或点了「自动」标签定为人工的段才会保存');
+    cuMsg('', '已填入自动推断结果 —— 只作参考；确认为人工（或点「确认自动结果并入库」）后才会保存');
   });
   $('#ceAllManual').addEventListener('click', () => {
     const n = CU.via.filter(r => isVirtual(r)).length;
-    if (!n) { cuMsg('', '当前列表里没有「自动 / 同类」的段'); return; }
+    if (!n) { cuMsg('', '当前列表里没有「自动」的段'); return; }
     CU.via.forEach(r => { if (isVirtual(r)) r.src = 'manual'; });
     cuRenderViaRows();
-    cuMsg('', `${n} 段推断结果已全部定为人工，保存后写入正式经由`);
+    cuMsg('', `${n} 段自动推断已全部确认为人工，保存后写入正式经由`);
   });
   $('#ceKm').addEventListener('input', () => {
     cuSegSummary();
@@ -5346,15 +5498,11 @@ function cuRenderViaRows() {
     return;
   }
   box.innerHTML = CU.via.map((r, i) => {
-    const virt = r.src === 'auto' || r.src === 'class';
-    const isCls = r.src === 'class';
-    const tagTitle = isCls
-      ? '沿用同类车次（同起讫站 · 同车种）的人工经由；保存时不会写入，点一下把它定为这趟车的人工段'
-      : '自动推断的段（虚拟经由），保存时不会写入正式经由；点一下把它定为人工';
+    const virt = r.src === 'auto';
     return `
-    <div class="ve-row${virt ? ' is-auto' : ' is-manual'}${isCls ? ' is-class' : ''}" data-i="${i}">
+    <div class="ve-row${virt ? ' is-auto' : ' is-manual'}" data-i="${i}">
       ${virt
-        ? `<button type="button" class="ve-src ${isCls ? 'class' : 'auto'}" title="${tagTitle}">${isCls ? '同类' : '自动'}</button>`
+        ? `<button type="button" class="ve-src auto" title="自动推断的段，尚未确认，保存时不写入正式经由；点一下确认为人工">自动</button>`
         : `<span class="ve-src manual" title="人工确认的段，保存时写入正式经由">人工</span>`}
       <div class="combo" data-cbkind="line">
         <input class="line" value="${esc(r.line)}" placeholder="点这里选线路，或直接输入"
@@ -5386,7 +5534,7 @@ function cuRenderViaRows() {
       CU.via.splice(i, 1);
       cuRenderViaRows();
     });
-    const tag = row.querySelector('.ve-src.auto, .ve-src.class');
+    const tag = row.querySelector('.ve-src.auto');
     if (tag) tag.addEventListener('click', () => cuMarkManual(i));
     cuSyncRowCands(i);                        // 异步补上这一行的车站候选
   });
@@ -5395,40 +5543,33 @@ function cuRenderViaRows() {
   cuCheck();
 }
 
-/** 把某一段标成「人工」：自动推断 / 同类沿用的段被人工确认后才会写进正式经由 */
+/** 把某一段确认为「人工」：自动推断的段只有确认后才会写进正式经由 */
 function cuMarkManual(i, quiet) {
   const r = CU.via[i];
-  if (!r || (r.src !== 'auto' && r.src !== 'class')) return;
-  const wasClass = r.src === 'class';
+  if (!r || r.src !== 'auto') return;
   r.src = 'manual';
   cuRenderViaRows();
   if (!quiet) {
-    cuMsg('', wasClass
-      ? `第 ${i + 1} 段按同类校正定为人工，保存后就是这趟车自己的经由`
-      : `第 ${i + 1} 段已定为人工，保存时会写入正式经由`);
+    cuMsg('', `第 ${i + 1} 段已确认为人工，保存时会写入正式经由`);
   }
 }
 
-/** 只换某一行左边的「人工 / 自动 / 同类」标签，不重建整行（输入时不丢焦点） */
+/** 只换某一行左边的「人工 / 自动」标签，不重建整行（输入时不丢焦点） */
 function cuRefreshRowTag(i) {
   const row = $$('#ceViaRows .ve-row').find(el => Number(el.dataset.i) === i);
   const r = CU.via[i];
   if (!row || !r) return;
   const old = row.querySelector('.ve-src');
   if (!old) return;
-  const virt = r.src === 'auto' || r.src === 'class';
-  const isCls = r.src === 'class';
+  const virt = r.src === 'auto';
   row.classList.toggle('is-auto', virt);
   row.classList.toggle('is-manual', !virt);
-  row.classList.toggle('is-class', isCls);
   const el = document.createElement(virt ? 'button' : 'span');
-  el.className = 've-src ' + (isCls ? 'class' : (virt ? 'auto' : 'manual'));
-  el.textContent = isCls ? '同类' : (virt ? '自动' : '人工');
+  el.className = 've-src ' + (virt ? 'auto' : 'manual');
+  el.textContent = virt ? '自动' : '人工';
   if (virt) {
     el.type = 'button';
-    el.title = isCls
-      ? '沿用同类车次（同起讫站 · 同车种）的人工经由；保存时不会写入，点一下把它定为这趟车的人工段'
-      : '自动推断的段（虚拟经由），保存时不会写入正式经由；点一下把它定为人工';
+    el.title = '自动推断的段，尚未确认，保存时不写入正式经由；点一下确认为人工';
     el.addEventListener('click', () => cuMarkManual(i));
   } else {
     el.title = '人工确认的段，保存时写入正式经由';
@@ -5677,9 +5818,9 @@ function cuRenderStops() {
   }).join('');
 }
 
-/** 虚拟经由：自动推断（src=auto）或沿用同类车次（src=class），保存时都不写入 */
+/** 虚拟经由：自动推断（src=auto）的段，未确认，保存时不写入正式库 */
 function isVirtual(r) {
-  return !!r && (r.src === 'auto' || r.src === 'class');
+  return !!r && r.src === 'auto';
 }
 
 function cuCheck() {
@@ -5694,7 +5835,7 @@ function cuCheck() {
   const nManual = rows.length - nVirt;
 
   rows.forEach((r, i) => {
-    if (isVirtual(r)) return;                     // 自动 / 同类段只作参考，不参与校验
+    if (isVirtual(r)) return;                     // 自动段只作参考，不参与校验
     if (!(r.line || '').trim()) bad.push(`第 ${i + 1} 段没填线路名`);
     const ls = CUSTA.cache.get((r.line || '').trim());
     const lsSet = ls && ls.length ? new Set(ls) : null;   // 库里线路的站名（含通过站）
@@ -5714,8 +5855,8 @@ function cuCheck() {
     const cur = (rows[i].from || '').trim();
     if (prev && cur && prev !== cur) bad.push(`第 ${i} 段到「${prev}」，第 ${i + 1} 段却从「${cur}」起，中间断开`);
   }
-  if (nVirt) note.push(`其中 ${nVirt} 段标「自动 / 同类」的是推断结果，保存时不会写入正式经由`);
-  if (!nManual && nVirt) note.push('当前没有人工段 —— 改一下或点标签定为人工，才会保存');
+  if (nVirt) note.push(`其中 ${nVirt} 段还标「自动」——那是推断结果，确认为人工后才会写进正式库`);
+  if (!nManual && nVirt) note.push('当前没有人工段 —— 改一下、点标签确认，或点「确认自动结果并入库」');
   const manRows = rows.filter(r => !isVirtual(r));
   const first = (manRows[0] || {}).from || '';
   const last = (manRows[manRows.length - 1] || {}).to || '';
@@ -5765,38 +5906,46 @@ function cuMsg(cls, text) {
 async function cuSave() {
   const d = CU.detail;
   if (!d) return;
-  // 只保存人工段：自动推断 / 同类沿用的「虚拟经由」一律不写入正式经由
+  // 只保存人工确认过的段：自动推断的「虚拟经由」一律不写入正式库
   const manualRows = CU.via.filter(r => !isVirtual(r) && (r.line || '').trim());
   const virtCount = CU.via.filter(r => isVirtual(r)).length;
   const via = manualRows
     .map(r => ({ line: (r.line || '').trim(), from: (r.from || '').trim(), to: (r.to || '').trim() }));
   const kmRaw = ($('#ceKm').value || '').trim();
   const note = ($('#ceNote').value || '').trim();
-  const propEl = $('#ceProp');
-  const propagate = propEl ? propEl.checked : true;
   const segKm = {};
   Object.keys(CU.segKm || {}).forEach(k => {
     const v = Number(CU.segKm[k]);
     if (Number.isFinite(v) && v > 0) segKm[k] = v;
   });
+
+  // 勾了同起讫点的车次：保存后把这些车的经由一起同步过去
+  const mates = ((d.odMates || {}).items || []).filter(x => CU.mates.has(x.code));
+  const dup = mates.filter(x => x.hasOverride);
+  if (mates.length && !via.length) {
+    cuMsg('bad', '还没有人工确认的经由，同步过去没有内容');
+    return;
+  }
+  if (dup.length && !confirm(
+    `勾选的 ${mates.length} 趟里有 ${dup.length} 趟已有自己的校正（${dup.map(x => x.codeLabel || x.code).join('、')}），`
+    + '同步会覆盖它们。继续？')) return;
+
   cuMsg('', '保存中…');
   try {
     const r = await postJSON('/api/override', {
       code: d.code, date: d.date, via, totalKm: kmRaw ? Number(kmRaw) : null,
-      note, segKm, propagate,
+      note, segKm,
+      syncCodes: mates.map(x => x.code), syncOverwrite: dup.length > 0,
     });
     await cuOpen(d.code);
     const parts = [via.length ? `${via.length} 段人工经由已存为正式经由` : '没有人工段，未写入经由'];
-    if (virtCount) parts.push(`${virtCount} 段自动/同类推断仅作参考，未保存`);
-    const cls = (r && r.viaClass) || {};
-    if (cls.ok) {
-      const n = (r && r.classRefreshed) || 0;
-      parts.push(`同类（${cls.from}→${cls.to}${cls.category ? ' · ' + cls.category + ' 字头' : ''}）`
-        + (n ? `已一并沿用，${n} 趟车已刷新` : '已记下，其它车次下次打开即沿用'));
-    } else if (cls.reason && via.length) {
-      parts.push('未设同类沿用：' + cls.reason);
-    }
-    cuMsg(cls.ok || !via.length ? 'ok' : '', '已保存 · ' + parts.join('；'));
+    if (virtCount) parts.push(`${virtCount} 段自动推断没确认，未保存`);
+    const synced = (r && r.synced) || [];
+    const okc = synced.filter(x => x.ok);
+    if (okc.length) parts.push(`已同步到 ${okc.length} 趟（${okc.map(x => x.code).join('、')}）`);
+    const bad = synced.filter(x => !x.ok);
+    cuMsg(bad.length ? 'bad' : 'ok', '已保存 · ' + parts.join('；')
+      + (bad.length ? `；这几趟没同步：${bad.map(x => `${x.code}（${x.reason}）`).join('、')}` : ''));
     const outside = (r && r.outsideLines) || [];
     if (outside.length) {
       cuMsg('bad', `已保存，但线路库里没有「${outside.join('」「')}」，`

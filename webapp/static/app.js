@@ -2595,6 +2595,10 @@ function lnRenderHead() {
         ? `<span class="tag manual" title="这条线线路库里没有（或者只收了其中一段），站序取自线路资料库${
             d.composedFrom ? `「${esc(d.composedFrom)}」那条资料` : ''}">站序来自资料库</span>`
         : ''}
+      ${d.stopsFrom === 'chinaemu'
+        ? `<span class="tag manual" title="这条线线路库和资料库都没收，站序取自 china-emu${
+            d.stopsSource ? `「${esc(d.stopsSource)}」` : ''}——含线路所，每站带计价里程">站序来自 china-emu</span>`
+        : ''}
       ${d.stopsFrom === 'parts'
         ? `<span class="tag manual" title="站序由同名前缀的分段线接起来：${esc((d.stopsParts || []).join(' + '))}">站序由分段拼</span>`
         : ''}
@@ -3017,7 +3021,9 @@ async function showOsmList(q, box) {
       + d.items.map(it => `<div class="cat-row" data-nm="${esc(it.name)}">
           <div class="cat-n">${esc(it.name)}<i>${it.km} km</i>${
             it.stopsN ? `<b class="cat-fit" title="这条线能补出站表：${
-              it.stopsFrom === 'catalog' ? '取自线路资料库' : '由同名前缀的分段线拼成'}">可补 ${it.stopsN} 站</b>` : ''}</div>
+              it.stopsFrom === 'catalog' ? '取自线路资料库'
+                : it.stopsFrom === 'chinaemu' ? '取自 china-emu（含线路所与计价里程）'
+                : '由同名前缀的分段线拼成'}">可补 ${it.stopsN} 站</b>` : ''}</div>
           <div class="cat-m">${[`桥 ${it.nBridge}`, `隧 ${it.nTunnel}`,
             `${it.nPart} 段`, `${it.nFeat} 个要素`].join(' · ')}</div>
         </div>`).join('')

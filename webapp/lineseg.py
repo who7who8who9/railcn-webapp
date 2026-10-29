@@ -28,6 +28,7 @@ import threading
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import cnrail
+import railcore
 import railgeom
 
 EARTH_R = 6371.0088
@@ -415,6 +416,83 @@ def _catalog_stops(name: str) -> Optional[dict]:
             "totalKm": rec.get("length_km")}
 
 
+# 「铁路 / 线 / 高铁 …」这些尾巴不影响线路身份
+_TAILS = ("高速铁路", "客运专线", "城际铁路", "高速线", "客专线", "铁路", "高铁", "线")
+_HS_RE = re.compile(r"高速|客专|客运专线|城际|高铁")
+
+
+def _core_name(name: str) -> str:
+    """去掉线名的速度/制式尾缀：京沪高速铁路 → 京沪，京沪线 → 京沪"""
+    s = re.sub(r"\s+", "", name or "")
+    changed = True
+    while changed:
+        changed = False
+        for t in _TAILS:
+            if len(s) > len(t) and s.endswith(t):
+                s = s[: -len(t)]
+                changed = True
+                break
+    return s
+
+
+def match_key(name: str) -> str:
+    """跨来源的线名比对键：高铁/普速分开，分段线拆成「父线|段名」
+
+    京哈高速铁路京沈段 与 京哈高速线京沈段 → 都是 H京哈|京沈
+    京沪高速铁路 与 京沪高铁 → 都是 H京沪；京沪铁路 → P京沪（不混）
+    与 scripts/import_chinaemu.py 的 match_key 必须保持一致，否则 join 不上。
+    """
+    hs = "H" if _HS_RE.search(name or "") else "P"
+    sp = split(name)
+    if sp:
+        return hs + _core_name(sp[0]) + "|" + sp[1]
+    return hs + _core_name(name)
+
+
+_CE_BRACKET = re.compile(r"\[[^\]]*\]\s*$")
+
+
+def _ce_name(name: str) -> str:
+    """china-emu 站名清洗：「小井村1#线路所[上行]」→「小井村1#线路所」
+
+    [上行] / [下行] 是它把上下行分列成两行时加的标记，[南车场] 是车场说明。
+    洗完仍可能带「线路所」，那是真实节点，_canon 会按档案决定要不要截。
+    """
+    s = _CE_BRACKET.sub("", str(name or "")).strip()
+    if not s:
+        return ""
+    s = re.sub(r"\s+", "", s)
+    return _canon(s)
+
+
+def _ce_stops(name: str) -> Optional[dict]:
+    """china-emu（第五套来源）的站序。
+
+    它在「有走向没站序」的线名上补得比资料库广：兰新线 118 站、京沪线 160 站、
+    沪昆高速线 67 站都是资料库没有的。所以排在资料库之后、分段拼接之前。
+    """
+    try:
+        got = railcore.ce_stops(name, match_key(name))
+    except Exception:                        # noqa: BLE001  新表缺失时静默降级
+        return None
+    if not got:
+        return None
+    stops: List[dict] = []
+    for i, s in enumerate(got.get("stops") or []):
+        nm = _ce_name(s.get("name"))
+        if not nm:
+            continue
+        c = cnrail.coord(nm)
+        stops.append({"name": nm, "km": s.get("km"), "kind": s.get("kind"),
+                      "lat": c[0] if c else None, "lon": c[1] if c else None,
+                      "seq": len(stops) + 1})
+    if len(stops) < 2:
+        return None
+    return {"stops": stops, "source": "chinaemu",
+            "sourceName": got.get("name"), "totalKm": got.get("totalKm"),
+            "kmDesc": got.get("kmDesc") or 0}
+
+
 def _segments_of(parent: str) -> List[dict]:
     """库里以这个父线名开头的分段线（成昆线 → 成攀段、元昆段）"""
     out = []
@@ -487,21 +565,58 @@ def _chain_segments(parent: str, segs: List[dict]) -> Optional[dict]:
 
 
 def stations_for(name: str) -> Optional[dict]:
-    """OSM 线名 → 站序：先找线路资料库，再拿同前缀的分段线拼"""
+    """OSM 线名 → 站序
+
+    两个来源都拿得到时，用 **OSM 走向长度当裁判**，取总长更接近的那个：
+
+      兰新线       OSM 2362 km：资料库给它 兰中城际线（49 km，错配）→ china-emu 兰新铁路（2423 km）✓
+      沪昆高速线   OSM 2054 km：资料库给它 沪杭高铁（158 km，错配）→ china-emu 沪昆高速铁路（2252 km）✓
+      成昆线       OSM 1022 km：资料库 成昆线（1096 km）✓
+
+    资料库那边有 39 条这类「小资料挂到大干线」的历史错配（上一轮只修了反方向），
+    光看线名分不出「分段关系」和「错配」，但走向长度一比就清楚了。
+    两个都拿不到才去拿同前缀的分段线拼。
+    """
     name = re.sub(r"\s+", "", str(name or ""))
     if not name:
         return None
-    hit = _catalog_stops(name)
-    if hit:
-        hit["line"] = name
-        return hit
-    segs = _segments_of(name)
-    if segs:
-        got = _chain_segments(name, segs)
-        if got:
-            got["line"] = name
-            return got
-    return None
+
+    cands: List[dict] = []
+    a = _catalog_stops(name)
+    if a:
+        cands.append(a)
+    b = _ce_stops(name)
+    if b:
+        cands.append(b)
+
+    if not cands:
+        segs = _segments_of(name)
+        if segs:
+            got = _chain_segments(name, segs)
+            if got:
+                got["line"] = name
+                return got
+        return None
+
+    if len(cands) > 1:
+        ref = (railgeom.meta(name) or {}).get("km") or 0
+        if ref > 20:
+            # 相对偏差：谁的总长更贴 OSM 走向就选谁
+            cands.sort(key=lambda c: abs((c.get("totalKm") or 0) - ref) / ref)
+            best, other = cands[0], cands[1]
+            d0 = abs((best.get("totalKm") or 0) - ref) / ref
+            d1 = abs((other.get("totalKm") or 0) - ref) / ref
+            # 差距不明显（<15%）就按老规矩要资料库那份，别无事生非
+            if d1 - d0 < 0.15:
+                best = a or best
+            best["pickWhy"] = "osmKm"
+            best["pickFrom"] = [{"source": c.get("source"), "name": c.get("sourceName"),
+                                 "km": c.get("totalKm")} for c in (a, b) if c]
+            cands = [best] + [c for c in cands if c is not best]
+
+    got = cands[0]
+    got["line"] = name
+    return got
 
 
 # ---------------------------------------------------------------------------
@@ -529,7 +644,8 @@ def compose_line(name: str) -> Optional[dict]:
             c = cc if cc else (None, None)
         st = cnrail.station(nm) or {}
         stations.append({
-            "name": nm, "km": s.get("km"), "kmBase": s.get("km"), "kmSrc": "catalog",
+            "name": nm, "km": s.get("km"), "kmBase": s.get("km"),
+            "kmSrc": got.get("source") or "catalog",
             "lat": c[0], "lon": c[1], "coordSrc": st.get("coordSrc") or "",
         })
         if i:
@@ -540,7 +656,8 @@ def compose_line(name: str) -> Optional[dict]:
     return {
         "name": name, "n": len(stations), "totalKm": total,
         "kmComplete": len(kms) == len(stations), "kmReliable": len(kms) == len(stations),
-        "custom": False, "stopsManual": False, "source": "catalog",
+        "custom": False, "stopsManual": False,
+        "source": got.get("source") or "catalog",
         "stopsFrom": got.get("source"), "stopsSource": got.get("sourceName"),
         "stopsParts": got.get("parts") or [],
         "coordCoverage": round(sum(1 for x in stations if x["lat"] is not None)

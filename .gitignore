@@ -18,6 +18,9 @@ webapp/data/osm_stations.json
 # ---------- 可再抓取的中间缓存 ----------
 cache/
 *.log
+# 抓取站的原始 HTML（几百个文件、30+ MB，重跑抓取脚本即可重建）
+data/huirui/html/
+data/chinaemu/html/
 # 抓下来的 844 个页面，重新跑 fetch_huirui.py 即可
 data/huirui/html/
 data/huirui/index.html

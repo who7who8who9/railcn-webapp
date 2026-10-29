@@ -1351,6 +1351,54 @@ def catalog_stop_names(line_name: str) -> List[str]:
     return list(dict.fromkeys(n for n in names if n))
 
 
+def ce_stops(line_name: str, key: str = "") -> Optional[dict]:
+    """china-emu（第五套来源）的线路站序。
+
+    先按线名精确找，再按归一化键（match_key）找。桥隧行（kind='work'）
+    不进站序 —— 它们是「丹昆特大桥」这种工程点，不是车站，里程栏写的是桥隧
+    自身长度，混进来会把站距算成几万公里。
+
+    km 是 K 里程（全线累计），这里统一减掉首站里程，变成和资料库一致的
+    「从本线起点算」的口径。
+    """
+    nm = (line_name or "").strip()
+    if not nm and not key:
+        return None
+    try:
+        conn = db()
+    except sqlite3.DatabaseError:
+        return None
+    try:
+        if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='line_ce'").fetchone():
+            return None
+        row = conn.execute("SELECT * FROM line_ce WHERE name=?", (nm,)).fetchone()
+        if not row and key:
+            row = conn.execute(
+                "SELECT * FROM line_ce WHERE match_key=?"
+                " ORDER BY n_station DESC, n_km DESC LIMIT 1", (key,)).fetchone()
+        if not row:
+            return None
+        rows = conn.execute(
+            "SELECT seq,name,km,kind,cls,section FROM line_ce_stop"
+            " WHERE lid=? AND kind<>'work' ORDER BY seq", (row["name"],)).fetchall()
+    finally:
+        conn.close()
+    if len(rows) < 2:
+        return None
+    kms = [r["km"] for r in rows if r["km"] is not None]
+    base = min(kms) if kms else None
+    stops = []
+    for r in rows:
+        km = round(r["km"] - base, 1) if (r["km"] is not None and base is not None) else None
+        stops.append({"seq": r["seq"], "name": r["name"], "km": km,
+                      "kind": r["kind"], "cls": r["cls"], "section": r["section"]})
+    return {"name": row["name"], "kind": row["kind"], "cats": row["cats"],
+            "kmMin": row["km_min"], "kmMax": row["km_max"],
+            "totalKm": row["total_km"], "nStop": row["n_stop"],
+            "kmDesc": row["km_desc"] or 0, "stops": stops}
+
+
 def merge_catalog_nodes(line_name: str, names: List[str]) -> List[str]:
     """命名线路的站序里常漏掉线路所（宝成线少了灭火沟线路所、长图线少了西山线路所）。
 

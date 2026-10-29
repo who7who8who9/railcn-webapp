@@ -148,6 +148,30 @@ railcn/
       资料库自己的线名查不到（这也是「搜陇海西成联络线冒出侯西线资料卡」的原因）
     - 一次性修正用 `scripts/refix_catalog_match.py`（默认 dry-run，`--apply` 先备份库）
 
+16. **第五套来源：china-emu（`line_ce` / `line_ce_stop`），补里程 + 补站序兜底。**
+    `scripts/fetch_chinaemu.py` 抓 `china-emu.cn/RailRoads/`（骨干 133 / 区域 116 / 市域 62 /
+    枢纽联络线 385，去重 660 条），`import_chinaemu.py` 入库。它是**独立表，不并进 line_catalog**
+    —— 现有四套已经靠线名字符串硬绑，再塞一套只会更乱。
+    - **它的独特价值是逐站计价里程**：资料库 10377 行站序只有 5420 行有里程，277 条线路里程全空
+      （侯西线 42 站一个都没有）。china-emu 每站都有到起点的里程。
+    - **里程是 K 里程（全线累计），不是段内里程**：陇海铁路西宝段是 K1073→K1256，段长 183 km。
+      `total_km` 是 `km_max - km_min`，用末站值会算成 1256。
+    - **桥隧行不能取里程**：`/RailRoads/Construction/` 那些行（丹昆特大桥、大胜关长江大桥）
+      写的是桥隧**自身长度（米）**，163763 是 164 km 的桥，不是里程。入库时 `kind='work'`，
+      `railcore.ce_stops()` 会滤掉。
+    - **站名带 `[上行]` / `[车场]` 后缀**，上下行分列成两行，`_ce_name()` 负责清洗。
+    - **抓取要防空壳页**：约 17 条第一次会返回 5 KB「只有标题没有站序」的 200 页
+      （池黄高速铁路、黎湛铁路），重抓一次就正常。`_looks_empty()` 判空并重试 3 次。
+    - **站序选择用 OSM 走向长度当裁判**：两个来源都有时，取总长更接近 OSM 几何长度的那个。
+      兰新线 OSM 2362 km，资料库给它「兰中城际线」49 km（错配），china-emu 给「兰新铁路」2423 km → 选后者；
+      沪昆高速线 OSM 2054 km，资料库给「沪杭高铁」158 km（错配），china-emu 给 2252 km → 选后者。
+      差距 <15% 时仍按老规矩用资料库，不无事生非。
+    - **补里程用 `scripts/fill_catalog_km.py`**：只填 `km IS NULL`，两边共有站算中位数偏移再平移，
+      填完必须单调不减，否则整条跳过。已补 55 条线路 400 站，里程全空的从 277 降到 233。
+    - 回归 `scripts/test_chinaemu.py`（守 7 件事），对账 `scripts/report_chinaemu.py`。
+    - **遗留**：资料库还有 39 条「小资料挂大干线」的错配（马坊支线→京哈线、库俄线→南疆线、
+      南昌西环线→京九线…），站序包含关系能判，但需要再跑一轮修正。
+
 ## 6. 前端约定
 
 - 5 个页签：`车站/线路`、`站站查询`、`数据下载`、`历史数据`、`数据校对`；状态都在全局 `CU` 对象里。
@@ -157,13 +181,13 @@ railcn/
   非客运节点；`.list:empty{display:none}`）——详见 `webapp/README.md` 的同名章节。
 - `cuLoad()` 带请求序号 `CU.loadSeq`，连点筛选 / 搜索时旧响应整包丢弃（否则列表会被旧结果盖住）。
 
-## 7. 回归脚本（18 个，改完必跑）
+## 7. 回归脚本（19 个，改完必跑）
 
 ```bash
 for f in test_chain test_line_km test_line_stations test_nm_stations test_osm_extras \
          test_station_loose test_tl_stops test_geo_toggle test_dock_speed test_code_alias \
          test_routestore test_nm_insert test_curate_refresh test_curate_sync test_net_form \
-         test_via_nodes test_lineseg test_catalog_match; do
+         test_via_nodes test_lineseg test_catalog_match test_chinaemu; do
   "C:/Users/Administrator/AppData/Local/Programs/Python/Python313/python.exe" scripts/$f.py
 done
 ```
@@ -176,6 +200,7 @@ done
 | `test_via_nodes` | 经由选站能选到线路所（沪春线春申南所、宝成线灭火沟线路所）、节点插入位置、只在资料库的线路也出站序 |
 | `test_lineseg` | 分段线借整条线的几何并按首末站裁剪（元昆段 257.7 / 成攀段 725.4）、裁不出如实退整条（宁西线断 7 截）、只有 OSM 的线名补站序（成昆 133 站 / 京哈 37 站）、京港两段隔 407 km 拒绝拼、UI 标「借…裁出本段」|
 | `test_catalog_match` | 资料库不会挂到小联络线上（侯西线 42 站不能匹配陇海西成联络线 2 站）、分段关系不被误杀（京石高铁 → 京广高速线）、搜侯西线拿到 42 站 288.5 km 且 OSM 走向在 |
+| `test_chinaemu` | china-emu 表在且行数够、桥隧行没混进站序、match_key 两套命名同键、兰新线纠回 118 站（不是兰中城际 6 站）、资料库没有的线名能补出站序、杭深铁路补出 50+ 站里程、首末站里程口径对 |
 | `test_chain` | 车次合并（中途换号）与检索 |
 | `test_line_km` / `test_line_stations` | 线路里程双模式、站序编辑 |
 | `test_nm_stations` / `test_station_loose` | 新增线路站名并集、站名带「站」也能搜 |

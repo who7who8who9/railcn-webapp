@@ -1126,12 +1126,13 @@ button.vseg:not(.picked):hover::after{opacity:1}
 }
 
 /* ---------- 站序来源切换条（同名多来源，系统不替用户挑） ---------- */
-.ln-src{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:8px}
+.ln-src{display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin-top:8px}
 .ln-src .lab{font-size:11px;color:var(--muted);font-weight:500}
-.ln-src .hint{font-size:11px;color:var(--muted);font-style:normal;opacity:.8}
+/* 说明文字独占一行：跟按钮挤一行会把最后一个来源徽标顶到下一行，看着像掉队 */
+.ln-src .hint{flex:1 0 100%;font-size:11px;color:var(--muted);font-style:normal;opacity:.8;margin-top:-1px}
 .ln-src .srcb{
-  font-size:11.5px;font-weight:500;color:var(--muted);background:#fff;
-  border:1px solid var(--line);border-radius:6px;padding:2px 8px;line-height:1.7;
+  font-size:11px;font-weight:500;color:var(--muted);background:#fff;
+  border:1px solid var(--line);border-radius:6px;padding:2px 6px;line-height:1.7;
   cursor:pointer;white-space:nowrap;user-select:none;
   transition:background .1s,color .1s,border-color .1s;
 }
@@ -1143,10 +1144,10 @@ button.vseg:not(.picked):hover::after{opacity:1}
 
 /* 默认勾选：★ 是「这条线全项目都用这份站序」，和「临时看这份」分开两个热区。
    勾上以后填实心黄，不勾是灰的空星，mouseover 才亮。 */
-.ln-src .srcwrap{display:inline-flex;align-items:center;gap:2px}
+.ln-src .srcwrap,.suggest .si .sw{display:inline-flex;align-items:center;gap:1px;margin-left:4px}
 .ln-src .pick,.suggest .si .pick{
-  font-style:normal;font-size:12px;line-height:1;cursor:pointer;
-  color:#c8d2e0;padding:2px 1px;user-select:none;transition:color .1s,transform .1s;
+  font-style:normal;font-size:13px;line-height:1;cursor:pointer;
+  color:#9aa9bd;padding:2px 2px;user-select:none;transition:color .1s,transform .1s;
 }
 .ln-src .pick:hover,.suggest .si .pick:hover{color:#e8a33d;transform:scale(1.2)}
 .ln-src .pick.on,.suggest .si .pick.on{color:#e8a33d}

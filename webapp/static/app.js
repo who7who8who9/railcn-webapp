@@ -2695,16 +2695,15 @@ function lnRenderHead() {
       const eff = d.pickedFrom || d.srcPick || '';
       const pick = d.srcPick || '';
       return `<div class="ln-src">
-        <span class="lab">站序来源</span>
         <b class="srcb${eff ? '' : ' on'}" data-from=""
-           title="系统按走向长度在资料库 / china-emu 之间挑，都没有才用 OSM">系统默认</b>
+           title="站序来源 —— 系统按走向长度在资料库 / china-emu 之间挑，都没有才用 OSM">系统默认</b>
         ${(d.sources || []).map(v => `<span class="srcwrap">
            <i class="pick${pick === v.source ? ' on' : ''}" data-pick="${esc(v.source)}"
               title="${pick === v.source ? '已设为全项目默认，点一下取消' : '设为默认：之后所有用到这条线的地方都按这份站序'}">★</i>
            <b class="srcb${eff === v.source ? ' on' : ''}" data-from="${esc(v.source)}"
               title="${esc(v.label)}：${v.n} 站 · ${lnKmText(v.km)}${v.first ? `\n${esc(v.first)} → ${esc(v.last)}` : ''}">${
               esc(LNSRC_SHORT[v.source] || v.label)} ${v.n}站</b></span>`).join('')}
-        <em class="hint">点站名临时看这份 · 点 ★ 设为默认${pick ? `（当前默认：${esc(LNSRC_SHORT[pick] || pick)}）` : ''}</em>
+        <em class="hint">点站名临时看这份 · 点 ★ 设为默认${pick ? `（默认：${esc(LNSRC_SHORT[pick] || pick)}）` : ''}</em>
       </div>`;
     })() : ''}
     ${LN.notice ? `<div class="ln-notice">${esc(LN.notice)}</div>` : ''}`;

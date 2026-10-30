@@ -5633,7 +5633,10 @@ function cbPaintList(box, q, noHilite) {
   pop.innerHTML = rows.length
     ? rows.map((r, k) => {
       const mt = r.custom ? '用这个名称'
-        : [r.n ? `${r.n} 站` : '', lnKmText(r.totalKm), r.kmManual ? '人工' : '']
+        : [r.n ? `${r.n} 站` : '', lnKmText(r.totalKm), r.kmManual ? '人工' : '',
+           /* 线路库没收的线也列出来了（合新高速线只在 OSM / china-emu 里有站序），
+              标一句来源，免得用户以为选错了东西 */
+           r.inLib === false ? `未收进库 · ${LNSRC_SHORT[r.src] || r.src}` : '']
           .filter(Boolean).join(' · ');
       return `<div class="cb-item${k === CB.idx ? ' active' : ''}${r.custom ? ' custom' : ''}"
         data-k="${k}"><span class="nm">${esc(r.name)}</span><span class="mt">${esc(mt)}</span></div>`;

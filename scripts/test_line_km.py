@@ -4,16 +4,61 @@
 用法：
     python scripts/test_line_km.py           # 累计模式：曹庄 -、杨柳青 163
     python scripts/test_line_km.py --seg     # 段距模式：标 - 后点 ≈ 估算值
+
+**会写真实库，所以开场先备份京沪线的人工站序、跑完原样还原**（以前不还原，
+每跑一次就把当次界面上那份站序（常常是 OSM 的 166 站）落成「人工站序」，
+京沪线的默认视图就被测试改掉了）。
 """
+import json
 import os
 import sys
 import tempfile
+import urllib.parse
+import urllib.request
+
 from playwright.sync_api import sync_playwright
 
 MODE = "seg" if "--seg" in sys.argv else "cum"
 URL = "http://127.0.0.1:8686/"
+LINE = "京沪线"
 # 调试截图放临时目录，不要落进仓库的 docs/
 SHOT = os.path.join(tempfile.gettempdir(), "railcn-line-km")
+
+
+def _api(path, body=None):
+    url = URL.rstrip("/") + path
+    req = urllib.request.Request(
+        url, data=json.dumps(body).encode() if body is not None else None,
+        headers={"Content-Type": "application/json"},
+        method="POST" if body is not None else "GET")
+    return json.load(urllib.request.urlopen(req, timeout=180))
+
+
+def snap_override():
+    """跑之前这条线有没有人工站序；有就整份记下来"""
+    try:
+        d = _api("/api/line?q=" + urllib.parse.quote(LINE))
+    except Exception:                        # noqa: BLE001
+        return None
+    ov = d.get("override") or {}
+    if not ov:
+        return None
+    return {"stops": [{"name": s["name"], "km": s.get("km")} for s in d.get("stations") or []],
+            "note": ov.get("note") or ""}
+
+
+def restore_override(snap):
+    """还原：本来没有 → 清掉这次写进去的；本来有 → 按备份写回"""
+    try:
+        if snap:
+            _api("/api/line/stations", {"name": LINE, "stations": snap["stops"],
+                                       "note": snap["note"]})
+            print("  已还原京沪线原来的人工站序（%d 站）" % len(snap["stops"]))
+        else:
+            _api("/api/line/stations/clear", {"name": LINE})
+            print("  已清掉本次测试写下的京沪线人工站序")
+    except Exception as e:                   # noqa: BLE001
+        print("  ⚠ 还原失败：%s" % e)
 
 
 def rows(pg, tag, names="曹庄|杨柳青|天津西|周李庄"):
@@ -56,6 +101,14 @@ def focus_row(pg, name):
 
 
 def main():
+    snap = snap_override()
+    try:
+        run()
+    finally:
+        restore_override(snap)
+
+
+def run():
     with sync_playwright() as p:
         b = p.chromium.launch()
         pg = b.new_page(viewport={"width": 1440, "height": 900})

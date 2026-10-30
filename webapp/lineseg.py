@@ -943,6 +943,62 @@ def line_sources(name: str) -> List[dict]:
     return out
 
 
+def line_names_extra(limit: int = 4000) -> List[dict]:
+    """线路库**没有**、但别的来源能给出站序的线名（数据校对的线路下拉要用）
+
+    数据校对补经由时的线路下拉原来只列线路库（`cnrail.search_line`），于是
+    「合新高速线」这种只在 OSM（6 站）/ china-emu（10 站）里有站序的线根本
+    选不到 —— 用户搜遍了都找不到，只能以为系统没收录。
+
+    这里把四套来源里「有 ≥2 站站序、线路库里没有」的线名并出来：
+    资料库（有站表但还没对上线路库那条）→ china-emu（带线路所和计价里程）
+    → OSM（几何插值，覆盖最广，只留国内运营/在建/规划）。
+    返回项带 `src`，界面据此标「未收进线路库（OSM）」，用户知道选的是哪一份。
+    """
+    try:
+        have = {cnrail._key(x.get("name") or "") for x in cnrail.search_line("", 20000)}
+    except Exception:                        # noqa: BLE001
+        have = set()
+    out: List[dict] = []
+    seen = set(have)
+
+    def add(name, n, km, src) -> None:
+        nm = re.sub(r"\s+", "", str(name or ""))
+        try:
+            n = int(n or 0)
+        except (TypeError, ValueError):
+            n = 0
+        if not nm or n < 2:
+            return
+        k = cnrail._key(nm)
+        if k in seen:                        # 同一条线在几套来源里叫法一样，只留先到的
+            return
+        seen.add(k)
+        out.append({"name": nm, "n": n, "totalKm": km, "src": src,
+                    "label": _SRC_LABEL.get(src, src)})
+
+    # 1) 线路资料库：有站表、还没和线路库对上
+    try:
+        for rec in cnrail.catalog_search("", limit, only_unmatched=True):
+            add(rec.get("name"), rec.get("n_stop"), rec.get("length_km"), "catalog")
+    except Exception:                        # noqa: BLE001
+        pass
+
+    # 2) china-emu / 3) OSM：直接读表（OSM 剔掉境外和没开工的）
+    for sql, src in (
+            ("SELECT name, n_stop, total_km FROM line_ce WHERE n_stop>=2", "chinaemu"),
+            ("SELECT name, n_stop, total_km FROM line_osm WHERE n_stop>=2"
+             " AND in_china=1 AND status IN ('运营中','在建','规划')", "osm")):
+        try:
+            with railcore.db() as conn:
+                rows = list(conn.execute(sql))
+        except Exception:                    # noqa: BLE001  表还没建好时静默降级
+            continue
+        for r in rows:
+            add(r["name"], r["n_stop"], r["total_km"], src)
+    return out
+
+
 def survey(names: Optional[Sequence[str]] = None) -> List[dict]:
     """盘点线名两侧的缺口（给界面上的「补全」清单用）
 

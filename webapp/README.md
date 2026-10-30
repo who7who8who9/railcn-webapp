@@ -995,7 +995,7 @@ python scripts/report_line_names.py --out docs/line-names-report.md
 | `GET /api/curate/list` | `filter`、`q`、`limit`、`offset` | 校对清单，`filter=todo\|via\|via0\|km\|coord\|pending\|manual\|synced\|clean\|all`；每项带 `codeLabel` / `codes` / `viaOrigin` |
 | `GET /api/curate/detail` | `code` | 某车次的**自动推断基线**（绕开人工校正）+ 已有校正（含 `source` / `basedDate`）+ 经停站 + `gapCands`（缺口候选线路）+ `odMates`（同起讫点的其它车次与停站概况，每项带 `viaFits`：它的停站是否全在这条经由上；已校正/已同步的不列入，只报 `hidden` 趟数）+ `overrideStale`（站表变没变） |
 | `GET /api/curate/mate` | `code` | 某趟车的停站明细（站名 / 到发时刻 / 跨日 / 每站车次号），给「同起讫点 → 停站详情」展开用 |
-| `GET /api/curate/lineNames` | — | 全部线路（带站数 / 总里程，给编辑器下拉用；`items[]` 为对象，`names[]` 是纯名字） |
+| `GET /api/curate/lineNames` | — | 补经由时的线路下拉：线路库全部线路 + **库外但有站序的线**（资料库 / china-emu / OSM，`inLib=false` 带 `src`）。库内排在库外前面，各自按站数降序；`items[]` 为对象（`name`/`n`/`totalKm`/`src`/`inLib`），`names[]` 是纯名字 |
 | `POST /api/curate/refresh` | `code` | 线路库改过之后重算这趟车：重载线路库 → 重算自动基线 → 刷新清单摘要；返回详情 + `library`（线路库条数）+ `summary` |
 | `GET /api/curate/cands` | `from`、`to` | 两站之间的候选线路（`line` / `src` / `srcCn`），给「点选候选段」用 |
 | `POST /api/curate/scan` · `GET /api/curate/stop` | — | 全量扫描开始 / 停止（后台线程，进度可轮询） |

@@ -666,7 +666,12 @@ def adapt_via_to_stops(segs: List[dict], stops: List[dict]) -> List[dict]:
 
 
 def _line_span_names(line: str, cache: Dict[str, Optional[List[str]]]) -> Optional[List[str]]:
-    """某条线的完整站序（含线路所这类节点）。线路库、资料库都查不到 → None"""
+    """某条线的完整站序（含线路所这类节点）。线路库、资料库都查不到 → None
+
+    最后那一层兜底是给「线路库没收、只在 china-emu / OSM 里有站序」的线
+    （合新高速线）用的：补经由时用户能选到它，覆盖判断和展开中间站也得认它，
+    否则保存时会报「线路库里没有这条线」，等于选了也白选。
+    """
     key = cnrail._key(line or "")
     if key in cache:
         return cache[key]
@@ -679,6 +684,13 @@ def _line_span_names(line: str, cache: Dict[str, Optional[List[str]]]) -> Option
             names = catalog_stop_names(line) or None
     except Exception:                                # noqa: BLE001
         names = None
+    if not names:
+        try:
+            import lineseg                            # 延迟导入：lineseg 反过来引用本模块
+            got = lineseg.stations_for(line) or {}
+            names = [s.get("name") for s in (got.get("stops") or []) if s.get("name")] or None
+        except Exception:                            # noqa: BLE001
+            names = None
     cache[key] = names
     return names
 

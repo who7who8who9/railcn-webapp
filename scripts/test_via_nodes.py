@@ -3,6 +3,11 @@
 以前 `cuNotStation` 把「XX所 / 中继站」从候选里一律剔掉，线路所根本选不到 ——
 而经由恰恰经常要在这些所转线。现在候选按站序列出、右侧标「线路所」；
 命名线路站序里没有的，用资料库的同名站序补回来（只补节点，客运站顺序不动）。
+
+顺带守「线路下拉要能选到线路库没收的线」：合新高速线只在 OSM（6 站）/
+china-emu（10 站）里有站序，线路库没收录。以前下拉只列 `cnrail.search_line()`，
+用户搜遍都找不到它；现在库外的也并进来并标「未收进库 · OSM」，
+`_line_span_names` 也认它（否则选了也报「线路库里没有这条线」）。
 """
 import json
 import os
@@ -50,6 +55,35 @@ def check_api(bad):
         bad.append("只在资料库里的线路拿不到站序（银西高铁只有 %d 站）" % len(x["items"]))
 
 
+def check_line_names(bad):
+    """线路下拉：线路库没收、但别的来源有站序的线也要能选到（合新高速线）"""
+    d = get("/api/curate/lineNames")
+    items = d.get("items") or []
+    extra = [x for x in items if x.get("inLib") is False]
+    print("线路下拉：%d 条（库内 %d / 库外 %d）"
+          % (len(items), len(items) - len(extra), len(extra)))
+    if not extra:
+        bad.append("线路下拉里一条库外线路都没有（OSM / china-emu 独有的选不到）")
+
+    hit = [x for x in items if x["name"] == "合新高速线"]
+    if not hit:
+        bad.append("合新高速线没进线路下拉")
+    else:
+        x = hit[0]
+        print("合新高速线：%s 站 · %s · %s%s"
+              % (x.get("n"), x.get("totalKm"), x.get("src"),
+                 "" if x.get("inLib") else "（未收进库）"))
+        if not x.get("n"):
+            bad.append("合新高速线条目没带站数：%s" % x)
+        if not x.get("inLib") and x.get("src") not in ("osm", "chinaemu", "catalog"):
+            bad.append("合新高速线的来源没标对：%s" % x)
+
+    s = stops("合新高速线")
+    if len(s.get("items") or []) < 5:
+        bad.append("合新高速线的站序拿不到（选了也用不了）：%s"
+                   % (s.get("items") or s))
+
+
 def check_ui(bad):
     with sync_playwright() as p:
         br = p.chromium.launch(args=["--no-proxy-server"])
@@ -66,6 +100,25 @@ def check_ui(bad):
         pg.evaluate("c => cuOpen(c)", "C2371")       # 上海南 → 合肥南，首段沪春线
         pg.wait_for_selector("#ceViaRows .ve-row", timeout=30000)
         row = pg.locator("#ceViaRows .ve-row").first
+
+        # 线路框里打「合新」：库外那条也要出现在下拉里，并标出来源
+        lsel = '#ceViaRows .ve-row:first-child .combo[data-cbkind="line"]'
+        row.locator('.combo[data-cbkind="line"] input').fill("合新")
+        pg.wait_for_timeout(500)
+        pg.click(lsel + " .cb-toggle")
+        pg.wait_for_timeout(600)
+        litems = pg.evaluate(
+            """sel => [...document.querySelectorAll(sel + ' .cb-item')].map(e => ({
+                   n: e.querySelector('.nm').textContent.trim(),
+                   mt: e.querySelector('.mt').textContent.trim()}))""", arg=lsel)
+        print("线路下拉（合新）：", [(i["n"], i["mt"]) for i in litems])
+        if not any(i["n"] == "合新高速线" for i in litems):
+            bad.append("线路下拉里搜不到合新高速线：%s" % [i["n"] for i in litems])
+        elif not any("未收进库" in i["mt"] for i in litems if i["n"] == "合新高速线"):
+            bad.append("合新高速线没标「未收进库」：%s" % litems)
+        pg.keyboard.press("Escape")
+        pg.wait_for_timeout(200)
+
         row.locator('.combo[data-cbkind="line"] input').fill("沪春线")
         pg.wait_for_timeout(1400)
 
@@ -113,6 +166,7 @@ def check_ui(bad):
 def main():
     bad = []
     check_api(bad)
+    check_line_names(bad)
     check_ui(bad)
     print("截图：", SHOT)
     if bad:
@@ -120,7 +174,7 @@ def main():
         for b in bad:
             print("  -", b)
         raise SystemExit(1)
-    print("\nOK：线路所能在候选里选到，节点位置正确，UI 无报错")
+    print("\nOK：线路所能在候选里选到，节点位置正确，库外线路也能选，UI 无报错")
 
 
 if __name__ == "__main__":

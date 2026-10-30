@@ -743,10 +743,25 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/curate/lineNames":
             items = [{"name": l["name"], "n": l.get("n"), "totalKm": l.get("totalKm"),
-                      "kmComplete": l.get("kmComplete"), "kmManual": l.get("kmManual", False)}
+                      "kmComplete": l.get("kmComplete"), "kmManual": l.get("kmManual", False),
+                      "src": "custom" if l.get("custom") else "lib", "inLib": True}
                      for l in cnrail.search_line("", 10000)]
-            # 干线在前（站数多的排前面），下拉里默认先看到主要线路
-            items.sort(key=lambda x: (-(x.get("n") or 0), x["name"]))
+            # **库外线路也要能选**：合新高速线只在 OSM（6 站）/ china-emu（10 站）里有
+            # 站序，线路库没收，补经由时原来根本选不到，只能以为系统没这条线。
+            # 干线在前（站数多的排前面），库内的排在库外前面。
+            try:
+                names = {cnrail._key(x["name"]) for x in items}
+                for e in lineseg.line_names_extra():
+                    if cnrail._key(e["name"]) in names:
+                        continue
+                    names.add(cnrail._key(e["name"]))
+                    items.append({"name": e["name"], "n": e["n"], "totalKm": e["totalKm"],
+                                  "kmComplete": None, "kmManual": False,
+                                  "src": e["src"], "inLib": False,
+                                  "srcLabel": e.get("label") or e["src"]})
+            except Exception:                # noqa: BLE001
+                pass
+            items.sort(key=lambda x: (0 if x.get("inLib") else 1, -(x.get("n") or 0), x["name"]))
             return self.json({"items": items, "count": len(items),
                               "names": [x["name"] for x in items]})
 

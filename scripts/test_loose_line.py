@@ -14,13 +14,16 @@
 用法：python scripts/test_loose_line.py      （需要服务在 8686 跑着）
 """
 import json
+import sqlite3
 import urllib.error
 import urllib.parse
 import urllib.request
 
 BASE = "http://127.0.0.1:8686"
+DB = "webapp/data/rail.db"
 LINE = "侯西线"          # 资料库的线名（规范名）
 ALIAS = "侯西铁路"       # 资料库的 title，也是用户会搜的词
+SNAP = None              # 跑之前库里已有的那条自建「侯西线」（有就备份，跑完还原）
 
 _fail = 0
 
@@ -58,7 +61,51 @@ def drop():
         pass
 
 
+def snap_custom():
+    """库里已经有自建「侯西线」时先整条备份（站序 + 备注 + 默认来源）
+
+    这个脚本要拿一条「线路库没有」的线做实验，以前的做法是「有就删掉」——
+    2026-10-30 真把用户手工整理过的 28 站侯西线删了（站序只存在库里，
+    删掉就没了，靠 WAL 里的旧页才捞回来）。现在改成：先备份，跑完原样还原。
+    """
+    d = line_of(LINE)
+    if not d.get("custom"):
+        return None
+    stops = [{"name": s["name"], "km": s.get("km")} for s in d.get("stations") or []]
+    note = ""
+    pick = ""
+    try:
+        with sqlite3.connect(DB) as c:
+            row = c.execute("SELECT note FROM line_custom WHERE name=?", (LINE,)).fetchone()
+            note = (row[0] if row else "") or ""
+            row = c.execute("SELECT source FROM line_src_pick WHERE name=?", (LINE,)).fetchone()
+            pick = (row[0] if row else "") or ""
+    except sqlite3.DatabaseError:
+        pass
+    return {"stops": stops, "note": note, "pick": pick}
+
+
+def restore(snap):
+    if not snap:
+        return
+    try:
+        post("/api/line/new", {"name": LINE, "stations": snap["stops"],
+                               "note": snap["note"], "replace": True})
+        if snap.get("pick"):
+            post("/api/line/src-pick", {"name": LINE, "source": snap["pick"]})
+        print("  已把原先那条「%s」原样还原（%d 站）" % (LINE, len(snap["stops"])))
+    except Exception as e:                   # noqa: BLE001
+        print("  ⚠ 还原失败，请手工恢复：%s" % e)
+
+
 def main():
+    global SNAP
+    SNAP = snap_custom()
+    if SNAP:
+        print("  ⚠ 库里已有一条自建「%s」（%d 站）：先备份，跑完原样还原"
+              % (LINE, len(SNAP["stops"])))
+        drop()
+
     print("== 规范名：搜资料库标题，出来的是资料库线名")
     d = line_of(ALIAS)
     ck(d["name"] == LINE, "搜「%s」得到「%s」（不是自己也叫 %s）" % (ALIAS, d["name"], ALIAS))
@@ -67,9 +114,6 @@ def main():
     ck(d["n"] == 42, "资料库 42 站：%s" % d["n"])
 
     base = [s["name"] for s in d["stations"]]
-    if line_of(LINE).get("custom"):
-        print("  上一次没收拾干净，先删掉自建的那条")
-        drop()
 
     print("== 保存站序：库外的线自动收进线路库")
     stops = [{"name": base[1]}, {"name": base[0]}] + [{"name": x} for x in base[2:5]]
@@ -120,4 +164,5 @@ if __name__ == "__main__":
         code = main()
     finally:
         drop()
+        restore(SNAP)          # 用户本来就有一条，就放回去
     raise SystemExit(code)

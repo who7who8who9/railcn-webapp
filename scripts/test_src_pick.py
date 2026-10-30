@@ -297,12 +297,16 @@ def test_reverse_source():
 def test_reverse_loose():
     """线路库里没有、只有资料库站序的线：倒排只翻资料库那一份，不把线收编进库"""
     print("\n== 倒排：库外线路 ==")
-    if picks().get(CANON):
-        post("/api/line/src-pick", {"name": CANON, "source": ""})
     d = line_of(CANON)
     if d.get("custom"):
-        print("  跳过：%s 已经被收进线路库了" % CANON)
+        # 用户自己把侯西线收进线路库整理过了（28 站），别去动它 ——
+        # 特别别清它的默认来源，那是用户点的 ★
+        print("  跳过：%s 已经被收进线路库了（用户整理过 %s 站）" % (CANON, d.get("n")))
         return
+    # 临时把默认来源清掉，免得勾的默认干扰「指定 from=catalog」这条路径；跑完还原
+    keep = picks().get(CANON, "")
+    if keep:
+        post("/api/line/src-pick", {"name": CANON, "source": ""})
     before = overrides()
     first = d["stations"][0]["name"]
     try:
@@ -319,6 +323,8 @@ def test_reverse_loose():
     finally:
         post("/api/line/stations/reverse",
              {"name": CANON, "from": "catalog", "mode": "off"})
+        if keep:
+            post("/api/line/src-pick", {"name": CANON, "source": keep})
 
 
 def test_ui():

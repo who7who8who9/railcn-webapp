@@ -1950,12 +1950,16 @@ async function nmSave() {
   }
 }
 
-async function searchNet() {
+async function searchNet(from) {
+  /* from 是指定站序来源。注意它被直接挂成 click 监听器（13 行下面那句），
+     那时候第一个实参是 PointerEvent —— 不是字符串就当没指定，否则会把事件对象
+     拼进查询串变成 from=[object PointerEvent]，线路详情直接 404 */
+  if (typeof from !== 'string') from = '';
   const q = $('#netQ').value.trim();
   clearTimeout(netTimer);                       // 防止待触发的联想把下拉框又翻开
   $('#sugNet').classList.add('hidden');
   if (!q) return;
-  netKind === 'station' ? await showStation(q) : await showLine(q);
+  netKind === 'station' ? await showStation(q) : await showLine(q, null, from);
 }
 
 async function showStation(q) {
@@ -1966,7 +1970,13 @@ async function showStation(q) {
   box.innerHTML = `<div class="empty">查询 ${q} …</div>`;
   try {
     const d = await api('/api/station', { q });
-    if (!d.found) { box.innerHTML = `<div class="empty">车站库里没有「${q}」</div>`; return; }
+    if (!d.found) {
+      /* OSM 独有的车站（小会让站、支线上的乘降所）：档案里查不到，但知道它
+         在哪条线的第几公里。联想既然把它列出来了，就给一张 OSM 卡片，
+         别只回一句「没有」 */
+      if (d.osmOnly) { showOsmStation(d); return; }
+      box.innerHTML = `<div class="empty">车站库里没有「${q}」</div>`; return;
+    }
     const chips = (d.lines || []).map(l => `<button class="chip" data-line="${l}">${l}</button>`).join('');
     const svc = (d.services || []).map(s => `<span class="chip flat">${s}</span>`).join('');
     /* 档案里没有的站（货运支线 / 疏港线上的站）：没有「连接线路」，但能列出当天经停的车次；
@@ -2010,6 +2020,7 @@ async function showStation(q) {
         ${svc ? `<div class="l3">${svc}</div>` : ''}
         ${d.archive === false ? '' : `<div class="l3" style="margin-top:6px">连接线路 ${(d.lines || []).length} 条（点击可在地图查看）</div>
         <div class="l3 chips">${chips || '<span style="color:#9aa6ba">无</span>'}</div>`}
+        ${stOsmLines(d)}
       </div>
       <ul class="stops">
         <li class="stop"><div class="t"></div><div class="rail"><span class="dot"></span></div>
@@ -2019,7 +2030,7 @@ async function showStation(q) {
           <div class="name"><span class="n">本站终到车次</span><span class="s">本地库 ${d.trainsTo} 条</span></div>
           <div class="km"></div></li>
       </ul>
-      ${viaHtml}`;
+        ${viaHtml}`;
     det.classList.add('show');
     bindStationCoord(d);
     const stDel = $('#stDel');
@@ -2052,6 +2063,55 @@ async function showStation(q) {
   } catch (e) {
     box.innerHTML = `<div class="empty">查询失败：${e.message}</div>`;
   }
+}
+
+/* OSM 独有的车站卡片：只在 OSM 里有，档案和 12306 站表都没有 */
+function showOsmStation(d) {
+  const det = $('#netDetail');
+  const p = (d.points || [])[0] || {};
+  det.innerHTML = `
+    <div class="dhead">
+      <div class="l1"><span class="code">${esc(d.name)}</span>
+        <span class="tag manual" title="OSM 国铁车站（railway=station/halt），通过到线路中心线的距离归属到线上">OSM 独有</span>
+        ${p.railway === '乘降所' ? '<span class="tag">乘降所</span>' : ''}
+        ${p.ref ? `<span class="tag">编号 ${esc(p.ref)}</span>` : ''}
+        ${(d.points || []).length > 1 ? `<span class="tag warn">全国 ${d.points.length} 个同名点</span>` : ''}</div>
+      <div class="l2">${p.lat != null
+        ? `纬度 ${(+p.lat).toFixed(6)} · 经度 ${(+p.lon).toFixed(6)}`
+        : '坐标缺失'}</div>
+      <div class="l3" style="margin-top:6px">线路库和 12306 站表都没收录这个站，下列信息全部来自 OSM</div>
+      ${stOsmLines(d)}
+    </div>`;
+  det.classList.add('show');
+  $('#netList').innerHTML = '';
+  $$('#netDetail .chip[data-line]').forEach(b =>
+    b.addEventListener('click', () => showLine(b.dataset.line)));
+  if (p.lat != null) {
+    MapView.setRoute({ code: d.name, stops: (d.points || []).map((x, i) =>
+      ({ i: i + 1, name: x.name, lat: x.lat, lon: x.lon })) });
+    MapView.fit();
+  }
+  $('#hud').classList.add('hidden');
+  $('#dock').classList.add('hidden');
+}
+
+/* OSM 归属线路：这个站被哪几条线经过。
+   归属是「距离 + 几何走向」判的 —— 站插值到线路中心线、留下垂直距离 dist_m，
+   distM 越大说明它其实离正线越远（支线引入、站场股道误判都在这种地方），
+   所以超过 300 m 的那几条标成橙色，别照单全收。 */
+function stOsmLines(d) {
+  const ls = d.osmLines || [];
+  if (!ls.length) return '';
+  const rows = ls.slice(0, 12).map(l => `
+      <div class="row${l.distM > 300 ? ' off' : ''}">
+        <span class="ld"><button class="chip" data-line="${esc(l.line)}">${esc(l.line)}</button></span>
+        <span class="lk">${l.km != null ? `K${(+l.km).toFixed(1)}` : ''}${
+          l.status && l.status !== '运营中' ? ` · ${esc(l.status)}` : ''}</span>
+        <span class="dist" title="站到线路中心线的垂直距离">${l.distM != null ? `${l.distM} m` : ''}</span>
+      </div>`).join('');
+  return `<div class="st-osml">
+      <div class="h">OSM 归属线路 ${ls.length} 条<em>按到中心线的距离由近及远 · 点击查看线路</em></div>
+      ${rows}</div>`;
 }
 
 /** 备注里已经用「原名」标过原写法了，别重复显示 */
@@ -2615,6 +2675,9 @@ function lnRenderHead() {
       ${d.stopsFrom === 'parts'
         ? `<span class="tag manual" title="站序由同名前缀的分段线接起来：${esc((d.stopsParts || []).join(' + '))}">站序由分段拼</span>`
         : ''}
+      ${d.stopsFrom === 'osm'
+        ? `<span class="tag manual" title="站序取自 OSM：车站插值到线路几何上，站点最全（含并线枢纽站），里程是沿线里程">站序来自 OSM</span>`
+        : ''}
       ${d.custom ? '<span class="tag manual">自建</span>' : ''}
       ${d.stopsManual ? '<span class="tag manual">站序人工</span>' : ''}
       <span class="ln-acts">
@@ -2625,8 +2688,21 @@ function lnRenderHead() {
       </span>
     </div>
     <div class="l2">${d.aliasOf ? `「${esc(d.aliasOf)}」在资料库里对应这条线 · ` : ''}坐标覆盖 ${d.coordCoverage}%${lnMissCoordNote(d)} · 点击站点查看所属线路 · <span id="lnFoot"></span></div>
+    ${(d.sources || []).length > 1 ? `<div class="ln-src">
+        <span class="lab">站序来源</span>
+        <b class="srcb${d.pickedFrom ? '' : ' on'}" data-from=""
+           title="系统按走向长度在资料库 / china-emu 之间挑，都没有才用 OSM">系统默认</b>
+        ${(d.sources || []).map(v => `<b class="srcb${d.pickedFrom === v.source ? ' on' : ''}"
+           data-from="${esc(v.source)}"
+           title="${esc(v.label)}：${v.n} 站 · ${lnKmText(v.km)}${v.first ? `\n${esc(v.first)} → ${esc(v.last)}` : ''}">${
+           esc(LNSRC_SHORT[v.source] || v.label)} ${v.n}站</b>`).join('')}
+        <em class="hint">同名线路各来源站序不一样，点一个用哪个</em>
+      </div>` : ''}
     ${LN.notice ? `<div class="ln-notice">${esc(LN.notice)}</div>` : ''}`;
   lnRenderInfo();
+  $$('#lnHead .ln-src .srcb').forEach(b => b.addEventListener('click', () => {
+    showLine(d.name, null, b.dataset.from);
+  }));
   const stopsBtn = $('#lnStopsBtn');
   if (stopsBtn) stopsBtn.addEventListener('click', () => openLineStops(d));
   const stopsReset = $('#lnStopsReset');
@@ -2949,12 +3025,14 @@ function lnBindGeom() {
   });
 }
 
-async function showLine(q, notice) {
+async function showLine(q, notice, from) {
   const box = $('#netList'), det = $('#netDetail');
   try {
     det.classList.remove('show');
     box.innerHTML = `<div class="empty">查询线路 ${q} …</div>`;
-    const d = await api('/api/line', { q });
+    /* from：指定站序来源（osm / chinaemu / catalog）。同一条线几个来源各有说法，
+       用户点了哪个就按哪个给，不再让系统替他挑 */
+    const d = await api('/api/line', { q, from: from || '' });
     LN.data = d;                       // 先挂上，lnDrawMap 要靠它取站点
     LN.notice = notice || null;        // 一次性提示（收进线路库之类），换线路就清掉
     LN.gdata = null;
@@ -3329,6 +3407,11 @@ async function showCatalog(id) {
   }
 }
 
+/* 来源徽标的短名：同一条线几个来源各说各的（客运站顺序 / 带线路所 / 几何插值），
+   不替用户挑，全摆出来让他点 */
+const LNSRC_SHORT = { lib: '线路库', custom: '自建', catalog: '资料库',
+                      chinaemu: 'china-emu', osm: 'OSM', parts: '分段拼' };
+
 async function suggestNet() {
   const q = $('#netQ').value.trim();
   const box = $('#sugNet');
@@ -3337,32 +3420,69 @@ async function suggestNet() {
     const d = netKind === 'station'
       ? await api('/api/stations', { q, limit: 10 })
       : await api('/api/lines', { q, limit: 8 });
-    // 线路：库里命中之外，再带上 OSM 里有、线路库没收的（「津霸」→ 津霸客运专线 + 津霸线）
-    const items = netKind === 'station'
-      ? (d.items || [])
-      : [...(d.items || []).map(x => ({ ...x, lib: true })),
-         ...(d.osm || []).map(x => ({ ...x, lib: false }))].slice(0, 12);
+    if (netKind === 'station') {
+      /* 车站：三个来源**一个都不合并**，同名的也照列（像 OSM 的「石家庄」和
+         站表里的「石家庄」不是一个口径），每行标上来源让用户自己点 */
+      const rows = [
+        ...(d.items || []).map(it => ({
+          v: it.name, n: it.name, src: it.src || (it.archive === false ? '12306 站表' : '线路档案'),
+          memo: it.hasCoord === false ? '无坐标' : esc(it.city || ''),
+          warn: it.hasCoord === false,
+        })),
+        ...(d.osm || []).map(it => ({
+          v: it.name, n: it.name, src: 'OSM',
+          memo: `${it.nLine ? it.nLine + ' 条线经过' : '未关联线路'}${it.railway === '乘降所' ? ' · 乘降所' : ''}`,
+          warn: false, osm: 1,
+        })),
+      ];
+      if (!rows.length) { box.classList.add('hidden'); return; }
+      box.innerHTML = rows.map(it =>
+        `<div class="si${it.warn ? ' nocoord' : ''}" data-v="${esc(it.v)}" data-osm="${it.osm || 0}"
+           title="${it.src === 'OSM' ? 'OSM 国铁车站：按到线路中心线的距离归属到线上' : '来源：' + it.src}">
+           <span>${esc(it.n)}</span>
+           <span class="c"><b class="ssrc s-${esc(it.src === 'OSM' ? 'osm' : it.src === '两边都有' ? 'both' : it.src === '12306 站表' ? 't123' : 'arch')}">${esc(it.src)}</b>${it.memo ? ' · ' + it.memo : ''}</span></div>`).join('');
+      box.classList.remove('hidden');
+      $$('#sugNet .si').forEach(el => el.addEventListener('click', () => {
+        $('#netQ').value = el.dataset.v;
+        box.classList.add('hidden');
+        searchNet();
+      }));
+      return;
+    }
+
+    /* 线路：库里命中的 + OSM 有、线路库没收的，**一个都不合并**。
+       每行下面挂来源徽标（线路库 212 站 / 资料库 89 站 / OSM 218 站），
+       点哪个进哪个；点行本身 = 走系统默认。 */
+    const vars = d.variants || {};
+    const items = [...(d.items || []).map(x => ({ ...x, lib: true })),
+                   ...(d.osm || []).map(x => ({ ...x, lib: false }))].slice(0, 12);
     if (!items.length) { box.classList.add('hidden'); return; }
-    /* 和站站查询那边共用 .si / .c 的样式（.sug-item 是早期写法，CSS 里没有它，
-       联想框会退化成一行没有内边距的裸文字） */
-    box.innerHTML = items.map(it => netKind === 'station'
-      ? `<div class="si${it.hasCoord === false ? ' nocoord' : ''}" data-v="${esc(it.name)}"
-           title="${it.archive === false ? '线路库还没收录这个站，资料来自 12306 站表' : ''}">
-           <span>${esc(it.name)}</span><span class="c">${esc(it.city || '')}</span></div>`
-      : `<div class="si" data-v="${esc(it.name)}" data-osm="${it.lib ? 0 : 1}"
-           data-stops="${it.lib || it.stopsN ? 1 : 0}">
+    box.innerHTML = items.map(it => {
+      const vs = vars[it.name] || [];
+      if (!vs.length) {                    // 一个站序都没查到的，按老样子一行说完
+        return `<div class="si" data-v="${esc(it.name)}" data-stops="0">
            <span>${esc(it.name)}</span>
-           <span class="c">${it.lib ? `${it.n} 站 · ${lnKmText(it.totalKm)}`
-                         : it.stopsN ? `${it.stopsN} 站 · 取自${
-                             it.stopsFrom === 'chinaemu' ? 'china-emu'
-                             : it.stopsFrom === 'parts' ? '分段线' : '资料库'} · ${it.km} km`
-                         : `${it.km} km · OSM 未收录`}</span></div>`).join('');
+           <span class="c">${it.km} km · 无从查站序</span></div>`;
+      }
+      const badges = vs.map(v => `<b class="srcb" data-v="${esc(it.name)}"
+           data-from="${esc(v.source)}" title="${esc(v.label)}：${v.n} 站 · ${lnKmText(v.km)}
+${esc(v.first || '')} → ${esc(v.last || '')}">${esc(LNSRC_SHORT[v.source] || v.label)} ${v.n}站</b>`).join('');
+      return `<div class="si multi" data-v="${esc(it.name)}" data-stops="1">
+         <div class="srow"><span>${esc(it.name)}</span>
+           <span class="c">${vs.length} 个来源${it.lib ? '' : ' · 线路库未收录'}</span></div>
+         <div class="srcb-row">${badges}</div></div>`;
+    }).join('');
     box.classList.remove('hidden');
-    $$('#sugNet .si').forEach(el => el.addEventListener('click', () => {
+    $$('#sugNet .srcb').forEach(el => el.addEventListener('click', ev => {
+      ev.stopPropagation();
       $('#netQ').value = el.dataset.v;
       box.classList.add('hidden');
-      /* 有站序的（资料库 / china-emu 能补）直接进线路详情，能改站序、能入库；
-         只有一条光走向的才走「按 OSM 补车站」那条路 */
+      showLine(el.dataset.v, null, el.dataset.from);
+    }));
+    $$('#sugNet .si').forEach(el => el.addEventListener('click', ev => {
+      if (ev.target.closest('.srcb')) return;
+      $('#netQ').value = el.dataset.v;
+      box.classList.add('hidden');
       if (el.dataset.stops === '1') searchNet();
       else showOsmLine(el.dataset.v);
     }));

@@ -493,6 +493,46 @@ def _ce_stops(name: str) -> Optional[dict]:
             "kmDesc": got.get("kmDesc") or 0}
 
 
+# 长度判不出高下时按这个顺序要：资料库最权威，china-emu 次之（含线路所与计价里程），
+# OSM 最后（覆盖最广但站是从几何插值出来的）
+_SRC_RANK = {"catalog": 0, "chinaemu": 1, "osm": 2}
+
+
+def _osm_stops(name: str) -> Optional[dict]:
+    """OSM（第六套来源）的线路站序。
+
+    三个来源里它补得最广：1727 条线、11788 个站次，专治「资料库和 china-emu
+    都没有」的线（瓦日线 44 站、嫩林线 43 站、红淖线 23 站）。
+
+    它的站序是从几何图上算出来的 —— 车站插值到最近的边上，所以会带进并线枢纽站
+    （role=secondary，京广线上能看到白云湖、江高镇），也没有 china-emu 那种
+    线路所节点。好在**每行自带坐标**，补出来的线不用依赖别人反查。
+    """
+    try:
+        got = railcore.osm_stops(name, match_key(name))
+    except Exception:                        # noqa: BLE001  新表缺失时静默降级
+        return None
+    if not got:
+        return None
+    stops: List[dict] = []
+    seen = set()
+    for s in got.get("stops") or []:
+        nm = _canon(s.get("name"))
+        if not nm or nm in seen:
+            continue
+        seen.add(nm)
+        c = cnrail.coord(nm)
+        stops.append({"name": nm, "km": s.get("km"), "role": s.get("role"),
+                      "lat": c[0] if c else s.get("lat"),
+                      "lon": c[1] if c else s.get("lon"),
+                      "seq": len(stops) + 1})
+    if len(stops) < 2:
+        return None
+    return {"stops": stops, "source": "osm", "sourceName": got.get("name"),
+            "totalKm": got.get("totalKm"), "lineType": got.get("lineType"),
+            "bridges": got.get("bridges") or 0}
+
+
 def _segments_of(parent: str) -> List[dict]:
     """库里以这个父线名开头的分段线（成昆线 → 成攀段、元昆段）"""
     out = []
@@ -564,22 +604,51 @@ def _chain_segments(parent: str, segs: List[dict]) -> Optional[dict]:
             "parts": [o["line"] for o in order], "totalKm": total}
 
 
-def stations_for(name: str) -> Optional[dict]:
+def stations_for(name: str, source: str = "") -> Optional[dict]:
     """OSM 线名 → 站序
 
-    两个来源都拿得到时，用 **OSM 走向长度当裁判**，取总长更接近的那个：
+    **source 指定来源时只取那一份，取不到就返回 None** —— 界面上同一条线有几个
+    来源的说法（线路库 89 站 / china-emu 154 站 / OSM 220 站），让用户自己点，
+    系统不再替他挑。source 为空才是「给个默认的」。
 
-      兰新线       OSM 2362 km：资料库给它 兰中城际线（49 km，错配）→ china-emu 兰新铁路（2423 km）✓
-      沪昆高速线   OSM 2054 km：资料库给它 沪杭高铁（158 km，错配）→ china-emu 沪昆高速铁路（2252 km）✓
-      成昆线       OSM 1022 km：资料库 成昆线（1096 km）✓
+    默认规则：
+      1. 资料库和 china-emu 都用走向长度当裁判，取总长更接近的那个：
+           兰新线      OSM 2362 km：资料库给它 兰中城际线（49 km，错配）→ china-emu 兰新铁路（2423 km）✓
+           沪昆高速线  OSM 2054 km：资料库给它 沪杭高铁（158 km，错配）→ china-emu 沪昆高速铁路（2252 km）✓
+           成昆线      OSM 1022 km：资料库 成昆线（1096 km）✓
+      2. 这两份都没有，才用 OSM 的（1727 条线里 1116 条只有它有站序）。
+      3. 还不行就拿同前缀的分段线拼。
 
-    资料库那边有 39 条这类「小资料挂到大干线」的历史错配（上一轮只修了反方向），
-    光看线名分不出「分段关系」和「错配」，但走向长度一比就清楚了。
-    两个都拿不到才去拿同前缀的分段线拼。
+    **OSM 不参加长度裁判**：它的线名是按 way 的 name 聚合的，拆段命名的线只算
+    自己名下那截（成昆线 661 km 对实际 1096，另有一条「成昆复线」），拿它比长度
+    会把资料库对的整条判成错；railgeom 的老走向长度同样偏短（大秦线 463 对 653）。
     """
     name = re.sub(r"\s+", "", str(name or ""))
     if not name:
         return None
+
+    if source:
+        fn = {"catalog": _catalog_stops, "chinaemu": _ce_stops,
+              "osm": _osm_stops}.get(source)
+        # lib / custom 本来就是库内线路，直接从线路库那条取，口径与 line_sources
+        # 完全对称 —— 界面上点哪个来源的徽标都能按那个来源给。
+        if source in ("lib", "custom"):
+            ln = cnrail.line(name)
+            st = (ln or {}).get("stations") or []
+            got = ({"stops": [{"name": s.get("name"), "km": s.get("km"),
+                               "seq": i + 1, "lat": s.get("lat"), "lon": s.get("lon")}
+                              for i, s in enumerate(st)],
+                    "source": source, "sourceName": (ln or {}).get("name"),
+                    "totalKm": (ln or {}).get("totalKm")}
+                   if len(st) >= 2 else None)
+        else:
+            got = fn(name) if fn else None
+        if got:
+            got["line"] = name
+            got["pickWhy"] = "explicit"
+            got["pickFrom"] = [{"source": source, "name": got.get("sourceName"),
+                                "km": got.get("totalKm")}]
+        return got
 
     cands: List[dict] = []
     a = _catalog_stops(name)
@@ -590,12 +659,20 @@ def stations_for(name: str) -> Optional[dict]:
         cands.append(b)
 
     if not cands:
+        # 顺序是有讲究的：**先拿自有线段拼，最后才用 OSM**。
+        # 京哈高速线在项目里是「京沈段 + 沈哈段」两段人工整理过的线，接起来 37 站、
+        # 口径和线路库其余部分一致；OSM 那份是几何上插值出来的，站数差别很大。
+        # 既然定了 OSM 是兜底来源，就得排在自分段拼接之后。
         segs = _segments_of(name)
         if segs:
             got = _chain_segments(name, segs)
             if got:
                 got["line"] = name
                 return got
+        c = _osm_stops(name)
+        if c:
+            c["line"] = name
+            return c
         return None
 
     if len(cands) > 1:
@@ -611,7 +688,7 @@ def stations_for(name: str) -> Optional[dict]:
                 best = a or best
             best["pickWhy"] = "osmKm"
             best["pickFrom"] = [{"source": c.get("source"), "name": c.get("sourceName"),
-                                 "km": c.get("totalKm")} for c in (a, b) if c]
+                                 "km": c.get("totalKm")} for c in cands]
             cands = [best] + [c for c in cands if c is not best]
 
     got = cands[0]
@@ -623,14 +700,16 @@ def stations_for(name: str) -> Optional[dict]:
 # 拼成一条能查的线路：站序（补来的）+ 走向（OSM 的）
 # ---------------------------------------------------------------------------
 
-def compose_line(name: str) -> Optional[dict]:
+def compose_line(name: str, source: str = "") -> Optional[dict]:
     """给一个「OSM 有几何、线路库里没有」的线名，拼出一条完整的线路
 
-    站序从线路资料库取（成昆线 133 站），取不到就拿同前缀的分段站序拼。
+    站序从线路资料库取（成昆线 133 站），取不到拿 china-emu、再不行拿 OSM 的
+    （瓦日线 44 站），最后才拿同前缀的分段站序拼。
+    `source` 指定时只用那一份 —— 界面上同一条线有几个来源的说法，用户点了哪个就给哪个。
     返回结构与 cnrail.line_detail 对齐，前端不用另写一套渲染。
     补不到站序就返回 None —— 只有一条光走向，画成线路会是一列空站。
     """
-    got = stations_for(name)
+    got = stations_for(name, source)
     if not got or not got.get("stops"):
         return None
     raw = got["stops"]
@@ -677,6 +756,51 @@ def compose_line(name: str) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 # 盘点
 # ---------------------------------------------------------------------------
+
+# 来源在界面上的叫法
+_SRC_LABEL = {"lib": "线路库", "custom": "自建", "catalog": "线路资料库",
+              "chinaemu": "china-emu", "osm": "OSM", "parts": "分段拼接"}
+
+
+def line_sources(name: str) -> List[dict]:
+    """这条线名在各来源里各是什么样（站数 / 里程 / 首末站）
+
+    界面拿它做「同名多来源」的选项条：搜「京广线」时**不替用户挑** ——
+    线路库 89 站、china-emu 154 站、OSM 220 站全摆出来，点哪个用哪个。
+    站序口径不同不是错误：线路库是人工整理的客运站顺序，china-emu 带线路所和
+    计价里程，OSM 是几何上插值出来的（会带并线枢纽站，但站点最全）。
+    """
+    name = re.sub(r"\s+", "", str(name or ""))
+    out: List[dict] = []
+    if not name:
+        return out
+
+    ln = cnrail.line(name)
+    if ln and len(ln.get("stations") or []) >= 2:
+        st = ln["stations"]
+        out.append({"source": "custom" if ln.get("custom") else "lib",
+                    "label": _SRC_LABEL["custom" if ln.get("custom") else "lib"],
+                    "sourceName": ln.get("name"), "n": len(st),
+                    "km": ln.get("totalKm"),
+                    "first": st[0].get("name"), "last": st[-1].get("name"),
+                    "kmDone": sum(1 for x in st if x.get("km") is not None)})
+
+    for src, fn in (("catalog", _catalog_stops), ("chinaemu", _ce_stops),
+                    ("osm", _osm_stops)):
+        try:
+            got = fn(name)
+        except Exception:                    # noqa: BLE001
+            got = None
+        if not got or len(got.get("stops") or []) < 2:
+            continue
+        st = got["stops"]
+        out.append({"source": src, "label": _SRC_LABEL[src],
+                    "sourceName": got.get("sourceName"), "n": len(st),
+                    "km": got.get("totalKm"),
+                    "first": st[0].get("name"), "last": st[-1].get("name"),
+                    "kmDone": sum(1 for x in st if x.get("km") is not None)})
+    return out
+
 
 def survey(names: Optional[Sequence[str]] = None) -> List[dict]:
     """盘点线名两侧的缺口（给界面上的「补全」清单用）

@@ -13,7 +13,8 @@
 
 - 纯标准库后端（`ThreadingHTTPServer` + SQLite），前端单页（`index.html` + `app.js` + `style.css`），无框架无构建。
 - 数据源：12306（车次 / 经停 / 余票）、`cnrail_data_v2.xlsx`（车站 / 线路 / 站序底表）、
-  辉睿线路资料库（844 条线路参数与逐站里程）、china-emu（660 条线路的逐站 K 里程）、OSM（线路几何，可选）。
+  辉睿线路资料库（844 条线路参数与逐站里程）、china-emu（660 条线路的逐站 K 里程）、
+  OSM（线路几何 + 第六套站序来源：1727 条线路 / 10340 个国铁车站，见业务规则第 19 条）。
 - 本地库：`webapp/data/rail.db`（约 160 MB，不入库）；
   整理库 `webapp/data/linedesk.db`（约 2 MB，**入库**，是人工整理的成果）。
 
@@ -36,8 +37,8 @@ C:/Users/Administrator/AppData/Local/Programs/Python/Python313/python.exe webapp
 
 ```
 railcn/
-├─ data/            车站档案 7579、线路 417、坐标索引、huirui 线路资料库、chinaemu
-├─ scripts/         数据导入（crtrain / huirui / chinaemu / 站名归一 / 去重）+ 19 个回归脚本
+├─ data/            车站档案 7579、线路 417、坐标索引、huirui 线路资料库、chinaemu、osm
+├─ scripts/         数据导入（crtrain / huirui / chinaemu / osm / 站名归一 / 去重）+ 22 个回归脚本
 │                   （含 build_linedesk.py 建整理库、report_line_names.py 出清理报告）
 ├─ webapp/
 │  ├─ server.py     HTTP 路由（约 700 行，所有接口在这一个文件里）
@@ -225,6 +226,45 @@ railcn/
       搜「侯西」时显示「侯西线 42 站 取自资料库」，点进去是能编辑的线路详情，不是一条光走向。
     - 回归 `scripts/test_loose_line.py`。
 
+19. **第六套来源 OSM：站序兜底 + 车站归属，界面上和前五套平起平坐（不替用户挑）。**
+    源数据来自 `osm-china-rail`（ramiesch 由中国区 Overpass 抽出的干支路 NL extraction），
+    它的站序是**从几何算出来的**：way 端点按 40 m 网格聚成节点、断口补边、从离重心最远的
+    悬挂端点跑 Dijkstra，再把车站插值到最近的边上 —— 于是每行自带沿线里程和到中心线的
+    垂距。（直接用几何线段拼是不行的：正线在车站处被无名股道切断，京广线一开始只拼出
+    1,031 km。）
+    - **落库**：`scripts/import_osm.py --prepare --src <osm-china-rail/out> --apply`
+      → `line_osm` 1727 条 / `line_osm_stop` 11788 行 / `station_osm` 10340 个 /
+      `station_osm_line` 11788 行（整表重建，幂等）。源数据先抽到 `data/osm/` 再入库。
+    - **范围收窄**：只要 `kind=train`（国铁，不含地铁）；线路状态只要运营中/在建/规划；
+      境外按「站名带中文」判（经纬度框关不住 —— 朝鲜咸镜北道、俄远东、蒙古扎门乌德都落在
+      [73,136]×[17,54.5] 里），剔掉 20 条线 + 194 个站；台湾岛整块挖掉（119.3~122.1°E,
+      21.8~25.35°N，福建平潭 25.55°N 刚好在北边不受影响）。
+    - **站名清洗**：并列民族文字取中文段（`乌鲁木齐南 ئۇرۈمچى جەنۇبى` → 乌鲁木齐南）、
+      尾部状态括注必剥（`中沙坝（预留）`）、线内撞名只留里程在前的那行、`(预留)` 这种
+      剥完为空的直接丢。
+    - **里程归零要在「挑完站」之后算**：定银线头两行是无名会让点（K16.45/K20.49），
+      若先按全表 min 归零，丢掉它们之后首站就变成 K13.3 而不是 K0 了。
+    - **优先级：资料库 > china-emu > 自己分段拼 > OSM。** `_SRC_RANK` 里 OSM 最后，
+      京哈高速线仍要走「京沈段 + 沈哈段」接起来的那份（接起来 37 站、口径统一），
+      OSM 只在谁都拿不到时才补 —— 1727 条里 1116 条**只有它有站序**（瓦日线 44 站、
+      嫩林线 43 站、甘钟线 25 站、红淖线 23 站）。
+    - **OSM 不参加长度裁判**：它的线名按 way 的 name 聚合，拆段命名的线只算自己名下那截
+      （成昆线 661 km 对实际 1096，另立「成昆复线」），让 OSM 自己的长度当裁判等于自证，
+      会把资料库对的整条判成错。参照长度只用 `railgeom.meta()` 的老走向，
+      且资料库/china-emu 偏差 >40% 才允许 OSM 顶替。
+    - **车站归属**：`station_osm_line` 是 `line_osm_stop` 的反查表（站 → 线），
+      每条带 `km` 和 `dist_m`（垂距），按垂距升序返回 —— 靠的就是抽取时那套
+      「距离 + 几何走向」。石家庄 → 京广高速线 11.8 m / 石济客专线 105 m / 京广线 110.4 m。
+      垂距 >300 m 的在界面上标橙，可能是支线引入或站场股道误判。
+    - **界面同名多来源不替用户挑**：`/api/lines` 返回 `variants`、`/api/line?from=<来源>`
+      指定取哪一份；`/api/stations` 返回 items（12306 站表 / 线路档案 / 两边都有）+ osm，
+      **同名照列两份**（「石家庄」档案里一份、OSM 里一份，不是一个口径）。
+      线路详情头部画 `.ln-src` 来源条（系统默认 / 线路库 / 资料库 / china-emu / OSM），
+      点哪个用哪个；车站联想每条挂 `.ssrc` 来源徽标。
+    - **OSM 独有的车站**（档案和站表都没有，如「一零二厂（吉化）」在吉舒线 K66.5）
+      给一张 `osm_station_card`，能顺着归属线路跳过去，别只回「车站库里没有」。
+    - 回归 `scripts/test_osm_data.py`（守 57 件事）。
+
 ## 6. 前端约定
 - 5 个页签：`车站/线路`、`站站查询`、`数据下载`、`历史数据`、`数据校对`；状态都在全局 `CU` 对象里。
 - 校对页筛选：`todo / via0 / via / km / coord / pending / manual / synced / clean / all`。
@@ -240,14 +280,14 @@ railcn/
 - 覆盖层（底图切换条 / 缩放 / 图例 / 信息卡）`z-index:900`：Leaflet 的 pane 是 400~800，
   不抬上去会被瓦片整个吃掉。
 
-## 7. 回归脚本（21 个，改完必跑）
+## 7. 回归脚本（22 个，改完必跑）
 
 ```bash
 for f in test_chain test_line_km test_line_stations test_nm_stations test_osm_extras \
          test_station_loose test_tl_stops test_geo_toggle test_dock_speed test_code_alias \
          test_routestore test_nm_insert test_curate_refresh test_curate_sync test_net_form \
          test_via_nodes test_lineseg test_catalog_match test_chinaemu test_linedesk \
-         test_loose_line; do
+         test_loose_line test_osm_data; do
   "C:/Users/Administrator/AppData/Local/Programs/Python/Python313/python.exe" scripts/$f.py
 done
 ```
@@ -271,6 +311,7 @@ done
 | `test_dock_speed` | 地图事件层不抢 dock 命中、倍速可用 |
 | `test_routestore` | 经停站按趟去重（route_tpl / route_day） |
 | `test_code_alias` / `test_nm_insert` / `test_osm_extras` | 车次号别名、新增站、OSM 未收录线路 |
+| `test_osm_data` | 第六套来源 OSM：表齐、境外与台湾地区进不来、状态只有运营中/在建/规划、里程归零+单调+seq 连续、站名清洗、自有的分段拼接仍优先于 OSM、站名清洗、自有分段拼接仍排在 OSM 之前、原本没站序的线补上了（瓦日/嫩林 >30 站）且成昆仍选资料库、车站归属反查按垂距升序、三来源联想不合并、OSM 独有车站出卡片、默认兜底仍是自分段拼接在前、不碰既有表 |
 
 **跑测试的注意**：脚本会写真实库再撤销，**不要并发跑同一个脚本**（会互相踩，留下孤儿 override）。
 
@@ -296,6 +337,9 @@ done
 - 资料库那 **39 条「小资料挂大干线」** 的历史错配（马坊支线→京哈线、库俄线→南疆线…）仍在 rail.db 里，
   整理台能看到族内多条线，但要不要清空 `line_name` 让 compose 接管 —— 未确认。
 - 武冈城际、武石城际的站序一样（`line_catalog_stop` 源头数据错），是否按资料改正 —— 未确认。
+- **OSM 站序的方向可能和规范方向相反**：抽取时从「离重心最远的悬挂端点」起算，
+  京广线在 OSM 里首站是广州、末站长辛店。现在如实按来源给（来源条 tooltip 里标了首末站），
+  要不要加一个「反向」按钮 —— 未定。
 - 唐曹线站序从七道桥起、唐山站不在线上，所以 C248「唐山→南堡北」永远要人工填；是否把唐山接进站序 —— 未确认。
 - override 是否改成按 `code + 站表版本` 指纹存（调图后自动失效）。
 - 孤立坐标「枣强南」、10-30 之后的数据补全。

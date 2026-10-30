@@ -1399,6 +1399,174 @@ def ce_stops(line_name: str, key: str = "") -> Optional[dict]:
             "kmDesc": row["km_desc"] or 0, "stops": stops}
 
 
+def osm_stops(line_name: str, key: str = "") -> Optional[dict]:
+    """OSM（第六套来源）的线路站序。
+
+    这份站序是**从几何算出来的**：way 端点按 40 m 聚合成节点、车站插值到最近的边上，
+    km 是沿线真实里程（不是票价里程）。三个来源里它覆盖最广 —— 1727 条线、
+    11788 个站次，专门补「资料库和 china-emu 都没有」的那一千多条线
+    （瓦日线 44 站、嫩林线 43 站、甘钟线 25 站、红淖线 23 站）。
+
+    两个口径已在入库时归一：
+      - km 按首站归零（京沪线在 OSM 里从上海端算起，首站是 1434 而不是 0）
+      - 站序**自带坐标**（lon/lat 列），不必再拿站名去别处反查
+
+    role='secondary' 是并线枢纽站（该站同时属于别的线），不是噪音，照留。
+    """
+    nm = (line_name or "").strip()
+    if not nm and not key:
+        return None
+    try:
+        conn = db()
+    except sqlite3.DatabaseError:
+        return None
+    try:
+        if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='line_osm'").fetchone():
+            return None
+        row = conn.execute("SELECT * FROM line_osm WHERE name=?", (nm,)).fetchone()
+        if not row and key:
+            row = conn.execute(
+                "SELECT * FROM line_osm WHERE match_key=?"
+                " ORDER BY n_station DESC, total_km DESC LIMIT 1", (key,)).fetchone()
+        if not row:
+            return None
+        rows = conn.execute(
+            "SELECT seq,name,km,dist_m,role,halt,lon,lat FROM line_osm_stop"
+            " WHERE lid=? ORDER BY seq", (row["name"],)).fetchall()
+    finally:
+        conn.close()
+    if len(rows) < 2:
+        return None
+    stops = [{"seq": r["seq"], "name": r["name"], "km": r["km"],
+              "distM": r["dist_m"], "role": r["role"], "halt": r["halt"],
+              "lon": r["lon"], "lat": r["lat"]} for r in rows]
+    return {"name": row["name"], "lineType": row["line_type"], "status": row["status"],
+            "elec": row["elec"], "maxspeed": row["maxspeed"],
+            "totalKm": row["total_km"], "nStop": row["n_stop"],
+            "bridges": row["bridges"] or 0,
+            "maxBridgeKm": row["max_bridge_km"] or 0, "stops": stops}
+
+
+def osm_station_lines(name: str, limit: int = 24) -> List[dict]:
+    """这个站在 OSM 里属于哪几条线（车站 → 线路的归属反查）
+
+    归属是**距离 + 几何走向**判出来的：抽取时把车站插值到线路中心线上，留下
+    垂直距离 dist_m 和沿线里程 km，dist_m 越大说明这个站其实离正线越远
+    （支线引入、站场股道误判都在这种地方）。所以按 dist_m 升序返回，
+    界面上从小到大地列 —— 排最前的就是真正把车站包在里面的那条线。
+
+    同名站要都能查到（全国有多个「沙河」「临河」），所以按名字取全部 osm_id。
+    """
+    nm = re.sub(r"\s+", "", str(name or ""))
+    if not nm:
+        return []
+    try:
+        conn = db()
+    except sqlite3.DatabaseError:
+        return []
+    try:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table'"
+                            " AND name='station_osm_line'").fetchone():
+            return []
+        rows = conn.execute(
+            "SELECT g.lid, g.seq, g.km, g.dist_m, g.role, s.name AS sname,"
+            "       s.osm_id, L.total_km, L.status, L.line_type"
+            "  FROM station_osm_line g"
+            "  JOIN station_osm s ON s.osm_id = g.osm_id"
+            "  LEFT JOIN line_osm L ON L.name = g.lid"
+            " WHERE s.name = ? OR s.name = ? OR s.name = ?"
+            " ORDER BY COALESCE(g.dist_m, 0), g.lid"
+            " LIMIT ?", (nm, nm + "站", nm[:-1] if nm.endswith("站") else nm, limit)
+        ).fetchall()
+    finally:
+        conn.close()
+    out = []
+    seen = set()
+    for r in rows:
+        key = r["lid"]
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"line": r["lid"], "seq": r["seq"], "km": r["km"],
+                    "distM": round(r["dist_m"], 1) if r["dist_m"] is not None else None,
+                    "role": r["role"], "totalKm": r["total_km"],
+                    "status": r["status"], "lineType": r["line_type"],
+                    "stationName": r["sname"], "osmId": r["osm_id"]})
+    return out
+
+
+def osm_station_suggest(q: str, limit: int = 12) -> List[dict]:
+    """OSM 车站联想（国铁 railway=station/halt，不含地铁）
+
+    **和站表/档案里的同名站不去重**：用户要的就是全都列出来让他自己挑。
+    「石家庄」在项目站表里也有、OSM 里也有（京广线 / 京广高速线 / 石济客专线
+    三线交汇），两边的数据不是一个口径，替他合并等于替他做判断。
+    """
+    kw = re.sub(r"\s+", "", str(q or ""))
+    if not kw:
+        return []
+    try:
+        conn = db()
+    except sqlite3.DatabaseError:
+        return []
+    try:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table'"
+                            " AND name='station_osm'").fetchone():
+            return []
+        rows = conn.execute(
+            "SELECT s.osm_id, s.name, s.railway, s.halt, s.ref, s.lifecycle,"
+            "       COUNT(DISTINCT g.lid) AS n_line"
+            "  FROM station_osm s LEFT JOIN station_osm_line g ON g.osm_id = s.osm_id"
+            " WHERE s.name LIKE ?"
+            " GROUP BY s.osm_id"
+            " ORDER BY (CASE WHEN s.name = ? THEN 0"
+            "                WHEN s.name LIKE ? THEN 1 ELSE 2 END),"
+            "          n_line DESC, s.name LIMIT ?",
+            (kw + "%", kw, kw + "%", limit)).fetchall()
+    finally:
+        conn.close()
+    return [{"name": r["name"], "osmId": r["osm_id"],
+             "railway": "乘降所" if r["halt"] else ("车站" if r["railway"] == "station" else (r["railway"] or "")),
+             "ref": r["ref"], "lifecycle": r["lifecycle"], "nLine": r["n_line"]}
+            for r in rows if r["name"]]
+
+
+def osm_station_card(name: str) -> Optional[dict]:
+    """只在 OSM 里有的车站（档案和 12306 站表都没有）的详情卡
+
+    丰沙线上的「雁翅」「珠窝」、滨洲线上的小会让站这类，项目站表里查不到，
+    但 OSM 知道它在哪条线的哪一公里、是车站还是乘降所。联想里既然把它们列了出来，
+    点进去就不能只回一句「车站库里没有」—— 至少把 OSM 掌握的那点信息给出来，
+    并且能顺着归属线路跳过去看整条线。
+    """
+    nm = re.sub(r"\s+", "", str(name or ""))
+    if not nm:
+        return None
+    lines = osm_station_lines(nm)
+    try:
+        conn = db()
+    except sqlite3.DatabaseError:
+        return None
+    try:
+        rows = conn.execute(
+            "SELECT * FROM station_osm WHERE name IN (?,?,?) ORDER BY halt",
+            (nm, nm + "站", nm[:-1] if nm.endswith("站") else nm)).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        return None
+    pts = [{"osmId": r["osm_id"], "name": r["name"], "nameRaw": r["name_raw"],
+            "lon": r["lon"], "lat": r["lat"],
+            "railway": "乘降所" if r["halt"] else r["railway"],
+            "ref": r["ref"], "lifecycle": r["lifecycle"]} for r in rows]
+    # 字段名与 station_detail 保持一致：详情页也用 osmLines，前端 stOsmLines()
+    # 只认这一个键。档案里的 lines（线路名字符串数组）OSM 卡没有，别用空数组占位。
+    return {"found": False, "osmOnly": True, "name": nm, "points": pts,
+            "osmLines": lines, "services": [], "trainsFrom": 0, "trainsTo": 0,
+            "trainsVia": [], "custom": False, "archive": False}
+
+
 def merge_catalog_nodes(line_name: str, names: List[str]) -> List[str]:
     """命名线路的站序里常漏掉线路所（宝成线少了灭火沟线路所、长图线少了西山线路所）。
 
@@ -2289,6 +2457,11 @@ class StationRegistry:
         两边叫法不统一 —— 12306 站表里是「唐海南」，线路档案里多半是「唐山站」——
         所以查询词先去掉末尾的「站」，候选也按去掉「站」的名字归并，
         同一个站只出现一次，显示优先用 12306 的写法。
+
+        **每个候选带 src 来源标记**（12306 站表 / 线路档案 / 两者都有）：
+        同一个名字在两边的数据不是一个口径 —— 站表里有电报码和当日车次，
+        档案里有路局、启用年份、连接线路。界面上标出来，用户点哪个取哪个，
+        系统不再替他挑。
         """
         self.ensure()
         q = _norm(q)
@@ -2318,10 +2491,13 @@ class StationRegistry:
             cur = cand.get(b)
             if cur is None:
                 cand[b] = {"hit": hit, "name": nm, "city": city,
-                           "hasCoord": has, "archive": archived}
+                           "hasCoord": has, "archive": archived,
+                           "from123": not archived, "fromArch": archived}
                 return
             cur["hit"] = min(cur["hit"], hit)
-            cur["archive"] = cur["archive"] or archived
+            cur["archive"] = cur["archive"] and archived   # 两边都有才不算「仅档案」
+            cur["from123"] = cur["from123"] or not archived
+            cur["fromArch"] = cur["fromArch"] or archived
             cur["hasCoord"] = cur["hasCoord"] or has
             if not cur["city"] and city:
                 cur["city"] = city
@@ -2340,7 +2516,9 @@ class StationRegistry:
         out = sorted(cand.values(), key=lambda x: (x["hit"], len(x["name"]), x["name"]))
         return [
             {"name": x["name"], "city": x["city"],
-             "hasCoord": x["hasCoord"], "archive": x["archive"]}
+             "hasCoord": x["hasCoord"], "archive": x["archive"],
+             "src": "两边都有" if (x["from123"] and x["fromArch"])
+                    else ("线路档案" if x["fromArch"] else "12306 站表")}
             for x in out[:limit]
         ]
 

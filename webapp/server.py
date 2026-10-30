@@ -308,7 +308,16 @@ class Handler(BaseHTTPRequestHandler):
             return self.json(st)
 
         if path == "/api/stations":
-            return self.json({"items": railcore.stations.suggest(one("q"), int(one("limit", "12")))})
+            kw = one("q")
+            # 三个来源**全列出来，不替用户挑**：同一个站名在 12306 站表、线路档案、
+            # OSM 国铁数据里不是一回事（电报码 vs 连接线路 vs 几何归属），同名的也
+            # 都展示，界面上标来源让他自己点。
+            try:
+                extra = railcore.osm_station_suggest(kw, int(one("osmLimit", "8") or 8))
+            except Exception:                # noqa: BLE001
+                extra = []
+            return self.json({"items": railcore.stations.suggest(kw, int(one("limit", "12"))),
+                              "osm": extra})
 
         if path == "/api/trains":
             items = railcore.search_trains(one("q"), int(one("limit", "40")))
@@ -345,13 +354,32 @@ class Handler(BaseHTTPRequestHandler):
 
         # ---- cnrail_data_v2 静态知识库 ----
         if path == "/api/station":
-            return self.json(railcore.station_detail(one("q")))
+            kw = one("q")
+            try:
+                d = railcore.station_detail(kw)
+            except Exception:                # noqa: BLE001
+                d = {"found": False}
+            if not d.get("found"):
+                # 档案/站表都没有、但 OSM 有的：给一张只有 OSM 信息的卡
+                card = None
+                try:
+                    card = railcore.osm_station_card(kw)
+                except Exception:            # noqa: BLE001
+                    card = None
+                if card:
+                    return self.json(card)
+            # OSM 归属：这个站被哪几条线经过（按到中心线的垂直距离由近及远）
+            try:
+                d["osmLines"] = railcore.osm_station_lines(kw)
+            except Exception:                # noqa: BLE001
+                d["osmLines"] = []
+            return self.json(d)
 
         if path == "/api/lines":
             kw = one("q")
             items = cnrail.search_line(kw, int(one("limit", "24")))
             osm = railcore.osm_extras(kw, int(one("osmLimit", "6") or 6))
-            # OSM 里有、线路库没收的线：能拼出站序的（资料库 / china-emu / 分段）
+            # OSM 里有、线路库没收的线：能拼出站序的（资料库 / china-emu / OSM 自己）
             # 标出来。搜「侯西」时「侯西线」本来只显示「OSM 未收录」一条光走向，
             # 其实资料库有 42 站，点进去就该是能编辑的线路详情。
             for it in osm:
@@ -360,7 +388,17 @@ class Handler(BaseHTTPRequestHandler):
                 if n:
                     it["stopsN"] = n
                     it["stopsFrom"] = s.get("source")
-            return self.json({"items": items, "osm": osm})
+            # **同名多来源全列出来，系统不替用户挑**：搜「京广线」时线路库 212 站、
+            # 资料库 89 站、china-emu 154 站、OSM 218 站各有各的说法（客运站顺序 /
+            # 带线路所 / 几何插值），界面上标来源让用户点，点哪个用哪个。
+            variants = {}
+            for nm in [x.get("name") for x in items] + [x.get("name") for x in osm]:
+                if nm and nm not in variants:
+                    try:
+                        variants[nm] = lineseg.line_sources(nm)
+                    except Exception:        # noqa: BLE001
+                        variants[nm] = []
+            return self.json({"items": items, "osm": osm, "variants": variants})
 
         if path == "/api/line/stops":
             nm = one("q") or one("name")
@@ -390,6 +428,29 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/line":
             kw = one("q")
+            frm = one("from")
+
+            def out(payload: dict):
+                """每条返回都带上「这条线名在各来源的样子」，详情页据此画来源切换条"""
+                try:
+                    payload["sources"] = lineseg.line_sources(kw)
+                except Exception:            # noqa: BLE001
+                    payload["sources"] = []
+                payload["pickedFrom"] = frm or ""
+                return self.json(payload)
+
+            # 指定来源：同一条线几个来源各有说法，界面上点了哪个就按哪个拼，
+            # 不再走「系统替你挑」的那条路（lib/custom 本来就是库内线路，照旧）
+            if frm and frm not in ("lib", "custom"):
+                composed = lineseg.compose_line(kw, frm)
+                if not composed:
+                    return self.err("这个来源没有「%s」的站序" % kw, 404)
+                m = railgeom.meta(kw, composed.get("totalKm"))
+                if m:
+                    m["kmChain"] = railgeom.spine_km(m["name"], composed.get("totalKm"))
+                return out({**composed, "from": frm,
+                            "info": cnrail.catalog_info(kw),
+                            "osm": m, "osmOther": railcore.osm_extras(kw, 6)})
             d = cnrail.line_detail(kw)
             if not d:
                 # 资料库里另有叫法（京沪高铁 → 京沪高速线），指到库里对应的那条
@@ -403,7 +464,7 @@ class Handler(BaseHTTPRequestHandler):
                         m = railgeom.meta(kw, composed.get("totalKm"))
                         if m:
                             m["kmChain"] = railgeom.spine_km(m["name"], composed.get("totalKm"))
-                        return self.json({**composed, "composedFrom": target,
+                        return out({**composed, "composedFrom": target,
                                           "info": cnrail.catalog_info(kw),
                                           "osm": m, "osmOther": railcore.osm_extras(kw, 6)})
                 if target:
@@ -417,7 +478,7 @@ class Handler(BaseHTTPRequestHandler):
                                                         d.get("totalKm"))
                         if m:
                             m["kmChain"] = railgeom.spine_km(m["name"], d.get("totalKm"))
-                        return self.json({**d, "aliasOf": kw, "osm": m,
+                        return out({**d, "aliasOf": kw, "osm": m,
                                           "osmOther": railcore.osm_extras(kw, 6)})
                 # 线路库、资料库都没有：OSM 有整条几何的话，站序也能从资料库/分段拼出来
                 composed = lineseg.compose_line(kw)
@@ -425,7 +486,7 @@ class Handler(BaseHTTPRequestHandler):
                     m = railgeom.meta(kw, composed.get("totalKm"))
                     if m:
                         m["kmChain"] = railgeom.spine_km(m["name"], composed.get("totalKm"))
-                    return self.json({**composed, "composed": True,
+                    return out({**composed, "composed": True,
                                       "info": cnrail.catalog_info(kw),
                                       "osm": m, "osmOther": railcore.osm_extras(kw, 6)})
                 return self.err("未找到线路: " + kw, 404)
@@ -438,7 +499,7 @@ class Handler(BaseHTTPRequestHandler):
             if m:
                 m["kmChain"] = railgeom.spine_km(m["name"], d.get("totalKm"))
             # 同名前缀下、线路库没收录的 OSM 线（「津霸线」之于「津霸客运专线」）
-            return self.json({**d, "osm": m, "osmOther": railcore.osm_extras(kw, 6)})
+            return out({**d, "osm": m, "osmOther": railcore.osm_extras(kw, 6)})
 
         # OSM 线路几何（CRTrainRoute 整理）：真实走向 + 几何里程 + 桥隧统计
         if path == "/api/line/osm":

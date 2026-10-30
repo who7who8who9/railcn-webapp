@@ -975,6 +975,96 @@ def _clean_stops(raw) -> List[dict]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# 「这条线用哪一份站序」的默认选择（用户在界面上勾的那个）
+# ---------------------------------------------------------------------------
+# 同一条线名在各来源里各有一套站序（线路库 89 站 / 资料库 89 站 / china-emu
+# 154 站 / OSM 220 站）。界面上默认让用户自己点，点一次只对这一次查看生效；
+# 勾成默认以后，全项目所有「不指定来源」的取数（选经由、算里程、补站序）
+# 都按这一份来 —— 否则同一趟车在不同页面会按不同站序算，用户看着就是
+# 「刚才明明改好了，怎么又变了」。
+
+_SRC_PICK_CACHE: Optional[Dict[str, str]] = None
+_SRC_ALIAS_CACHE: Dict[str, str] = {}       # 别名 → 规范线名（与勾选内容无关，可长留）
+
+
+def _ensure_src_pick(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS line_src_pick (
+               name       TEXT PRIMARY KEY,   -- 线名（按请求里的写法存，与 line_override 同口径）
+               source     TEXT NOT NULL,      -- lib / custom / catalog / chinaemu / osm / parts
+               updated_at REAL
+           )""")
+
+
+def list_src_picks() -> Dict[str, str]:
+    """全部默认来源（一次性读进内存，热路径上不再打库）"""
+    global _SRC_PICK_CACHE
+    if _SRC_PICK_CACHE is None:
+        try:
+            with db() as conn:
+                _ensure_src_pick(conn)
+                _SRC_PICK_CACHE = {r["name"]: r["source"] for r in
+                                   conn.execute("SELECT name, source FROM line_src_pick")}
+        except sqlite3.DatabaseError:
+            _SRC_PICK_CACHE = {}
+    return _SRC_PICK_CACHE
+
+
+def src_pick(name: str) -> str:
+    """这条线的默认站序来源；没勾过返回空串（= 走系统规则）
+
+    勾的时候存的是「界面上显示的那个线名」（多半是资料库的规范名），而查询时
+    拿到的可能是它的别名 —— 搜「侯西铁路」进来的线名就是别名的写法。所以查
+    不到时再按规范名找一次，否则同一条线搜别名和搜正名会给出两套站序。
+    """
+    global _SRC_ALIAS_CACHE
+    nm = re.sub(r"\s+", "", str(name or ""))
+    if not nm:
+        return ""
+    m = list_src_picks()
+    if nm in m:
+        return m[nm]
+    if nm in _SRC_ALIAS_CACHE:
+        return m.get(_SRC_ALIAS_CACHE[nm], "")
+    canon = ""
+    try:
+        ln = cnrail.line(nm)
+        if ln and ln.get("name"):
+            canon = ln["name"]
+        if not canon:
+            # 资料库按 name 或 title 都能查到，返回里的 name 就是规范线名
+            canon = (cnrail.catalog_get(nm) or {}).get("name") or ""
+    except Exception:                        # noqa: BLE001
+        canon = ""
+    _SRC_ALIAS_CACHE[nm] = canon
+    return m.get(canon, "") if canon else ""
+
+
+def set_src_pick(name: str, source: str) -> dict:
+    """把某条线的默认来源设成 source；source 为空 = 取消默认，退回系统规则"""
+    global _SRC_PICK_CACHE
+    nm = re.sub(r"\s+", "", str(name or ""))
+    if not nm:
+        raise ValueError("要指定是哪个线名")
+    src = (source or "").strip()
+    allowed = {"", "lib", "custom", "catalog", "chinaemu", "osm", "parts"}
+    if src not in allowed:
+        raise ValueError("不认识的来源：" + src)
+    with _db_lock, db() as conn:
+        _ensure_src_pick(conn)
+        if src:
+            conn.execute(
+                "INSERT INTO line_src_pick(name, source, updated_at) VALUES(?,?,?)"
+                " ON CONFLICT(name) DO UPDATE SET source=excluded.source,"
+                " updated_at=excluded.updated_at", (nm, src, time.time()))
+        else:
+            conn.execute("DELETE FROM line_src_pick WHERE name=?", (nm,))
+    _SRC_PICK_CACHE = None
+    _SRC_ALIAS_CACHE.clear()     # 之前可能把「查不到规范名」缓下来了
+    return {"name": nm, "source": src}
+
+
 def line_override_map() -> Dict[str, dict]:
     global _line_ovr_cache
     if _line_ovr_cache is None:

@@ -202,6 +202,17 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/line/stations/clear":
                 return self.json({"ok": True, **railcore.clear_line_stations(payload.get("name"))})
 
+            # 站序倒排：起点终点对调，里程重排后落库
+            if path == "/api/line/stations/reverse":
+                return self.json(lineseg.reverse_line(
+                    payload.get("name"), payload.get("from") or ""))
+
+            # 勾/取消「这条线默认用哪一份站序」
+            if path == "/api/line/src-pick":
+                return self.json({"ok": True,
+                                  **railcore.set_src_pick(payload.get("name"),
+                                                          payload.get("source") or "")})
+
             if path == "/api/line/catalog/add":
                 ln = railcore.add_catalog_line(payload.get("id"))
                 return self.json({"ok": True, "line": ln})
@@ -391,17 +402,29 @@ class Handler(BaseHTTPRequestHandler):
             # **同名多来源全列出来，系统不替用户挑**：搜「京广线」时线路库 212 站、
             # 资料库 89 站、china-emu 154 站、OSM 218 站各有各的说法（客运站顺序 /
             # 带线路所 / 几何插值），界面上标来源让用户点，点哪个用哪个。
-            variants = {}
+            variants, picks = {}, {}
             for nm in [x.get("name") for x in items] + [x.get("name") for x in osm]:
                 if nm and nm not in variants:
                     try:
                         variants[nm] = lineseg.line_sources(nm)
                     except Exception:        # noqa: BLE001
                         variants[nm] = []
-            return self.json({"items": items, "osm": osm, "variants": variants})
+                    # 勾过的默认来源：联想框里把星标画实，别让用户以为没生效
+                    picks[nm] = railcore.src_pick(nm)
+            return self.json({"items": items, "osm": osm,
+                              "variants": variants, "picks": picks})
 
         if path == "/api/line/stops":
             nm = one("q") or one("name")
+            # 勾过默认来源的线，选经由时也用那一份 —— 否则人工在详情页挑了
+            # 「china-emu 带线路所的那份」，回头选经由又是另一套站名，对不上。
+            pick = railcore.src_pick(nm) if nm else ""
+            if pick and pick not in ("lib", "custom"):
+                seg = lineseg.stations_for(nm, pick) or {}
+                got = [x["name"] for x in (seg.get("stops") or [])]
+                if got:
+                    return self.json({"name": nm, "found": True, "from": pick,
+                                      "items": got, "count": len(got)})
             items = cnrail.line_station_names(nm) if nm else None
             found = items is not None
             stopsFrom = "lib" if found else ""
@@ -429,6 +452,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/line":
             kw = one("q")
             frm = one("from")
+            # 用户勾过的默认来源：没点具体来源时按它取数。库内线路本来就以自己的
+            # 站序为准（line_detail 那条路），勾 lib / custom 等于没勾。
+            pick = railcore.src_pick(kw)
+            eff = frm or pick
+            if eff in ("lib", "custom"):
+                eff = ""
 
             def out(payload: dict):
                 """每条返回都带上「这条线名在各来源的样子」，详情页据此画来源切换条"""
@@ -437,20 +466,27 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:            # noqa: BLE001
                     payload["sources"] = []
                 payload["pickedFrom"] = frm or ""
+                payload["srcPick"] = pick
+                payload["effFrom"] = eff or ""
                 return self.json(payload)
 
             # 指定来源：同一条线几个来源各有说法，界面上点了哪个就按哪个拼，
             # 不再走「系统替你挑」的那条路（lib/custom 本来就是库内线路，照旧）
-            if frm and frm not in ("lib", "custom"):
-                composed = lineseg.compose_line(kw, frm)
+            if eff:
+                composed = lineseg.compose_line(kw, eff)
                 if not composed:
-                    return self.err("这个来源没有「%s」的站序" % kw, 404)
-                m = railgeom.meta(kw, composed.get("totalKm"))
-                if m:
-                    m["kmChain"] = railgeom.spine_km(m["name"], composed.get("totalKm"))
-                return out({**composed, "from": frm,
-                            "info": cnrail.catalog_info(kw),
-                            "osm": m, "osmOther": railcore.osm_extras(kw, 6)})
+                    if frm:
+                        return self.err("这个来源没有「%s」的站序" % kw, 404)
+                    pick = ""                # 默认来源过期了，退回系统规则
+                    eff = ""
+                else:
+                    m = railgeom.meta(kw, composed.get("totalKm"))
+                    if m:
+                        m["kmChain"] = railgeom.spine_km(m["name"],
+                                                         composed.get("totalKm"))
+                    return out({**composed, "from": eff,
+                                "info": cnrail.catalog_info(kw),
+                                "osm": m, "osmOther": railcore.osm_extras(kw, 6)})
             d = cnrail.line_detail(kw)
             if not d:
                 # 资料库里另有叫法（京沪高铁 → 京沪高速线），指到库里对应的那条

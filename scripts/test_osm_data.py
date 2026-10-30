@@ -133,8 +133,8 @@ def main() -> None:
     card = railcore.osm_station_card("一零二厂（吉化）")
     ck("OSM 独有车站有卡片", bool(card) and card.get("osmOnly"))
     ck("卡片给出坐标", bool(card) and card["points"][0]["lat"] is not None)
-    ck("卡片带归属线路", bool(card) and len(card["lines"]) >= 1,
-       str([x["line"] for x in (card or {}).get("lines", [])]))
+    ck("卡片带归属线路", bool(card) and len(card["osmLines"]) >= 1,
+       str([x["line"] for x in (card or {}).get("osmLines", [])]))
     ck("档案里有的站不抢着出 OSM 卡",
        railcore.osm_station_card("查无此站XYZ") is None)
 

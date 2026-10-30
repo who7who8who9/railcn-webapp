@@ -1140,6 +1140,17 @@ button.vseg:not(.picked):hover::after{opacity:1}
   color:#fff;background:var(--accent);border-color:var(--accent);
 }
 .ln-src .srcb.on:hover{color:#fff;background:var(--accent)}
+
+/* 默认勾选：★ 是「这条线全项目都用这份站序」，和「临时看这份」分开两个热区。
+   勾上以后填实心黄，不勾是灰的空星，mouseover 才亮。 */
+.ln-src .srcwrap{display:inline-flex;align-items:center;gap:2px}
+.ln-src .pick,.suggest .si .pick{
+  font-style:normal;font-size:12px;line-height:1;cursor:pointer;
+  color:#c8d2e0;padding:2px 1px;user-select:none;transition:color .1s,transform .1s;
+}
+.ln-src .pick:hover,.suggest .si .pick:hover{color:#e8a33d;transform:scale(1.2)}
+.ln-src .pick.on,.suggest .si .pick.on{color:#e8a33d}
+.suggest .si .sw{display:inline-flex;align-items:center;gap:1px}
 /* 联想条里的来源徽标（车站：12306 站表 / 线路档案 / OSM） */
 .suggest .si .c{display:inline-flex;align-items:center;gap:5px}
 .suggest .si .ssrc{

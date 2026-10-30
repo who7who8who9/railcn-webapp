@@ -950,11 +950,11 @@ python scripts/report_line_names.py --out docs/line-names-report.md
 | `GET /api/tickets` | `from`、`to`、`date` | 余票 |
 | `GET /api/transfer` | `from`、`to`、`date`、`middle` | 中转换乘 |
 | `GET /api/station` | `q` | 车站档案（路局 / 电报码 / 服务 / 连接线路 / 始发终到车次量）；档案里没有但 12306 站表有的站，返回最小档案（`archive=false` + 当天经停车次 `trainsVia`） |
-| `GET /api/lines` | `q`、`limit`、`osmLimit` | 线路名检索；`osm[]` 是「和查询词相关、线路库还没收录」的 OSM 线（`name` / `km` / `libSame` 同核心名的库线），能拼出站序的还带 `stopsN` / `stopsFrom`（资料库 / china-emu / 分段）——联想下拉里点到这种就直接进线路详情，不是一条光走向 |
-| `GET /api/line/stops` | `q`（线路名） | 该线的完整站序（只有站名，按站序），供校对页「经由」选站；命名线路的站序里缺的线路所 / 乘降所 / 中继站会用资料库的同名站序按邻居位置补回来，只在资料库里的线路（银西高铁）也能出站序；OSM 有、库和资料库都没收的，按同名前缀的分段线拼（京哈高速线 = 京沈段 + 沈哈段）；`from` 说明站序来自哪（`lib` / `catalog` / `parts`），`found=false` 表示哪都没这条线 |
+| `GET /api/lines` | `q`、`limit`、`osmLimit` | 线路名检索；`osm[]` 是「和查询词相关、线路库还没收录」的 OSM 线（`name` / `km` / `libSame` 同核心名的库线），能拼出站序的还带 `stopsN` / `stopsFrom`（资料库 / china-emu / 分段）——联想下拉里点到这种就直接进线路详情，不是一条光走向。`variants` 是每条线各来源的站序概况，`picks` 是用户勾过的默认来源（联想里 ★ 画实心） |
+| `GET /api/line/stops` | `q`（线路名） | 该线的完整站序（只有站名，按站序），供校对页「经由」选站；命名线路的站序里缺的线路所 / 乘降所 / 中继站会用资料库的同名站序按邻居位置补回来，只在资料库里的线路（银西高铁）也能出站序；OSM 有、库和资料库都没收的，按同名前缀的分段线拼（京哈高速线 = 京沈段 + 沈哈段）；`from` 说明站序来自哪（`lib` / `catalog` / `parts`），`found=false` 表示哪都没这条线；勾过默认来源的线按默认那份给，免得人工在详情页挑过的站名和选经由时的对不上 |
 | `GET /api/custom` | — | 用户新增的线路与车站清单 |
 | `GET /api/stations/names` | — | 全部站名（9548 条 = 车站档案 + 12306 站表，给新增线路时的站名补全） |
-| `GET /api/line` | `q` | 线路详情（有序站点 + 累计里程 + 坐标，可直接画线）；另带 `kmBase`（档案原值）、`segKm`（各段生效里程，不详为 `null`）、`override`、`osm`（OSM 线名 / 几何里程 / 桥隧）、`osmOther`（同名前缀下线路库没收录的 OSM 线，见上文「被同名线挡住」）。线路库里没有、但能补出站序的（成昆线 133 站），返回补好的线路 + `stopsFrom` / `stopsParts`；库内按段命名的线路（成昆线元昆段），`osm` 是借父线裁出来的那份，带 `borrowed` / `clipped` / `clip` |
+| `GET /api/line` | `q` | 线路详情（有序站点 + 累计里程 + 坐标，可直接画线）；另带 `kmBase`（档案原值）、`segKm`（各段生效里程，不详为 `null`）、`override`、`osm`（OSM 线名 / 几何里程 / 桥隧）、`osmOther`（同名前缀下线路库没收录的 OSM 线，见上文「被同名线挡住」）。线路库里没有、但能补出站序的（成昆线 133 站），返回补好的线路 + `stopsFrom` / `stopsParts`；库内按段命名的线路（成昆线元昆段），`osm` 是借父线裁出来的那份，带 `borrowed` / `clipped` / `clip`。`sources` 是这条线名在各来源的样子，`pickedFrom` 是这次临时点选的来源，`srcPick` 是勾成默认的那份，`effFrom` 是实际生效的（点选 > 默认 > 系统规则）。`from=<来源>` 时按指定来源拼 |
 | `GET /api/line/osm` | `q`、`km` | 线路的 OSM 几何（`parts` = WGS-84 折线数组，可直接画）；`km` 给已知里程时挡掉同名残段。分段线名（成昆线元昆段）借父线几何并按首末站裁出本段 |
 | `GET /api/line/osm/list` | `q`、`limit` | 搜 OSM 线路（线名 / 里程 / 桥隧 / 段数），附全库统计；线路库没收的线带 `stopsN` / `stopsFrom`（能补出站序时），列表上标「可补 N 站」 |
 | `GET /api/line/osm/stations` | `q`、`radius`、`extend` | 按 OSM 走向反查沿线车站，返回候选站（`km` / `dist` / `side`）、单线里程 `spineKm`、已有同名自建线路的站表 |
@@ -1005,6 +1005,8 @@ python scripts/report_line_names.py --out docs/line-names-report.md
 | `POST /api/line/new` | `name`、`stations[]`（`{name, km}`，km 可空）、`note`、`replace` | 新增线路，返回线路详情 + `filledStations`（这次补进车站库的沿线站）；`replace=1` 允许覆盖同名**自建**线路（改站表用） |
 | `POST /api/line/stations` | `name`、`stations[]`、`note` | 改站序（站中间插站 / 调先后）：自建线路改自己的站表，档案线路写 `line_override.stops_json`（人工站序覆盖，原始档案不动），返回线路详情 + `stationOrder`；线路库没有这条线时先按资料库规范名收进线路库，返回里多 `adopted` / `adoptedFrom` |
 | `POST /api/line/stations/clear` | `name` | 撤销档案线路的人工站序，回到档案原样（连带清掉按旧下标算的人工里程） |
+| `POST /api/line/stations/reverse` | `name`、`from` | 站序整条倒排：起点终点对调，里程按「原末站里程 − 原里程」重算（新起点强制 0，缺里程的仍缺、不插值）。落库走改站序那条路（自建线改自己站表、档案线存人工站序、库外线路先收编），返回 `n` / `missing` / 总里程 + 倒排后的线路详情。倒排两次回到原样 |
+| `POST /api/line/src-pick` | `name`、`source` | 勾「这条线默认用哪一份站序」（`lib`/`custom`/`catalog`/`chinaemu`/`osm`/`parts`，空 = 取消）。勾上以后所有不指定来源的取数都按它：`/api/line`、`/api/line/stops`（选经由）、`lineseg.stations_for()`。指定 `from` 的临时查看仍然优先 |
 | `POST /api/line/delete` | `name` | 删除自建线路（连带清掉它的里程校正） |
 | `POST /api/station/new` | `name`、`lat`、`lon`、`lines[]`、`tele`、`bureau`、`note` | 新增车站 |
 | `POST /api/station/delete` | `name` | 删除自建车站 |

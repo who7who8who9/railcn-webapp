@@ -38,7 +38,7 @@ C:/Users/Administrator/AppData/Local/Programs/Python/Python313/python.exe webapp
 ```
 railcn/
 ├─ data/            车站档案 7579、线路 417、坐标索引、huirui 线路资料库、chinaemu、osm
-├─ scripts/         数据导入（crtrain / huirui / chinaemu / osm / 站名归一 / 去重）+ 22 个回归脚本
+├─ scripts/         数据导入（crtrain / huirui / chinaemu / osm / 站名归一 / 去重）+ 23 个回归脚本
 │                   （含 build_linedesk.py 建整理库、report_line_names.py 出清理报告）
 ├─ webapp/
 │  ├─ server.py     HTTP 路由（约 700 行，所有接口在这一个文件里）
@@ -265,6 +265,32 @@ railcn/
       给一张 `osm_station_card`，能顺着归属线路跳过去，别只回「车站库里没有」。
     - 回归 `scripts/test_osm_data.py`（守 57 件事）。
 
+20. **站序「默认来源」是用户勾的，一键倒排也是他点的 —— 系统别替他改口径。**
+    同一条线在几个来源里各有一套站序（京广线 线路库 212 站 / 资料库 89 站 / OSM 218 站），
+    点一下只当这次查看用，勾成默认才是全项目的口径。
+    - **表**：`line_src_pick(name, source, updated_at)`，在 `rail.db`（这是主站行为，
+      不是整理台的活，别往 `linedesk.db` 放）。`source` 为空 = 没勾。
+    - **生效链路**：`railcore.src_pick(name)` → `lineseg.stations_for(name)` 在 `source`
+      为空时先取它；`/api/line` 没有 `from` 时按它走 `compose_line`；`/api/line/stops`
+      （选经由用的站序）同样跟随。**指定 `from` 的临时查看仍然优先** —— 勾的是默认，不是锁死。
+    - **库内线路本来以自己的站序为准**，勾 `lib` / `custom` 等于没勾（`eff` 会被清空），
+      别为此再走一遍 `compose_line`（会把自建线的 `custom` 标志、备注都丢掉）。
+    - **别名**：勾的时候前端传的是详情里的规范名（侯西线），查询时用户可能搜 title
+      （侯西铁路）。`src_pick` 查不到就按 `cnrail.line()` → `cnrail.catalog_get()` 找规范名
+      再查一次，结果缓存在 `_SRC_ALIAS_CACHE`；`set_src_pick` 时要清掉这个缓存。
+    - **默认过期别报错**：勾的那份现在取不到（线名改了、OSM 重建过），`/api/line`
+      退回系统规则，不能因为一个过期的勾选把整条线判成「查不到」。
+    - **倒排**：`POST /api/line/stations/reverse {name, from}` → `lineseg.reverse_line()`。
+      里程按 `原末站里程 - 原里程` 重算，**新起点强制 0**（档案里末站常常没填里程，
+      沪昆高速线的昆明南、小团山就是空的）；缺里程的站仍然缺，不插值。
+      落库走 `save_line_stations()` 这条路：自建线改自己的站表（**不传 note，别覆盖备注**）、
+      档案线存人工站序（还能「恢复档案站序」）、库外线路先收编再落。
+      倒排两次必须回到原样。
+    - **界面**：来源条每份前面一个 ★（`.ln-src .pick`），点 ★ = 设为默认、再点取消；
+      联想下拉里也带 ★，省得进详情页再点一次。倒排按钮两段确认（点一次变「确认倒排？」，
+      四秒不复位就不动数据）。
+    - 回归 `scripts/test_src_pick.py`。
+
 ## 6. 前端约定
 - 5 个页签：`车站/线路`、`站站查询`、`数据下载`、`历史数据`、`数据校对`；状态都在全局 `CU` 对象里。
 - 校对页筛选：`todo / via0 / via / km / coord / pending / manual / synced / clean / all`。
@@ -280,14 +306,14 @@ railcn/
 - 覆盖层（底图切换条 / 缩放 / 图例 / 信息卡）`z-index:900`：Leaflet 的 pane 是 400~800，
   不抬上去会被瓦片整个吃掉。
 
-## 7. 回归脚本（22 个，改完必跑）
+## 7. 回归脚本（23 个，改完必跑）
 
 ```bash
 for f in test_chain test_line_km test_line_stations test_nm_stations test_osm_extras \
          test_station_loose test_tl_stops test_geo_toggle test_dock_speed test_code_alias \
          test_routestore test_nm_insert test_curate_refresh test_curate_sync test_net_form \
          test_via_nodes test_lineseg test_catalog_match test_chinaemu test_linedesk \
-         test_loose_line test_osm_data; do
+         test_loose_line test_osm_data test_src_pick; do
   "C:/Users/Administrator/AppData/Local/Programs/Python/Python313/python.exe" scripts/$f.py
 done
 ```
@@ -303,6 +329,7 @@ done
 | `test_chinaemu` | china-emu 表在且行数够、桥隧行没混进站序、match_key 两套命名同键、兰新线纠回 118 站（不是兰中城际 6 站）、资料库没有的线名能补出站序、杭深铁路补出 50+ 站里程、首末站里程口径对 |
 | `test_linedesk` | 整理库独立（跑在临时文件上，rail.db 修改时间不变）、京沪四种写法归到一条、京哈沈哈段只挂一次、改名不破坏线族、同一来源线名不能被两条线抢、china-emu 的 K 里程搬过来变段内里程、合并转移别名/站序/旧名仍可搜、父子不能成环、导出结构完整 |
 | `test_loose_line` | 库外线路（侯西线：资料库 42 站 + OSM 走向）搜 title 收敛到规范名、改站序时自动收进线路库并落用户站序、再改走覆盖、删掉回资料库原样、真没有站序的线仍明确报错 |
+| `test_src_pick` | 站序默认来源勾选后全链路跟随（详情 / 选经由 / 联想标记）、指定 from 的临时查看不被默认覆盖、按规范名勾的默认搜 title 也认、非法来源被拒；倒排往返一致、档案线进人工站序且能恢复、库外线路先收编、备注不被覆盖、按钮两段确认 |
 | `test_chain` | 车次合并（中途换号）与检索 |
 | `test_line_km` / `test_line_stations` | 线路里程双模式、站序编辑 |
 | `test_nm_stations` / `test_station_loose` | 新增线路站名并集、站名带「站」也能搜 |

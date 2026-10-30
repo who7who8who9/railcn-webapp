@@ -604,6 +604,20 @@ def _chain_segments(parent: str, segs: List[dict]) -> Optional[dict]:
             "parts": [o["line"] for o in order], "totalKm": total}
 
 
+def _lib_stops(name: str, source: str = "") -> Optional[dict]:
+    """线路库里这条线自己的站序（含人工 override / 自建站表）"""
+    ln = cnrail.line(name)
+    st = (ln or {}).get("stations") or []
+    if len(st) < 2:
+        return None
+    kind = source or ("custom" if ln.get("custom") else "lib")
+    return {"stops": [{"name": s.get("name"), "km": s.get("km"),
+                       "seq": i + 1, "lat": s.get("lat"), "lon": s.get("lon")}
+                      for i, s in enumerate(st)],
+            "source": kind, "sourceName": ln.get("name"),
+            "totalKm": ln.get("totalKm")}
+
+
 def stations_for(name: str, source: str = "") -> Optional[dict]:
     """OSM 线名 → 站序
 
@@ -627,28 +641,40 @@ def stations_for(name: str, source: str = "") -> Optional[dict]:
     if not name:
         return None
 
+    # 用户在界面上勾过的默认来源优先（「这条线用哪一份站序」是他自己定的，
+    # 系统规则不该再抢）。source 明确指定时以参数为准，只当这一次查看用。
+    picked = ""
+    if not source:
+        picked = railcore.src_pick(name)
+        if picked:
+            source = picked
+
     if source:
         fn = {"catalog": _catalog_stops, "chinaemu": _ce_stops,
               "osm": _osm_stops}.get(source)
         # lib / custom 本来就是库内线路，直接从线路库那条取，口径与 line_sources
         # 完全对称 —— 界面上点哪个来源的徽标都能按那个来源给。
         if source in ("lib", "custom"):
-            ln = cnrail.line(name)
-            st = (ln or {}).get("stations") or []
-            got = ({"stops": [{"name": s.get("name"), "km": s.get("km"),
-                               "seq": i + 1, "lat": s.get("lat"), "lon": s.get("lon")}
-                              for i, s in enumerate(st)],
-                    "source": source, "sourceName": (ln or {}).get("name"),
-                    "totalKm": (ln or {}).get("totalKm")}
-                   if len(st) >= 2 else None)
+            got = _lib_stops(name, source)
+        elif source == "parts":
+            # 「分段拼」也是一种来源，勾成默认以后要能原样取回来
+            segs = _segments_of(name)
+            got = _chain_segments(name, segs) if segs else None
         else:
             got = fn(name) if fn else None
         if got:
             got["line"] = name
-            got["pickWhy"] = "explicit"
+            got["pickWhy"] = "default" if picked else "explicit"
+            got["pickedByUser"] = bool(picked)
             got["pickFrom"] = [{"source": source, "name": got.get("sourceName"),
                                 "km": got.get("totalKm")}]
-        return got
+            return got
+        # 勾的默认来源现在取不到了（线名改了、来源数据重建过）：退回系统规则，
+        # 别因为一个过期的勾选把整条线判成「查不到」
+        if picked:
+            source = ""
+        else:
+            return got
 
     cands: List[dict] = []
     a = _catalog_stops(name)
@@ -751,6 +777,64 @@ def compose_line(name: str, source: str = "") -> Optional[dict]:
         "stations": stations, "segKm": seg, "override": None,
         "lineName": got.get("sourceName") or ",".join(got.get("parts") or []),
     }
+
+
+# ---------------------------------------------------------------------------
+# 站序倒排：起点/终点对调，里程跟着重算
+# ---------------------------------------------------------------------------
+
+def reverse_line(name: str, source: str = "") -> dict:
+    """把一条线的站序整个倒过来，里程重排后落库
+
+    倒排以后起点变成原来的终点，里程不能只是把数组反过来（那样末站里程
+    会是 0，中间站全在倒着走）。这里按「原末站里程 - 原里程」重算，新首站
+    归零；有里程缺失的站仍然是缺失，不插值。
+
+    站序可能来自资料库 / china-emu / OSM（线路库里根本没有这条线），落库时
+    走 `save_line_stations` 的同一条路：库外线路先收编，档案线路存人工站序。
+    所以倒排之后「恢复档案站序」仍然能回到原样。
+    """
+    # 倒排的是「他现在看着的那份」：指定了来源就用那份，没指定先看线路库自己
+    # 的站序（含人工站序 / 自建站表），库内没有再按系统规则去资料库 / OSM 找
+    got = stations_for(name, source) if source else None
+    if not got:
+        got = _lib_stops(name) or stations_for(name)
+    if not got or len(got.get("stops") or []) < 2:
+        raise ValueError("这条线没有可倒排的站序")
+    src = [s for s in got["stops"] if (s.get("name") or "").strip()]
+    if len(src) < 2:
+        raise ValueError("这条线没有可倒排的站序")
+
+    kms = [s.get("km") for s in src if s.get("km") is not None]
+    base = max(kms) if kms else None
+    stops, miss = [], 0
+    for i, s in enumerate(reversed(src)):
+        km = s.get("km")
+        if base is None:
+            v = None
+        elif i == 0:
+            # 倒过来以后原来的终点就是起点，起点里程必然是 0（哪怕档案里
+            # 那一站压根没填里程 —— 沪昆高速线末两站就是空的）
+            v = 0.0
+        elif km is not None:
+            v = round(base - float(km), 1)
+        else:
+            v = None                     # 缺的就是缺，不插值
+        if v is None:
+            miss += 1
+        stops.append({"name": s["name"], "km": v})
+
+    # 与 compose_line 同口径：资料库那条的 name 才是规范线名，请求里的写法
+    # 可能只是它的 title / 别名（侯西铁路 → 侯西线）
+    canon = name
+    if got.get("source") == "catalog" and got.get("sourceName"):
+        canon = got["sourceName"]
+    # 不传 note：自建线路的备注、档案线路人工站序的备注都保留原样，
+    # 「站序倒排」这件事本身从站序首末站一眼就能看出来
+    detail = railcore.save_line_stations(canon, stops)
+    return {"ok": True, "name": detail.get("name"), "asked": name,
+            "n": len(stops), "from": got.get("source") or "",
+            "missing": miss, "totalKm": detail.get("totalKm"), "line": detail}
 
 
 # ---------------------------------------------------------------------------

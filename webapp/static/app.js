@@ -2682,29 +2682,89 @@ function lnRenderHead() {
       ${d.stopsManual ? '<span class="tag manual">站序人工</span>' : ''}
       <span class="ln-acts">
         ${d.stopsManual ? '<button class="btn sm ghost" id="lnStopsReset">恢复档案站序</button>' : ''}
+        <button class="btn sm ghost" id="lnRevBtn"
+                title="把整条线的站序倒过来（起点终点对调），里程按新起点重算并存进线路库">倒排站序</button>
         <button class="btn sm" id="lnStopsBtn">${d.custom ? '改站表' : '改站序'}</button>
         ${d.custom || d.source === 'huirui' ? '<button class="btn sm ghost" id="lnDel">删除</button>' : ''}
         <button class="btn sm${LN.editing ? ' on' : ''}" id="lnEditBtn">${LN.editing ? '收起编辑' : '编辑里程'}</button>
       </span>
     </div>
     <div class="l2">${d.aliasOf ? `「${esc(d.aliasOf)}」在资料库里对应这条线 · ` : ''}坐标覆盖 ${d.coordCoverage}%${lnMissCoordNote(d)} · 点击站点查看所属线路 · <span id="lnFoot"></span></div>
-    ${(d.sources || []).length > 1 ? `<div class="ln-src">
+    ${(d.sources || []).length > 1 ? (() => {
+      /* 当前生效的那份：临时点选 > 勾成默认的 > 系统规则 */
+      const eff = d.pickedFrom || d.srcPick || '';
+      const pick = d.srcPick || '';
+      return `<div class="ln-src">
         <span class="lab">站序来源</span>
-        <b class="srcb${d.pickedFrom ? '' : ' on'}" data-from=""
+        <b class="srcb${eff ? '' : ' on'}" data-from=""
            title="系统按走向长度在资料库 / china-emu 之间挑，都没有才用 OSM">系统默认</b>
-        ${(d.sources || []).map(v => `<b class="srcb${d.pickedFrom === v.source ? ' on' : ''}"
-           data-from="${esc(v.source)}"
-           title="${esc(v.label)}：${v.n} 站 · ${lnKmText(v.km)}${v.first ? `\n${esc(v.first)} → ${esc(v.last)}` : ''}">${
-           esc(LNSRC_SHORT[v.source] || v.label)} ${v.n}站</b>`).join('')}
-        <em class="hint">同名线路各来源站序不一样，点一个用哪个</em>
-      </div>` : ''}
+        ${(d.sources || []).map(v => `<span class="srcwrap">
+           <i class="pick${pick === v.source ? ' on' : ''}" data-pick="${esc(v.source)}"
+              title="${pick === v.source ? '已设为全项目默认，点一下取消' : '设为默认：之后所有用到这条线的地方都按这份站序'}">★</i>
+           <b class="srcb${eff === v.source ? ' on' : ''}" data-from="${esc(v.source)}"
+              title="${esc(v.label)}：${v.n} 站 · ${lnKmText(v.km)}${v.first ? `\n${esc(v.first)} → ${esc(v.last)}` : ''}">${
+              esc(LNSRC_SHORT[v.source] || v.label)} ${v.n}站</b></span>`).join('')}
+        <em class="hint">点站名临时看这份 · 点 ★ 设为默认${pick ? `（当前默认：${esc(LNSRC_SHORT[pick] || pick)}）` : ''}</em>
+      </div>`;
+    })() : ''}
     ${LN.notice ? `<div class="ln-notice">${esc(LN.notice)}</div>` : ''}`;
   lnRenderInfo();
   $$('#lnHead .ln-src .srcb').forEach(b => b.addEventListener('click', () => {
     showLine(d.name, null, b.dataset.from);
   }));
+  /* ★ = 勾成默认：之后全项目所有「不指定来源」的取数（选经由、算里程、补站序）
+     都按这一份来。再点一次取消，回到系统规则。 */
+  $$('#lnHead .ln-src .pick').forEach(el => el.addEventListener('click', async ev => {
+    ev.stopPropagation();
+    const src = el.dataset.pick;
+    const cur = (LN.data && LN.data.srcPick) === src ? '' : src;
+    el.disabled = true;
+    try {
+      await postJSON('/api/line/src-pick', { name: d.name, source: cur });
+      const nm = LNSRC_SHORT[src] || src;
+      showLine(d.name,
+        cur ? `已把「${nm}」设为默认：之后用到「${d.name}」的地方都按这份站序`
+            : `已取消默认，回到系统规则`,
+        LN.data ? (LN.data.pickedFrom || '') : '');
+    } catch (e) {
+      el.disabled = false;
+      alert('设置失败：' + e.message);
+    }
+  }));
   const stopsBtn = $('#lnStopsBtn');
   if (stopsBtn) stopsBtn.addEventListener('click', () => openLineStops(d));
+  /* 倒排：整条线的站序反过来，里程按新起点重算后落库。会覆盖档案站序，
+     所以走两段确认（点一次变问句，四秒内再点才执行）。 */
+  const revBtn = $('#lnRevBtn');
+  if (revBtn) {
+    let armed = false, timer = 0;
+    revBtn.addEventListener('click', async () => {
+      if (!armed) {
+        armed = true;
+        revBtn.textContent = '确认倒排？';
+        timer = setTimeout(() => { armed = false; revBtn.textContent = '倒排站序'; }, 4000);
+        return;
+      }
+      clearTimeout(timer);
+      armed = false;
+      revBtn.disabled = true;
+      revBtn.textContent = '倒排中…';
+      try {
+        const r = await postJSON('/api/line/stations/reverse', {
+          name: d.name,
+          from: LN.data ? (LN.data.pickedFrom || LN.data.effFrom || '') : '',
+        });
+        dropLibCaches();
+        const st = (r.line && r.line.stations) || [];
+        showLine(r.name || d.name,
+          `站序已倒排：${r.n} 站，起点改为「${st.length ? st[0].name : ''}」`, '');
+      } catch (e) {
+        revBtn.disabled = false;
+        revBtn.textContent = '倒排失败：' + e.message;
+        setTimeout(() => { revBtn.textContent = '倒排站序'; }, 5000);
+      }
+    });
+  }
   const stopsReset = $('#lnStopsReset');
   if (stopsReset) {
     let armed = false;
@@ -3454,6 +3514,7 @@ async function suggestNet() {
        每行下面挂来源徽标（线路库 212 站 / 资料库 89 站 / OSM 218 站），
        点哪个进哪个；点行本身 = 走系统默认。 */
     const vars = d.variants || {};
+    const picks = d.picks || {};
     const items = [...(d.items || []).map(x => ({ ...x, lib: true })),
                    ...(d.osm || []).map(x => ({ ...x, lib: false }))].slice(0, 12);
     if (!items.length) { box.classList.add('hidden'); return; }
@@ -3464,12 +3525,18 @@ async function suggestNet() {
            <span>${esc(it.name)}</span>
            <span class="c">${it.km} km · 无从查站序</span></div>`;
       }
-      const badges = vs.map(v => `<b class="srcb" data-v="${esc(it.name)}"
+      const pick = picks[it.name] || '';
+      const badges = vs.map(v => `<span class="sw">
+           <i class="pick${pick === v.source ? ' on' : ''}" data-v="${esc(it.name)}"
+              data-pick="${esc(v.source)}" title="${pick === v.source
+                ? '已设为默认（点一下取消）'
+                : '设为默认：之后所有用到这条线的地方都按这份站序'}">★</i><b class="srcb" data-v="${esc(it.name)}"
            data-from="${esc(v.source)}" title="${esc(v.label)}：${v.n} 站 · ${lnKmText(v.km)}
-${esc(v.first || '')} → ${esc(v.last || '')}">${esc(LNSRC_SHORT[v.source] || v.label)} ${v.n}站</b>`).join('');
+${esc(v.first || '')} → ${esc(v.last || '')}">${esc(LNSRC_SHORT[v.source] || v.label)} ${v.n}站</b></span>`).join('');
       return `<div class="si multi" data-v="${esc(it.name)}" data-stops="1">
          <div class="srow"><span>${esc(it.name)}</span>
-           <span class="c">${vs.length} 个来源${it.lib ? '' : ' · 线路库未收录'}</span></div>
+           <span class="c">${vs.length} 个来源${it.lib ? '' : ' · 线路库未收录'}${
+             pick ? ` · 默认 ${esc(LNSRC_SHORT[pick] || pick)}` : ''}</span></div>
          <div class="srcb-row">${badges}</div></div>`;
     }).join('');
     box.classList.remove('hidden');
@@ -3478,6 +3545,22 @@ ${esc(v.first || '')} → ${esc(v.last || '')}">${esc(LNSRC_SHORT[v.source] || v
       $('#netQ').value = el.dataset.v;
       box.classList.add('hidden');
       showLine(el.dataset.v, null, el.dataset.from);
+    }));
+    /* 下拉里也能勾默认，省得进详情页再点一次 */
+    $$('#sugNet .pick').forEach(el => el.addEventListener('click', async ev => {
+      ev.stopPropagation();
+      const src = el.dataset.pick;
+      const now = (picks[el.dataset.v] || '') === src ? '' : src;
+      $('#netQ').value = el.dataset.v;
+      box.classList.add('hidden');
+      try {
+        await postJSON('/api/line/src-pick', { name: el.dataset.v, source: now });
+        showLine(el.dataset.v, now
+          ? `已把「${LNSRC_SHORT[src] || src}」设为默认：之后用到「${el.dataset.v}」的地方都按这份站序`
+          : '已取消默认，回到系统规则', now ? src : '');
+      } catch (e) {
+        alert('设置失败：' + e.message);
+      }
     }));
     $$('#sugNet .si').forEach(el => el.addEventListener('click', ev => {
       if (ev.target.closest('.srcb')) return;

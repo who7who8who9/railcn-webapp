@@ -1,12 +1,14 @@
-"""回归：站序「默认来源」勾选 + 站序倒排
+"""回归：站序「默认来源」勾选 + 按来源倒排
 
 两条口径：
 
   1. **默认来源**：同一条线名在几个来源里各有站序，用户在界面上点 ★ 勾一份以后，
      全项目所有「不指定来源」的取数（线路详情、选经由、拼站序）都按那一份来。
      指定 from 的临时查看仍然优先 —— 勾的是默认，不是锁死。
-  2. **倒排**：整条线的站序反过来，里程按新起点重算后落库。库外线路先收编，
-     档案线路存人工站序，所以「恢复档案站序」还能回到原样。
+  2. **按来源倒排**：同一条线的几份站序方向可能不一致（OSM 京沪线是 上海→北京，
+     档案是 北京→上海）。倒排只动**当前这一份**：资料库 / china-emu / OSM /
+     分段拼记一条 `line_src_fix`，读的时候翻转，原始数据不改；再点一次就恢复。
+     库内线路（lib / custom）那份本来就是线路自己，才走人工站序。
 
 用法：python scripts/test_src_pick.py      （需要服务在 8686 跑着）
 """
@@ -62,6 +64,20 @@ def picks():
 def overrides():
     with sqlite3.connect(DB) as c:
         return {r[0] for r in c.execute("SELECT name FROM line_override")}
+
+
+def fixes():
+    try:
+        with sqlite3.connect(DB) as c:
+            return {(r[0], r[1], r[2])
+                    for r in c.execute("SELECT name, source, kind FROM line_src_fix")}
+    except sqlite3.DatabaseError:
+        return set()
+
+
+def lineseg_sources(name):
+    """详情页那条来源切换条上的各来源（首末站 / 站数 / 是否已倒排）"""
+    return line_of(name, "osm").get("sources") or []
 
 
 # ---------------------------------------------------------------------------
@@ -206,8 +222,80 @@ def test_reverse_file():
         post("/api/line/stations/clear", {"name": FILE_LINE})
 
 
+def test_reverse_source():
+    """核心：只翻某一个来源的那份站序，线路本身（档案 / 人工站序）一点都不动"""
+    print("\n== 倒排：只翻一个来源 ==")
+    # 找一条「OSM 那份和线路库那份方向相反」的线，这就是用户真遇到的情形
+    nm = ""
+    for cand in ("京沪线", "京广线", "陇海线", "沪昆线", "京哈线"):
+        try:
+            a, b = line_of(cand), line_of(cand, "osm")
+        except Exception:                    # noqa: BLE001
+            continue
+        sa, sb = a.get("stations") or [], b.get("stations") or []
+        if len(sa) > 1 and len(sb) > 1 and sa[0]["name"] != sb[0]["name"]:
+            nm = cand
+            break
+    if not nm:
+        print("  跳过：没找到方向相反的线")
+        return
+
+    keep = any(f[:2] == (nm, "osm") for f in fixes())      # 跑完还原成进来时的样子
+    lib = line_of(nm)
+    lib_first, lib_last = lib["stations"][0]["name"], lib["stations"][-1]["name"]
+    cat = line_of(nm, "catalog")
+    cat_first = (cat.get("stations") or [{}])[0].get("name")
+    osm = line_of(nm, "osm")
+    osm_first, osm_last = osm["stations"][0]["name"], osm["stations"][-1]["name"]
+    ovr = overrides()
+    print("  %s：线路库 %s→%s，OSM %s→%s" % (nm, lib_first, lib_last, osm_first, osm_last))
+    try:
+        post("/api/line/stations/reverse", {"name": nm, "from": "osm", "mode": "off"})
+
+        r = post("/api/line/stations/reverse", {"name": nm, "from": "osm"})
+        ck(r.get("inPlace") is True, "只挂来源修正，不当成整条线改", r)
+        ck(r.get("reversed") is True and r.get("n") == len(osm["stations"]),
+           "OSM 那份翻了，站数不变", "%s 站" % r.get("n"))
+        ck(r.get("first") == osm_last and r.get("last") == osm_first,
+           "首末对调", "%s→%s" % (r.get("first"), r.get("last")))
+
+        d = line_of(nm, "osm")
+        ck(d.get("reversed") is True, "详情页带 reversed 标记")
+        ck("reverse" in (d.get("srcFix") or []), "详情页带 srcFix=reverse", d.get("srcFix"))
+        ck(d["stations"][0]["name"] == osm_last, "看 OSM 那份是反过来的",
+           d["stations"][0]["name"])
+        kms = [s["km"] for s in d["stations"] if s.get("km") is not None]
+        drops = sum(1 for i in range(len(kms) - 1) if kms[i] > kms[i + 1])
+        ck(kms and kms[0] == 0 and drops <= 2, "里程按新起点重算（整体递增）",
+           "%s 处倒挂" % drops)
+
+        # 这三条是用户最在意的：别的来源和线路本身不能被带着改
+        ck(line_of(nm)["stations"][0]["name"] == lib_first
+           and line_of(nm)["stations"][-1]["name"] == lib_last,
+           "线路库那份没动", "%s→%s" % (lib_first, lib_last))
+        ck((cat.get("stations") or [{}])[0].get("name") == cat_first,
+           "资料库那份没动", cat_first)
+        ck(nm not in overrides() or nm in ovr, "没有生成本条线的人工站序")
+
+        vs = {v["source"]: v for v in lineseg_sources(nm)}
+        ck(vs.get("osm", {}).get("reversed") is True, "来源条上 OSM 标了已倒排")
+        ck(vs.get("osm", {}).get("first") == osm_last, "来源条上 OSM 首站也反了")
+        ck(not vs.get("catalog", {}).get("reversed"), "资料库那份没被标")
+
+        # 取消：标记删掉，原始站序原样回来
+        r2 = post("/api/line/stations/reverse", {"name": nm, "from": "osm"})
+        ck(r2.get("reversed") is False, "再点一次是恢复，不是二次翻转")
+        d2 = line_of(nm, "osm")
+        ck(d2["stations"][0]["name"] == osm_first, "OSM 回到原方向",
+           d2["stations"][0]["name"])
+        ck(not (nm, "osm", "reverse") in fixes(), "修正标记已删")
+    finally:
+        post("/api/line/stations/reverse",
+             {"name": nm, "from": "osm", "mode": "on" if keep else "off"})
+
+
 def test_reverse_loose():
-    """线路库里没有、只有资料库站序的线：倒排要先把线收编再落站序"""
+    """线路库里没有、只有资料库站序的线：倒排只翻资料库那一份，不把线收编进库"""
     print("\n== 倒排：库外线路 ==")
     if picks().get(CANON):
         post("/api/line/src-pick", {"name": CANON, "source": ""})
@@ -215,15 +303,22 @@ def test_reverse_loose():
     if d.get("custom"):
         print("  跳过：%s 已经被收进线路库了" % CANON)
         return
+    before = overrides()
+    first = d["stations"][0]["name"]
     try:
-        first = d["stations"][0]["name"]
-        r = post("/api/line/stations/reverse", {"name": CANON})
-        st = r["line"]["stations"]
-        ck(r["name"] == CANON, "落到规范线名", r.get("name"))
-        ck(st[0]["name"] != first and st[-1]["name"] == first,
-           "站序反了", "%s→%s（原首站 %s）" % (st[0]["name"], st[-1]["name"], first))
+        r = post("/api/line/stations/reverse", {"name": CANON, "from": "catalog"})
+        ck(r.get("inPlace") is True, "只挂来源修正，不落人工站序", r.get("from"))
+        ck(r.get("name") == CANON, "落在线名上", r.get("name"))
+        ck(r.get("first") != first and r.get("last") == first,
+           "站序反了", "%s→%s（原首站 %s）" % (r.get("first"), r.get("last"), first))
+        ck(CANON not in (overrides() - before), "没有因此生出人工站序")
+        r2 = post("/api/line/stations/reverse",
+                  {"name": CANON, "from": "catalog", "mode": "off"})
+        ck(r2.get("reversed") is False, "能取消")
+        ck(line_of(CANON)["stations"][0]["name"] == first, "回到原样", first)
     finally:
-        post("/api/line/delete", {"name": CANON})
+        post("/api/line/stations/reverse",
+             {"name": CANON, "from": "catalog", "mode": "off"})
 
 
 def test_ui():
@@ -260,6 +355,7 @@ def main():
     test_pick_bad()
     test_reverse_custom()
     test_reverse_file()
+    test_reverse_source()
     test_reverse_loose()
     test_ui()
     print("\n%s" % ("全部通过" if not _fail else "失败 %d 项" % _fail))

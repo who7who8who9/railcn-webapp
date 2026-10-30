@@ -1151,6 +1151,9 @@ button.vseg:not(.picked):hover::after{opacity:1}
 }
 .ln-src .pick:hover,.suggest .si .pick:hover{color:#e8a33d;transform:scale(1.2)}
 .ln-src .pick.on,.suggest .si .pick.on{color:#e8a33d}
+/* 来源徽标上的「已倒排」记号：只影响这一份，所以标在徽标里而不是整条线上 */
+.ln-src .rvb{font-style:normal;font-size:10px;margin-left:3px;opacity:.85}
+.ln-src .srcb.on .rvb{opacity:1}
 .suggest .si .sw{display:inline-flex;align-items:center;gap:1px}
 /* 联想条里的来源徽标（车站：12306 站表 / 线路档案 / OSM） */
 .suggest .si .c{display:inline-flex;align-items:center;gap:5px}

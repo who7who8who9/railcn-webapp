@@ -1005,7 +1005,7 @@ python scripts/report_line_names.py --out docs/line-names-report.md
 | `POST /api/line/new` | `name`、`stations[]`（`{name, km}`，km 可空）、`note`、`replace` | 新增线路，返回线路详情 + `filledStations`（这次补进车站库的沿线站）；`replace=1` 允许覆盖同名**自建**线路（改站表用） |
 | `POST /api/line/stations` | `name`、`stations[]`、`note` | 改站序（站中间插站 / 调先后）：自建线路改自己的站表，档案线路写 `line_override.stops_json`（人工站序覆盖，原始档案不动），返回线路详情 + `stationOrder`；线路库没有这条线时先按资料库规范名收进线路库，返回里多 `adopted` / `adoptedFrom` |
 | `POST /api/line/stations/clear` | `name` | 撤销档案线路的人工站序，回到档案原样（连带清掉按旧下标算的人工里程） |
-| `POST /api/line/stations/reverse` | `name`、`from` | 站序整条倒排：起点终点对调，里程按「原末站里程 − 原里程」重算（新起点强制 0，缺里程的仍缺、不插值）。落库走改站序那条路（自建线改自己站表、档案线存人工站序、库外线路先收编），返回 `n` / `missing` / 总里程 + 倒排后的线路详情。倒排两次回到原样 |
+| `POST /api/line/stations/reverse` | `name`、`from`、`mode`（空=切换 / `on` / `off`） | **按来源**倒排：只翻 `from` 那一份的站序，里程按「原末站里程 − 原里程」重算（新起点强制 0，缺里程的仍缺、不插值）。`catalog`/`chinaemu`/`osm`/`parts` 只记一条 `line_src_fix(kind='reverse')` 读时翻转，原始表不改，`inPlace=true`；`lib`/`custom` 那份就是线路自己，走改站序（`inPlace=false`，返回 `line`）。再点一次 = 恢复，不是二次翻转 |
 | `POST /api/line/src-pick` | `name`、`source` | 勾「这条线默认用哪一份站序」（`lib`/`custom`/`catalog`/`chinaemu`/`osm`/`parts`，空 = 取消）。勾上以后所有不指定来源的取数都按它：`/api/line`、`/api/line/stops`（选经由）、`lineseg.stations_for()`。指定 `from` 的临时查看仍然优先 |
 | `POST /api/line/delete` | `name` | 删除自建线路（连带清掉它的里程校正） |
 | `POST /api/station/new` | `name`、`lat`、`lon`、`lines[]`、`tele`、`bureau`、`note` | 新增车站 |

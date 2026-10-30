@@ -1011,22 +1011,11 @@ def list_src_picks() -> Dict[str, str]:
     return _SRC_PICK_CACHE
 
 
-def src_pick(name: str) -> str:
-    """这条线的默认站序来源；没勾过返回空串（= 走系统规则）
-
-    勾的时候存的是「界面上显示的那个线名」（多半是资料库的规范名），而查询时
-    拿到的可能是它的别名 —— 搜「侯西铁路」进来的线名就是别名的写法。所以查
-    不到时再按规范名找一次，否则同一条线搜别名和搜正名会给出两套站序。
-    """
+def _canon_name(nm: str) -> str:
+    """别名 → 规范线名（线路库优先，其次资料库）；查不到返回空串"""
     global _SRC_ALIAS_CACHE
-    nm = re.sub(r"\s+", "", str(name or ""))
-    if not nm:
-        return ""
-    m = list_src_picks()
-    if nm in m:
-        return m[nm]
     if nm in _SRC_ALIAS_CACHE:
-        return m.get(_SRC_ALIAS_CACHE[nm], "")
+        return _SRC_ALIAS_CACHE[nm]
     canon = ""
     try:
         ln = cnrail.line(nm)
@@ -1038,6 +1027,23 @@ def src_pick(name: str) -> str:
     except Exception:                        # noqa: BLE001
         canon = ""
     _SRC_ALIAS_CACHE[nm] = canon
+    return canon
+
+
+def src_pick(name: str) -> str:
+    """这条线的默认站序来源；没勾过返回空串（= 走系统规则）
+
+    勾的时候存的是「界面上显示的那个线名」（多半是资料库的规范名），而查询时
+    拿到的可能是它的别名 —— 搜「侯西铁路」进来的线名就是别名的写法。所以查
+    不到时再按规范名找一次，否则同一条线搜别名和搜正名会给出两套站序。
+    """
+    nm = re.sub(r"\s+", "", str(name or ""))
+    if not nm:
+        return ""
+    m = list_src_picks()
+    if nm in m:
+        return m[nm]
+    canon = _canon_name(nm)
     return m.get(canon, "") if canon else ""
 
 
@@ -1063,6 +1069,97 @@ def set_src_pick(name: str, source: str) -> dict:
     _SRC_PICK_CACHE = None
     _SRC_ALIAS_CACHE.clear()     # 之前可能把「查不到规范名」缓下来了
     return {"name": nm, "source": src}
+
+
+# ---------------------------------------------------------------------------
+# 来源级修正：只改「某一条来源的某一份站序」，不动线路本身
+#
+# 为什么要有这张表：同一条线名在各来源里的方向不一定一致 —— OSM 的京沪线是
+# 按 way 的绘制方向拼的，可能正好从上海往北京；而资料库那份是对的。原来的
+# 「倒排站序」把结果存进线路的人工站序（override），等于把**整条线**翻过来，
+# 界面上点着 OSM 那份看的时候还是原样，其它来源反倒跟着变了。
+#
+# 所以倒排按 (线名, 来源) 记一个修正标记，读这份来源的站序时当场翻转 ——
+# 只影响「OSM 京沪线」，资料库 / china-emu / 线路库自己的那份一个字节都不动。
+# 取消就是把标记删掉，原始数据永远不被改写。
+
+_SRC_FIX_CACHE: Optional[Dict[str, Dict[str, List[str]]]] = None
+SRC_FIX_KINDS = ("reverse",)
+
+
+def _ensure_src_fix(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS line_src_fix (
+               name       TEXT NOT NULL,      -- 线名（存规范名，别名查询时回退匹配）
+               source     TEXT NOT NULL,      -- catalog / chinaemu / osm / parts
+               kind       TEXT NOT NULL,      -- 目前只有 reverse
+               updated_at REAL,
+               PRIMARY KEY(name, source, kind)
+           )""")
+
+
+def list_src_fixes() -> Dict[str, Dict[str, List[str]]]:
+    """全部来源级修正：{线名: {来源: [kind, ...]}}，一次读进内存"""
+    global _SRC_FIX_CACHE
+    if _SRC_FIX_CACHE is None:
+        try:
+            with db() as conn:
+                _ensure_src_fix(conn)
+                got: Dict[str, Dict[str, List[str]]] = {}
+                for r in conn.execute("SELECT name, source, kind FROM line_src_fix"):
+                    got.setdefault(r["name"], {}).setdefault(r["source"], []).append(r["kind"])
+            _SRC_FIX_CACHE = got
+        except sqlite3.DatabaseError:
+            _SRC_FIX_CACHE = {}
+    return _SRC_FIX_CACHE
+
+
+def src_fix(name: str, source: str) -> List[str]:
+    """这条线这个来源上挂了哪些修正；没有返回空表
+
+    与 src_pick 同一个坑：存的是界面上那个规范线名，查询可能用的是别名
+    （侯西铁路 → 侯西线），所以要回退按规范名再找一次。
+    """
+    nm = re.sub(r"\s+", "", str(name or ""))
+    src = (source or "").strip()
+    if not nm or not src:
+        return []
+    m = list_src_fixes()
+    hit = (m.get(nm) or {}).get(src)
+    if hit:
+        return list(hit)
+    canon = _canon_name(nm)
+    if canon and canon != nm:
+        hit = (m.get(canon) or {}).get(src)
+        if hit:
+            return list(hit)
+    return []
+
+
+def set_src_fix(name: str, source: str, kind: str, on: bool) -> dict:
+    """挂上 / 取消一个来源级修正（on=False 仍是删标记，原始数据不受影响）"""
+    global _SRC_FIX_CACHE
+    nm = re.sub(r"\s+", "", str(name or ""))
+    src = (source or "").strip()
+    if not nm:
+        raise ValueError("要指定是哪个线名")
+    if src not in ("catalog", "chinaemu", "osm", "parts"):
+        raise ValueError("这个来源不支持单独倒排：" + src)
+    if kind not in SRC_FIX_KINDS:
+        raise ValueError("不认识的修正：" + kind)
+    key = _canon_name(nm) or nm          # 存规范名，别名查询也能找到
+    with _db_lock, db() as conn:
+        _ensure_src_fix(conn)
+        if on:
+            conn.execute(
+                "INSERT INTO line_src_fix(name, source, kind, updated_at) VALUES(?,?,?,?)"
+                " ON CONFLICT(name, source, kind) DO UPDATE SET"
+                " updated_at=excluded.updated_at", (key, src, kind, time.time()))
+        else:
+            conn.execute("DELETE FROM line_src_fix WHERE name=? AND source=? AND kind=?",
+                         (key, src, kind))
+    _SRC_FIX_CACHE = None
+    return {"name": key, "source": src, "kind": kind, "on": bool(on)}
 
 
 def line_override_map() -> Dict[str, dict]:

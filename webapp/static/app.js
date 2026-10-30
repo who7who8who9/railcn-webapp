@@ -2682,8 +2682,19 @@ function lnRenderHead() {
       ${d.stopsManual ? '<span class="tag manual">站序人工</span>' : ''}
       <span class="ln-acts">
         ${d.stopsManual ? '<button class="btn sm ghost" id="lnStopsReset">恢复档案站序</button>' : ''}
-        <button class="btn sm ghost" id="lnRevBtn"
-                title="把整条线的站序倒过来（起点终点对调），里程按新起点重算并存进线路库">倒排站序</button>
+        ${(() => {
+          /* 倒排是**按来源**的：现在看的是哪一份就只翻哪一份（OSM 京沪线 ≠ 所有京沪线）。
+             库内线路（lib/custom）那份本来就是线路自己，翻了就是整条线，标题里说清楚。 */
+          const effSrc = d.pickedFrom || d.effFrom || d.from || '';
+          const revOn = (d.srcFix || []).indexOf('reverse') >= 0;
+          const nm = effSrc ? (LNSRC_SHORT[effSrc] || effSrc) : '线路库';
+          const t = effSrc && effSrc !== 'lib' && effSrc !== 'custom'
+            ? `只把「${nm}」这一份的站序倒过来（起点终点对调），里程按新起点重算；其它来源不动。再点一次恢复。`
+            : '把整条线的站序倒过来（起点终点对调），里程按新起点重算并存进线路库';
+          return `<button class="btn sm ghost${revOn ? ' on' : ''}" id="lnRevBtn"
+                  data-mode="${revOn ? 'off' : 'on'}" data-rev="${revOn ? 1 : 0}" title="${esc(t)}">${
+                  revOn ? `已倒排「${esc(nm)}」· 恢复` : '倒排站序'}</button>`;
+        })()}
         <button class="btn sm" id="lnStopsBtn">${d.custom ? '改站表' : '改站序'}</button>
         ${d.custom || d.source === 'huirui' ? '<button class="btn sm ghost" id="lnDel">删除</button>' : ''}
         <button class="btn sm${LN.editing ? ' on' : ''}" id="lnEditBtn">${LN.editing ? '收起编辑' : '编辑里程'}</button>
@@ -2701,8 +2712,8 @@ function lnRenderHead() {
            <i class="pick${pick === v.source ? ' on' : ''}" data-pick="${esc(v.source)}"
               title="${pick === v.source ? '已设为全项目默认，点一下取消' : '设为默认：之后所有用到这条线的地方都按这份站序'}">★</i>
            <b class="srcb${eff === v.source ? ' on' : ''}" data-from="${esc(v.source)}"
-              title="${esc(v.label)}：${v.n} 站 · ${lnKmText(v.km)}${v.first ? `\n${esc(v.first)} → ${esc(v.last)}` : ''}">${
-              esc(LNSRC_SHORT[v.source] || v.label)} ${v.n}站</b></span>`).join('')}
+              title="${esc(v.label)}：${v.n} 站 · ${lnKmText(v.km)}${v.first ? `\n${esc(v.first)} → ${esc(v.last)}` : ''}${v.reversed ? '\n（这份被人工倒排过，只影响这一份）' : ''}">${
+              esc(LNSRC_SHORT[v.source] || v.label)} ${v.n}站${v.reversed ? '<i class="rvb" title="已倒排">↺</i>' : ''}</b></span>`).join('')}
         <em class="hint">点站名临时看这份 · 点 ★ 设为默认${pick ? `（默认：${esc(LNSRC_SHORT[pick] || pick)}）` : ''}</em>
       </div>`;
     })() : ''}
@@ -2732,31 +2743,47 @@ function lnRenderHead() {
   }));
   const stopsBtn = $('#lnStopsBtn');
   if (stopsBtn) stopsBtn.addEventListener('click', () => openLineStops(d));
-  /* 倒排：整条线的站序反过来，里程按新起点重算后落库。会覆盖档案站序，
-     所以走两段确认（点一次变问句，四秒内再点才执行）。 */
+  /* 倒排：只翻「当前看着的这一份来源」的站序（OSM 京沪线 ↛ 所有京沪线），
+     里程按新起点重算。二段确认，因为库内线路改的是整条线的人工站序。 */
   const revBtn = $('#lnRevBtn');
   if (revBtn) {
+    const curFrom = () => (LN.data ? (LN.data.pickedFrom || LN.data.effFrom
+      || LN.data.from || '') : '');
+    const srcName = () => {
+      const s = curFrom();
+      return s ? (LNSRC_SHORT[s] || s) : '线路库';
+    };
+    const revOn = () => revBtn.dataset.rev === '1';
     let armed = false, timer = 0;
     revBtn.addEventListener('click', async () => {
       if (!armed) {
         armed = true;
-        revBtn.textContent = '确认倒排？';
-        timer = setTimeout(() => { armed = false; revBtn.textContent = '倒排站序'; }, 4000);
+        revBtn.textContent = `确认倒排「${srcName()}」这份？`;
+        timer = setTimeout(() => {
+          armed = false;
+          revBtn.textContent = revOn() ? `已倒排「${srcName()}」· 恢复` : '倒排站序';
+        }, 4000);
         return;
       }
       clearTimeout(timer);
       armed = false;
       revBtn.disabled = true;
-      revBtn.textContent = '倒排中…';
+      revBtn.textContent = revOn() ? '恢复中…' : '倒排中…';
       try {
         const r = await postJSON('/api/line/stations/reverse', {
           name: d.name,
-          from: LN.data ? (LN.data.pickedFrom || LN.data.effFrom || '') : '',
+          from: curFrom(),
+          mode: revBtn.dataset.mode || '',
         });
-        dropLibCaches();
-        const st = (r.line && r.line.stations) || [];
-        showLine(r.name || d.name,
-          `站序已倒排：${r.n} 站，起点改为「${st.length ? st[0].name : ''}」`, '');
+        if (!r.inPlace) dropLibCaches();
+        const nm = LNSRC_SHORT[r.from] || r.from || '线路库';
+        const msg = r.inPlace
+          ? (r.reversed
+              ? `已把「${nm}」这份站序倒排：${r.n} 站，现在从「${r.first}」到「${r.last}」（其它来源未改）`
+              : `已恢复「${nm}」这份站序：${r.n} 站，现在从「${r.first}」到「${r.last}」`)
+          : `站序已倒排：${r.n} 站，起点改为「${(r.line && r.line.stations || []).length
+              ? r.line.stations[0].name : ''}」`;
+        showLine(r.name || d.name, msg, r.inPlace ? (curFrom() || null) : null);
       } catch (e) {
         revBtn.disabled = false;
         revBtn.textContent = '倒排失败：' + e.message;
@@ -4402,12 +4429,13 @@ async function boot() {
   const qCode = (qs.get('code') || '').trim().toUpperCase();
   const qDate = (qs.get('date') || '').trim();
   const qLine = (qs.get('line') || '').trim();
+  const qFrom = (qs.get('from') || '').trim();   // ?line=京沪线&from=osm 直接看某一份站序
   if (qCode) {
     if (qDate) { S.date = qDate; $('#date').value = qDate; }
     openTrain(qCode, S.date, { cacheOnly: qs.get('cache') === '1' });
   } else if (qLine) {
     switchTab('net');                     // ?line=浑白线 直接看这条线
-    showLine(qLine);
+    showLine(qLine, null, qFrom || null);
   } else {
     openTrain('G1');
   }

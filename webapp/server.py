@@ -202,10 +202,11 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/line/stations/clear":
                 return self.json({"ok": True, **railcore.clear_line_stations(payload.get("name"))})
 
-            # 站序倒排：起点终点对调，里程重排后落库
+            # 站序倒排：只对「当前这一份来源」生效（OSM 京沪线 ↛ 所有京沪线）
             if path == "/api/line/stations/reverse":
                 return self.json(lineseg.reverse_line(
-                    payload.get("name"), payload.get("from") or ""))
+                    payload.get("name"), payload.get("from") or "",
+                    payload.get("mode") or ""))
 
             # 勾/取消「这条线默认用哪一份站序」
             if path == "/api/line/src-pick":
@@ -468,6 +469,10 @@ class Handler(BaseHTTPRequestHandler):
                 payload["pickedFrom"] = frm or ""
                 payload["srcPick"] = pick
                 payload["effFrom"] = eff or ""
+                # 当前这份站序是否被人工倒排过（来源级修正，只影响这一份）
+                payload.setdefault("srcFix", [])
+                if not payload.get("srcFix"):
+                    payload["reversed"] = False
                 return self.json(payload)
 
             # 指定来源：同一条线几个来源各有说法，界面上点了哪个就按哪个拼，

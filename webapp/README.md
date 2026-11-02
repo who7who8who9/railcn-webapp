@@ -593,6 +593,72 @@ python scripts\import_crtrain.py     :: 归集成 data\crtrain\lines.json + geom
 新增线路的里程若还想改，照旧用「编辑里程」，覆盖值存在 `line_override`，与自定义线路的数据分开；
 删除自定义线路时会连带清掉它的 `line_override`，免得以后重建同名线路套到旧值。
 
+### 清空线路库（保留线路资料库）与重建
+
+线路这一层现在可以被整体清空、再从零重建。`scripts/reset_lines.py` 干这件事：
+
+```bat
+python scripts\reset_lines.py                         :: 只看会清什么，不写库
+python scripts\reset_lines.py --yes                   :: 备份 → 清空
+python scripts\reset_lines.py --yes --keep-linedesk   :: 整理台留着
+python scripts\reset_lines.py --restore data\backup\lines-reset-20261102-100211
+```
+
+- **清**：`line_custom`、`line_override`、`line_src_pick`、`line_src_fix`、
+  `line_osm` / `line_osm_stop`、`line_ce` / `line_ce_stop`、`station_osm_line`、`line_geom`，
+  底表 `data/cnrail_lines.json` 写成 `[]`，整理台 `linedesk.db` 六张表一起清；
+  `station_osm.n_lines` 归零（车站还留着，只是「属于哪条线」不存在了）
+- **留**：`line_catalog` / `line_catalog_stop`（资料库 844 条 + 10377 行站表，只作参考）、
+  `station_osm` / `station_custom` / `coord_override`、车次、`train_override`、`curate`
+- **备份**：`data/backup/lines-reset-<时间戳>/` 里放清空前的整库 `rail.db`、`linedesk.db`、
+  `cnrail_lines.json`、逐表行级导出 `lines_export.json`（只想捞一条线时在这里找）、
+  带还原命令的 `README.md`。备份前先 `PRAGMA wal_checkpoint(TRUNCATE)` 再拷，
+  服务在跑也是完整的一份（0 字节的 `-wal` 不拷，`-shm` 是共享内存索引、不用备份）
+- 清完**必须重启服务**，内存里的线路库还是老数据
+- 2026-11-02 实清过一次，备份在 `data/backup/lines-reset-20261102-100211/`
+  （清前：自建 65 / 人工站序 6 / 默认勾选 3 / 来源修正 1 / OSM 1727 条 11788 站 /
+  china-emu 660 条 6031 站 / 底表 417 条）。清空后车次、校对、资料库照常，只是没有线路可套
+
+### 人工导入 GeoJSON 走向
+
+清空之后按人工整理的 GeoJSON 重建：车站页 / 线路页顶部「导入 GeoJSON」，选一个
+`.geojson` 就落成一条**自建线路** —— 站序、里程、真实走向一起进来，之后改站序、倒排、
+改里程、删除都照旧能用在它身上。
+
+文件怎么认：
+
+- `FeatureCollection` / 单个 `Feature` / 裸几何都收；`LineString`、`MultiLineString`、
+  `Polygon`（取外环）、`GeometryCollection` 都拆得开 —— 京沪线那份是 2755 段 `LineString` 的集合
+- 线名取 `properties` 的 `线路名称` / `线名` / `name`；车站是带 `Point` 几何的要素，
+  站名取 `站名` / `name` / `车站名`；方向优先看 `起点` / `终点` 对不对得上站名，
+  对不上就跟文件里第一个站走
+- 同名线路已存在：自建的可以覆盖（界面先问一次，带 `replace` 重发）；
+  **档案线路一律不动**，报错会写清「要按这份 GeoJSON 重来，先在线路页把这条线删掉，或者换个线名」
+
+站序和里程怎么算（核心，别改成「按文件顺序连」）：
+
+1. **建图**：所有段的端点按 6 位小数合并成节点，每段是一条边，权重 = 沿线米数
+2. **补断口**：2 km 以内的两个端点之间补一条「直线边」—— OSM 数据里到处是几十米到几百米的洞，
+   不补就串不出整条线（沿用 `chain_parts` 的老办法，京沪线 2755 段只串出 967 km 就停）
+3. **车站投影切线**：每个站投到最近的段上，并在投影点**把段切开**，让站成为正式节点。
+   这一步不能省 —— 只吸到段端点上，长段中间的站会被拉到十几公里外（实测夹沟 11.9 km、西寺坡 15.7 km）
+4. **排站序**：先按 PCA 主轴投影定大方向（哪头起哪头终），再做局部插入优化
+   （窗口 6 站，只有省 1 米以上才换位）。不能按文件点序排 —— 京沪线的白家店排在南驿前、
+   天津枢纽前后颠倒，按文件顺序连要多算 90 km；也不能用最近邻贪心（会顺着邻线跑偏），
+   更不能按纬度排（京沪线会算成 1926 km）
+5. **里程**：站与站之间跑 Dijkstra 取图上最短路，首站恒 0、单调递增；
+   两点不连通时退化成直线 × 1.2，页面会提示
+6. **走向存两份**：`line_geom.parts_gz` 是原始碎段（判连通用），`spine_gz` 是串好的连续走向 ——
+   地图画这一条到底，不然 2755 个碎段画出来像撒了一把芝麻，站点圆点还会把线盖成一串珠子
+   （站点数 > 60 时前端把圆点从 4.2px 缩到 2.6px，白描边 2px 缩到 1px）
+
+京沪线实测：文件里 157 个站要素 → **156 站**（林场重复，合并）、**1468.7 km**
+（资料库 1463 km，差 0.4%）、断口 0、连续走向 1093 点、耗时约 1 秒。
+落库后头部标「自建」，来源条出现「★自建 156站」，走向卡标「真实走向 GeoJSON / 导入文件 / 几何里程 / 走向分段」。
+
+> 目录里没有 `.geojson` 后缀的样例文件进仓库（`.gitignore` 挡了 `*.geojson`），
+> 样例放在 `C:\Users\Administrator\WorkBuddy\...\geo_demo\`，导入靠界面选文件。
+
 ### 只有 OSM 几何的线路：怎么把车站补上
 
 这类线（联络线最多）在线路库、资料库里都没有，只有 OSM 的一段轨道。`GET /api/line/osm/stations`
@@ -954,8 +1020,8 @@ python scripts/report_line_names.py --out docs/line-names-report.md
 | `GET /api/line/stops` | `q`（线路名） | 该线的完整站序（只有站名，按站序），供校对页「经由」选站；命名线路的站序里缺的线路所 / 乘降所 / 中继站会用资料库的同名站序按邻居位置补回来，只在资料库里的线路（银西高铁）也能出站序；OSM 有、库和资料库都没收的，按同名前缀的分段线拼（京哈高速线 = 京沈段 + 沈哈段）；`from` 说明站序来自哪（`lib` / `catalog` / `parts`），`found=false` 表示哪都没这条线；勾过默认来源的线按默认那份给，免得人工在详情页挑过的站名和选经由时的对不上 |
 | `GET /api/custom` | — | 用户新增的线路与车站清单 |
 | `GET /api/stations/names` | — | 全部站名（9548 条 = 车站档案 + 12306 站表，给新增线路时的站名补全） |
-| `GET /api/line` | `q` | 线路详情（有序站点 + 累计里程 + 坐标，可直接画线）；另带 `kmBase`（档案原值）、`segKm`（各段生效里程，不详为 `null`）、`override`、`osm`（OSM 线名 / 几何里程 / 桥隧）、`osmOther`（同名前缀下线路库没收录的 OSM 线，见上文「被同名线挡住」）。线路库里没有、但能补出站序的（成昆线 133 站），返回补好的线路 + `stopsFrom` / `stopsParts`；库内按段命名的线路（成昆线元昆段），`osm` 是借父线裁出来的那份，带 `borrowed` / `clipped` / `clip`。`sources` 是这条线名在各来源的样子，`pickedFrom` 是这次临时点选的来源，`srcPick` 是勾成默认的那份，`effFrom` 是实际生效的（点选 > 默认 > 系统规则）。`from=<来源>` 时按指定来源拼 |
-| `GET /api/line/osm` | `q`、`km` | 线路的 OSM 几何（`parts` = WGS-84 折线数组，可直接画）；`km` 给已知里程时挡掉同名残段。分段线名（成昆线元昆段）借父线几何并按首末站裁出本段 |
+| `GET /api/line` | `q` | 线路详情（有序站点 + 累计里程 + 坐标，可直接画线）；另带 `kmBase`（档案原值）、`segKm`（各段生效里程，不详为 `null`）、`override`、`osm`（OSM 线名 / 几何里程 / 桥隧）、`osmOther`（同名前缀下线路库没收录的 OSM 线，见上文「被同名线挡住」）。线路库里没有、但能补出站序的（成昆线 133 站），返回补好的线路 + `stopsFrom` / `stopsParts`；库内按段命名的线路（成昆线元昆段），`osm` 是借父线裁出来的那份，带 `borrowed` / `clipped` / `clip`。`sources` 是这条线名在各来源的样子，`pickedFrom` 是这次临时点选的来源，`srcPick` 是勾成默认的那份，`effFrom` 是实际生效的（点选 > 默认 > 系统规则）。`from=<来源>` 时按指定来源拼。GeoJSON 导入的线，`osm` 里 `source='geojson'`、带 `file` / `nPart` / `nPt`，`kmChain` 是按连续走向量的里程 |
+| `GET /api/line/osm` | `q`、`km` | 线路的几何走向（`parts` = WGS-84 折线数组，可直接画）；优先给 GeoJSON 导入的连续走向（`source='geojson'`），其次 OSM 几何。`km` 给已知里程时挡掉同名残段；分段线名（成昆线元昆段）借父线几何并按首末站裁出本段 |
 | `GET /api/line/osm/list` | `q`、`limit` | 搜 OSM 线路（线名 / 里程 / 桥隧 / 段数），附全库统计；线路库没收的线带 `stopsN` / `stopsFrom`（能补出站序时），列表上标「可补 N 站」 |
 | `GET /api/line/osm/stations` | `q`、`radius`、`extend` | 按 OSM 走向反查沿线车站，返回候选站（`km` / `dist` / `side`）、单线里程 `spineKm`、已有同名自建线路的站表 |
 | `GET /api/dates` | — | 含当日共 15 天，每天的下载状态 / 已确认开行数 / 待处理数，另带 `chain`（一键连跑进度） |
@@ -1007,7 +1073,9 @@ python scripts/report_line_names.py --out docs/line-names-report.md
 | `POST /api/line/stations/clear` | `name` | 撤销档案线路的人工站序，回到档案原样（连带清掉按旧下标算的人工里程） |
 | `POST /api/line/stations/reverse` | `name`、`from`、`mode`（空=切换 / `on` / `off`） | **按来源**倒排：只翻 `from` 那一份的站序，里程按「原末站里程 − 原里程」重算（新起点强制 0，缺里程的仍缺、不插值）。`catalog`/`chinaemu`/`osm`/`parts` 只记一条 `line_src_fix(kind='reverse')` 读时翻转，原始表不改，`inPlace=true`；`lib`/`custom` 那份就是线路自己，走改站序（`inPlace=false`，返回 `line`）。再点一次 = 恢复，不是二次翻转 |
 | `POST /api/line/src-pick` | `name`、`source` | 勾「这条线默认用哪一份站序」（`lib`/`custom`/`catalog`/`chinaemu`/`osm`/`parts`，空 = 取消）。勾上以后所有不指定来源的取数都按它：`/api/line`、`/api/line/stops`（选经由）、`lineseg.stations_for()`。指定 `from` 的临时查看仍然优先 |
-| `POST /api/line/delete` | `name` | 删除自建线路（连带清掉它的里程校正） |
+| `POST /api/line/delete` | `name` | 删除自建线路（连带清掉它的里程校正和 `line_geom` 走向） |
+| `POST /api/line/import-geojson` | `data`（GeoJSON 对象或字符串）、`fileName`、`replace`、`note` | 按人工整理的 GeoJSON 重建一条线路：解析 → 建图（端点合并 + 2 km 断口补边）→ 车站投影切线 → 排站序 → 图上最短路算里程 → 落成**自建线路**，走向压进 `line_geom`。返回 `n` / `totalKm` / `chainPoints` / `broken`（补不了的断口）/ `dropped`（投影不上、丢掉的站）/ `offGeom`（偏离走向的站）/ `catalog`（资料库同名线的站数，用来对账）。同名**自建**线路要 `replace=1` 才覆盖，档案线路一律不动 |
+| `GET` / `POST /api/line/import-geojson/list` | — | 已导入的 GeoJSON 线路清单（线名 / 文件 / 几何里程 / 段数 / 点数 / 导入时间） |
 | `POST /api/station/new` | `name`、`lat`、`lon`、`lines[]`、`tele`、`bureau`、`note` | 新增车站 |
 | `POST /api/station/delete` | `name` | 删除自建车站 |
 | `POST /api/coord` | `name`、`lat`、`lon` | 设置车站坐标（任何站，写 `coord_override`，立即生效并重算相关车次） |

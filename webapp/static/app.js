@@ -487,13 +487,16 @@ const SvgView = {
     const px = pts.map(s => this.toPx(this.proj(s.lat, s.lon)));
     const geo = this.route.geom || [];
     if (geo.length) {
+      // 先画完全部的白描边再画蓝线：分段数据一条线几百段，逐段「白+蓝」地画，
+      // 后一段的白边会把前一段刚画的蓝线盖掉，缩到全线时看着只剩一串站名点
+      const ds = [];
       geo.forEach(part => {
         if (part.length < 2) return;
-        const d = part.map(([lon, lat]) => this.toPx(this.proj(lat, lon)))
-          .map((p, i) => `${i ? 'L' : 'M'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
-        this.mk('path', { d, fill: 'none', stroke: '#ffffff', 'stroke-width': 7, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' });
-        this.mk('path', { d, fill: 'none', stroke: '#1f6feb', 'stroke-width': 3.6, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' });
+        ds.push(part.map(([lon, lat]) => this.toPx(this.proj(lat, lon)))
+          .map((p, i) => `${i ? 'L' : 'M'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' '));
       });
+      ds.forEach(d => this.mk('path', { d, fill: 'none', stroke: '#ffffff', 'stroke-width': 7, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+      ds.forEach(d => this.mk('path', { d, fill: 'none', stroke: '#1f6feb', 'stroke-width': 3.6, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
     } else {
       const lineArr = (route.path && route.path.length > 1) ? route.path : pts;
       const lpx = lineArr.map(s => this.toPx(this.proj(s.lat, s.lon)));
@@ -508,14 +511,17 @@ const SvgView = {
     const nStop = (route.stops || []).length;
     // 站特别多（整条线路）时只标一部分，否则文字糊成一片
     const labelIdx = new Set(thinStops(pts.map((_, i) => i), 16));
+    // 整条线一百多个站时，点比站间距还大，会把走向线整个盖成一串珠子：
+    // 站多就缩小圆点、白边收窄，让线露出来
+    const dense = nStop > 60;
     pts.forEach((s, i) => {
       const p = px[i];
       const stop = s.stop !== false;
       const c = this.mk('circle', {
-        cx: p[0], cy: p[1], r: stop ? 4.2 : 2.4,
+        cx: p[0], cy: p[1], r: stop ? (dense ? 2.6 : 4.2) : (dense ? 1.6 : 2.4),
         fill: stop ? '#1f6feb' : '#a9b7cc',
         stroke: stop ? '#fff' : 'none',
-        'stroke-width': stop ? 2 : 0,
+        'stroke-width': stop ? (dense ? 1 : 2) : 0,
         style: 'cursor:pointer',
       });
       c.addEventListener('click', () => {
@@ -3060,7 +3066,9 @@ function lnOsmBlock(d) {
       <span class="ln-i-src">OSM</span></div>
       <div class="ln-osm-none">OSM 数据里没有能对上这条线的线名，地图只能画站点直连</div></div>`;
   }
-  const fam = o.match === 'family' ? `　<span class="ln-osm-tag">同族匹配</span>` : '';
+  // 走向来自用户导入的 GeoJSON：段数/桥隧这些 OSM 统计没有，换成文件信息
+  const isGeo = o.source === 'geojson';
+  const fam = (!isGeo && o.match === 'family') ? `　<span class="ln-osm-tag">同族匹配</span>` : '';
   // 分段线名在 OSM 里不存在（成昆线元昆段 ↔ 成昆线）：几何借整条线、再按本段首末站裁
   const borrow = o.borrowed
     ? `<span class="ln-osm-tag${o.clipped ? '' : ' warn'}" title="${
@@ -3070,9 +3078,14 @@ function lnOsmBlock(d) {
     : '';
   // kmChain 是把上下行复线并掉的单线里程；源数据的 km 会把复线各算一遍
   const geomKm = (o.kmChain && o.km && Math.abs(o.kmChain - o.km) > 0.5) ? o.kmChain : o.km;
-  const diff = (d.totalKm != null && geomKm) ? Math.round(geomKm - d.totalKm) : null;
+  const diff = (!isGeo && d.totalKm != null && geomKm)
+    ? Math.round(geomKm - d.totalKm) : null;
   const c = o.clip || {};
-  const rows = [
+  const rows = isGeo ? [
+    ['导入文件', o.file || '—'],
+    ['几何里程', `${o.km} km`],
+    ['走向分段', `${o.nPart} 段`],
+  ] : [
     ['OSM 线名', o.name],
     ['几何里程', `${o.km} km${o.kmChain && o.kmChain !== o.km ? `（单线 ${o.kmChain}）`
       : (o.kmMain && o.kmMain < o.km ? `（最长一段 ${o.kmMain}）` : '')}`],
@@ -3089,7 +3102,7 @@ function lnOsmBlock(d) {
         : (o.why || '—')]);
   }
   return `<div class="ln-osm">
-    <div class="ln-i-head"><b>真实走向</b><span class="ln-i-src">OSM${fam}</span>
+    <div class="ln-i-head"><b>真实走向</b><span class="ln-i-src">${isGeo ? 'GeoJSON' : 'OSM'}${fam}</span>
       ${borrow}
       ${diff != null ? `<span class="ln-osm-diff${Math.abs(diff) > 40 ? ' warn' : ''}">几何比档案 ${diff > 0 ? '+' : ''}${diff} km</span>` : ''}
       <button class="btn sm ghost" id="lnGeomBtn">${lnGeomOn() ? '改站点直连' : '按真实走向'}</button>
@@ -3109,6 +3122,52 @@ function lnBindGeom() {
     lnDrawMap();
     lnRenderInfo();
   });
+}
+
+/* ---------- 手工导入 GeoJSON 线路 ----------
+   文件里既有走向（LineString / MultiLineString），也有车站点（kind=station 的 Point）。
+   后端把碎段串成一条线、车站按走向排好序算出沿线里程，落成一条「自建线路」，
+   走向另存一份给地图画；同名的档案线路不会被顶掉，先问一句要不要覆盖。 */
+function geoPick() {
+  const inp = $('#geoSrc');
+  if (!inp) return;
+  inp.value = '';
+  inp.click();
+}
+
+async function geoImport(file, replace) {
+  let text = '';
+  try {
+    text = await file.text();
+  } catch (e) {
+    alert('读不了这个文件：' + e.message);
+    return;
+  }
+  let data = null;
+  try {
+    data = JSON.parse(text.replace(/^\uFEFF/, ''));
+  } catch (e) {
+    alert('这个文件不是合法 JSON：' + e.message);
+    return;
+  }
+  try {
+    const r = await postJSON('/api/line/import-geojson', {
+      fileName: file.name, data, replace: !!replace,
+    });
+    dropLibCaches();
+    const bits = [`导入「${r.name}」：${r.n} 站 / ${lnKmText(r.totalKm)}`];
+    if (r.dropped) bits.push(`文件里 ${r.stationsInFile} 个站，同名合并掉 ${r.dropped} 个`);
+    if (r.filledStations) bits.push(`补了 ${r.filledStations} 站坐标`);
+    if (r.broken) bits.push(`${r.broken} 处走向断开，按直线计里程`);
+    if (r.catalog && r.catalog.title) bits.push(`资料库里有「${r.catalog.title}」的资料卡`);
+    showLine(r.name, bits.join(' · '));
+  } catch (e) {
+    const msg = String(e.message || e);
+    if (!replace && /可以覆盖/.test(msg) && confirm(msg + '\n\n要用这份 GeoJSON 覆盖它吗？')) {
+      return geoImport(file, true);
+    }
+    alert('导入失败：' + msg);
+  }
 }
 
 async function showLine(q, notice, from) {
@@ -4262,6 +4321,13 @@ async function boot() {
   // 新增线路 / 车站
   $('#btnNewLine') && $('#btnNewLine').addEventListener('click', () => nmOpen('line'));
   $('#btnNewStation') && $('#btnNewStation').addEventListener('click', () => nmOpen('station'));
+  // 手工导入 GeoJSON（文件里的走向 + 车站点 → 一条自建线路）
+  $('#btnImportGeo') && $('#btnImportGeo').addEventListener('click', geoPick);
+  $('#geoSrc') && $('#geoSrc').addEventListener('change', e => {
+    const f = e.target.files && e.target.files[0];
+    if (f) geoImport(f, false);
+    e.target.value = '';
+  });
   $('#nmSave').addEventListener('click', nmSave);
   $('#nmCancel').addEventListener('click', nmClose);
   $('#newModal').addEventListener('click', e => { if (e.target.id === 'newModal') nmClose(); });

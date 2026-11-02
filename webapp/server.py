@@ -33,6 +33,7 @@ import curate   # noqa: E402
 import railgeom  # noqa: E402
 import lineseg   # noqa: E402  分段线 ↔ 整线的站序 / 走向互补
 import linedesk  # noqa: E402  线路整理台（独立库 linedesk.db）
+import geoimport  # noqa: E402  手工导入 GeoJSON 线路
 
 mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("text/css", ".css")
@@ -213,6 +214,23 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json({"ok": True,
                                   **railcore.set_src_pick(payload.get("name"),
                                                           payload.get("source") or "")})
+
+            # 手工导入 GeoJSON 线路：前端把文件读成对象塞在 data 里一起传
+            if path == "/api/line/import-geojson":
+                raw = payload.get("data")
+                if raw in (None, ""):
+                    return self.err("没有收到 GeoJSON 内容", 400)
+                try:
+                    r = geoimport.import_line(raw, payload.get("fileName") or "",
+                                              bool(payload.get("replace")),
+                                              (payload.get("note") or "").strip())
+                except ValueError as e:
+                    return self.err(str(e), 400)
+                return self.json(r)
+
+            # 导入过的 GeoJSON 线路一览（走向从哪来、什么时候导的）
+            if path == "/api/line/import-geojson/list":
+                return self.json({"items": geoimport.list_imported()})
 
             if path == "/api/line/catalog/add":
                 ln = railcore.add_catalog_line(payload.get("id"))
@@ -485,10 +503,10 @@ class Handler(BaseHTTPRequestHandler):
                     pick = ""                # 默认来源过期了，退回系统规则
                     eff = ""
                 else:
-                    m = railgeom.meta(kw, composed.get("totalKm"))
+                    m = railgeom.meta(kw, composed.get("totalKm")) or geoimport.meta(kw)
                     if m:
-                        m["kmChain"] = railgeom.spine_km(m["name"],
-                                                         composed.get("totalKm"))
+                        m["kmChain"] = (railgeom.spine_km(m["name"], composed.get("totalKm"))
+                                        or m.get("km"))
                     return out({**composed, "from": eff,
                                 "info": cnrail.catalog_info(kw),
                                 "osm": m, "osmOther": railcore.osm_extras(kw, 6)})
@@ -531,14 +549,19 @@ class Handler(BaseHTTPRequestHandler):
                                       "info": cnrail.catalog_info(kw),
                                       "osm": m, "osmOther": railcore.osm_extras(kw, 6)})
                 return self.err("未找到线路: " + kw, 404)
-            m = railgeom.meta(d.get("name") or kw, d.get("totalKm"))
+            # 手工导入的 GeoJSON 线路先看它自己那份走向（用户导进来的就是权威），
+            # 再退回 OSM 几何库
+            m = geoimport.meta(d.get("name") or kw)
+            if not m:
+                m = railgeom.meta(d.get("name") or kw, d.get("totalKm"))
             if not m:
                 # 库里按段命名、OSM 只有整条（成昆线元昆段 ← 成昆线），借来再按
                 # 本段首末站裁掉两头，免得地图把整条线的走向画到半条线头上
                 m = lineseg.borrow_geometry(d.get("name") or kw, d.get("stations"),
                                             d.get("totalKm"))
             if m:
-                m["kmChain"] = railgeom.spine_km(m["name"], d.get("totalKm"))
+                m["kmChain"] = (railgeom.spine_km(m["name"], d.get("totalKm"))
+                                or m.get("km"))
             # 同名前缀下、线路库没收录的 OSM 线（「津霸线」之于「津霸客运专线」）
             return out({**d, "osm": m, "osmOther": railcore.osm_extras(kw, 6)})
 
@@ -546,7 +569,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/line/osm":
             # km 给了已知里程时，几何里程差太多的残段会被排除
             nm = one("q") or one("name")
-            g = railgeom.geom(nm, expect_km=one("km") or None)
+            g = geoimport.geom(nm) if nm else None      # 导入的 GeoJSON 优先
+            if not g:
+                g = railgeom.geom(nm, expect_km=one("km") or None)
             if not g:
                 # 分段线名（成昆线元昆段）在 OSM 里没有独立线名：借父线的几何，
                 # 按本段首末站裁出那一截
@@ -558,6 +583,9 @@ class Handler(BaseHTTPRequestHandler):
             if not g:
                 return self.err("OSM 数据里没有这条线路: " + (nm or ""), 404)
             return self.json(g)
+
+        if path == "/api/line/import-geojson/list":
+            return self.json({"items": geoimport.list_imported()})
 
         if path == "/api/line/osm/list":
             kw = one("q")

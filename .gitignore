@@ -8,6 +8,8 @@ webapp/data/linedesk.db-shm
 webapp/data/rail.db.bak-*
 # 数据清洗 / 去重脚本导出的备份（按需自行保留，不进仓库）
 webapp/data/backup/
+# 清空线路前的整库备份（170 MB 级，留在本机）
+data/backup/
 webapp/data/railcn.db
 webapp/data/exports/
 

@@ -1397,6 +1397,11 @@ def delete_custom_line(name: str) -> bool:
                          "WHERE line_name=?", (nm,))
         except sqlite3.Error:
             pass
+        # GeoJSON 导入的走向跟着走，否则同名线再导入会带着旧几何
+        try:
+            conn.execute("DELETE FROM line_geom WHERE name=?", (nm,))
+        except sqlite3.Error:
+            pass
     if hit:
         _line_ovr_cache = None
         _apply_custom()

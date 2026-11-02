@@ -62,8 +62,9 @@ railcn/
 | `route_tpl` / `route_day` | 1.3 万 / 25.8 万 | **经停站按趟只存一份 + 每天一条指针**；`routes` 是两者 join 的视图（省 5 倍空间） |
 | `day_collect` / `day_skip` | 22 / 5 万 | 每天采集状态、已确认不开行的车次 |
 | `line_catalog` / `line_catalog_stop` | 844 / 1 万 | 辉睿线路资料库 |
-| `line_custom` / `station_custom` | 59 / 1878 | 用户自建线路 / 车站 |
-| `line_override` | 5 | 档案线路的人工站序 / 人工里程覆盖（原始档案不动） |
+| `line_custom` / `station_custom` | 0 / 1878 | 用户自建线路 / 车站（**2026-11-02 线路整体清空过**，见第 5 节第 22 条） |
+| `line_override` | 0 | 档案线路的人工站序 / 人工里程覆盖（原始档案不动） |
+| `line_geom` | 0 | GeoJSON 导入的走向：`parts_gz`（原始碎段）+ `spine_gz`（串好的连续走向，gzip 后的 JSON） |
 | `coord_override` | 14 | 人工坐标（优先于档案） |
 | **`train_override`** | 21 | **人工经由的正式库**，见下 |
 | `curate` | 12722 | 校对清单（每趟车一行摘要，扫描生成） |
@@ -324,6 +325,33 @@ railcn/
       线路库的位置表）；要精确就把那条线收进线路库（`save_line_stations` 收编）。
     - 回归 `scripts/test_via_nodes.py`（含下拉里能搜到合新高速线并标「未收进库」）。
 
+22. **线路可以整体清空，再从 GeoJSON 人工重建**（2026-11-02 用户要求：「线条太乱了，
+    全清掉、留备份，线路靠人工导入 GeoJSON，线路资料库留着」）。
+    - 清空脚本 `scripts/reset_lines.py`：清 `line_custom` / `line_override` / `line_src_pick` /
+      `line_src_fix` / `line_osm(+stop)` / `line_ce(+stop)` / `station_osm_line` / `line_geom`，
+      底表 `data/cnrail_lines.json` 写 `[]`，整理台 `linedesk.db` 六表一起清，`station_osm.n_lines` 归零。
+      **不动** `line_catalog` / `line_catalog_stop`（844 + 10377）、车站、坐标、车次、`train_override`、`curate`。
+      先备份到 `data/backup/lines-reset-<时间戳>/`（整库 + 行级 JSON + 还原 README），
+      `--restore` 一键还原（还原前先删 `-wal`/`-shm`，否则新库会串旧帧）。
+    - 导入 `webapp/geoimport.py` + `POST /api/line/import-geojson`，落成 **`line_custom` 自建线路**
+      （所以改站序 / 倒排 / 改里程 / 删除全都天然可用），走向存 `line_geom`。
+    - **算站序的做法是图论，别退回串线**：
+      ① 段端点按 6 位小数合并建节点、每段一条边（权重 = 沿线米）→
+      ② 2 km 内断口补直线边 → ③ 车站投到最近段并**在投影点把段切开**（站成为正式节点；
+      只吸端点会把长段中间的站拉出十几公里，夹沟 11.9 km / 西寺坡 15.7 km）→
+      ④ PCA 主轴定大方向 + 局部插入优化（窗口 6，省 1 米才换）→ ⑤ 站间 Dijkstra 最短路累里程。
+      `railgeom.chain_parts` 在 2 km 以上的缺口就停，京沪线 2755 段只串出 967 km，**不能用**；
+      文件点序有局部错位（白家店排在南驿前、天津枢纽颠倒，多算 90 km），**也不能用**；
+      按纬度排更差（1926 km），最近邻贪心会顺邻线跑偏。
+    - 里程 = 图上最短路累计，首站恒 0、单调递增；不连通时退化成直线 ×1.2 并在页面提示。
+    - 方向看 `properties.起点/终点` 对不对得上站名，对不上跟文件第一个站走。
+    - **档案线路不许被 GeoJSON 覆盖**（报错提示「先删掉这条线，或者换个线名」）；
+      同名自建线要 `replace=1` 才覆盖（界面先 confirm 再重发）。
+    - 京沪线实测 157 要素 → 156 站（林场合并）/ **1468.7 km**（资料库 1463，差 0.4%）/ 断口 0 / 1 秒。
+    - 地图上画 `spine_gz` 那一条（碎段画出来像撒芝麻），站点 > 60 个时圆点缩到 2.6px，
+      白描边先整批画再画蓝线（逐段「白+蓝」会让后段白边盖住前段蓝线）。
+    - 回归 `scripts/test_geo_import.py`。
+
 ## 6. 前端约定
 - 5 个页签：`车站/线路`、`站站查询`、`数据下载`、`历史数据`、`数据校对`；状态都在全局 `CU` 对象里。
 - 校对页筛选：`todo / via0 / via / km / coord / pending / manual / synced / clean / all`。
@@ -339,20 +367,24 @@ railcn/
 - 覆盖层（底图切换条 / 缩放 / 图例 / 信息卡）`z-index:900`：Leaflet 的 pane 是 400~800，
   不抬上去会被瓦片整个吃掉。
 
-## 7. 回归脚本（23 个，改完必跑）
+## 7. 回归脚本（24 个，改完必跑）
+
+> **2026-11-02 起线路库清零**（见第 5 节第 22 条），依赖「底表 417 / OSM / china-emu / 自建 65」
+> 的脚本大面积为红，属预期 —— 清单见本节末尾的「清零后的状态」。
 
 ```bash
 for f in test_chain test_line_km test_line_stations test_nm_stations test_osm_extras \
          test_station_loose test_tl_stops test_geo_toggle test_dock_speed test_code_alias \
          test_routestore test_nm_insert test_curate_refresh test_curate_sync test_net_form \
          test_via_nodes test_lineseg test_catalog_match test_chinaemu test_linedesk \
-         test_loose_line test_osm_data test_src_pick; do
+         test_loose_line test_osm_data test_src_pick test_geo_import; do
   "C:/Users/Administrator/AppData/Local/Programs/Python/Python313/python.exe" scripts/$f.py
 done
 ```
 
 | 脚本 | 守什么 |
 |---|---|
+| `test_geo_import` | GeoJSON 导入：站序按走向排（不是文件点序）、首站 0、里程单调、走沿线而不是直线、几何里程 = 站序里程、`source='geojson'`、文件名记着、重复导入 400 且提示「可以覆盖」、`replace` 能覆盖、坏文件三种人话报错、删线后走向 404 |
 | `test_curate_sync` | 自动结果要确认才入库、同步「原样照抄 / 重新落站」两条路、站表变化、UI 勾选与同步标记、跑完自动撤销 |
 | `test_curate_refresh` | 线路库改动后重算这趟车的自动经由 |
 | `test_net_form` | 车站/线路查询输入框宽度、联想框宽度与行高、Esc/点空白收起、空列表不占高度 |
@@ -383,6 +415,43 @@ done
 `restore()` 按原收编路径重建（这样总里程 288.5 这类派生量也不会丢）。
 同类脚本 `test_catalog_match` 遇到「侯西线被用户收进库」时跳过站数断言，
 别把用户的整理结果当成 bug。
+
+### 清零后的状态（2026-11-02 实测，24 个脚本）
+
+**绿 15**：`test_chain` / `test_nm_stations` / `test_station_loose` / `test_tl_stops` /
+`test_geo_toggle` / `test_dock_speed` / `test_code_alias` / `test_routestore` / `test_net_form` /
+`test_catalog_match` / `test_loose_line` / `test_geo_import`，以及 `test_line_km`（绿，但收尾的
+「还原里程」会报 400，因为那条线已不在库里）。
+
+**红 9，全部因为「线路库是空的」，不是代码坏**：
+
+| 脚本 | 红在哪 | 靠什么数据 |
+|---|---|---|
+| `test_line_stations` / `test_lineseg` | HTTP 404（没有这条线） | 线路库里的线 |
+| `test_nm_insert` / `test_src_pick` | HTTP 400（建线 / 改站序的前提没了） | 线路库里的线 |
+| `test_osm_extras` | 「津蓟线 已在线路库里」断言失败 —— 库空了，`osm_extras` 就把它算进差集 | 底表 417 |
+| `test_via_nodes` | 合新高速线的站序拿不到、下拉搜不到 | china-emu / OSM |
+| `test_curate_refresh` / `test_curate_sync` | 唐曹线候选点不进手工列表、同步 0 趟 | china-emu（唐曹线站序） |
+| `test_chinaemu` | 兰新客专 / 沪蓉 / 京包客专都补不出站 | `line_ce`（已清） |
+| `test_osm_data` | 表计数是 `None` → 直接 TypeError | `line_osm`（已清） |
+| `test_linedesk` | `ld_line` 空 → 别名断言崩 | `linedesk.db`（已清） |
+
+**要全绿就还原备份**（会覆盖当前的 GeoJSON 线路，还原后重新导入即可）：
+
+```bash
+python scripts/reset_lines.py --restore data/backup/lines-reset-20261102-100211
+```
+
+**跑完这批红脚本会留脏**（失败路径走不到 `finally` 的还原）：
+
+- `line_custom` 多出「津保城际铁路」、`line_override` 多出它和京沪线的空壳（`seg_km_json` 是测试值）、
+  `line_src_fix` 多出 `沪杭高铁 / catalog / reverse`
+- 跑完按这三条清一遍即可（`station_custom` / `coord_override` / `train_override` 实测没被污染）：
+  ```sql
+  DELETE FROM line_custom   WHERE name = '津保城际铁路';
+  DELETE FROM line_override WHERE name IN ('津保城际铁路', '京沪线');
+  DELETE FROM line_src_fix  WHERE name = '沪杭高铁';
+  ```
 
 ## 8. 踩过的坑（省时间用）
 

@@ -2719,7 +2719,7 @@ function lnRenderHead() {
               title="${pick === v.source ? '已设为全项目默认，点一下取消' : '设为默认：之后所有用到这条线的地方都按这份站序'}">★</i>
            <b class="srcb${eff === v.source ? ' on' : ''}" data-from="${esc(v.source)}"
               title="${esc(v.label)}：${v.n} 站 · ${lnKmText(v.km)}${v.first ? `\n${esc(v.first)} → ${esc(v.last)}` : ''}${v.reversed ? '\n（这份被人工倒排过，只影响这一份）' : ''}">${
-              esc(LNSRC_SHORT[v.source] || v.label)} ${v.n}站${v.reversed ? '<i class="rvb" title="已倒排">↺</i>' : ''}</b></span>`).join('')}
+              esc(v.short || LNSRC_SHORT[v.source] || v.label)} ${v.n}站${v.reversed ? '<i class="rvb" title="已倒排">↺</i>' : ''}</b></span>`).join('')}
         <em class="hint">点站名临时看这份 · 点 ★ 设为默认${pick ? `（默认：${esc(LNSRC_SHORT[pick] || pick)}）` : ''}</em>
       </div>`;
     })() : ''}
@@ -3666,7 +3666,7 @@ async function suggestNet() {
                 ? '已设为默认（点一下取消）'
                 : '设为默认：之后所有用到这条线的地方都按这份站序'}">★</i><b class="srcb" data-v="${esc(it.name)}"
            data-from="${esc(v.source)}" title="${esc(v.label)}：${v.n} 站 · ${lnKmText(v.km)}
-${esc(v.first || '')} → ${esc(v.last || '')}">${esc(LNSRC_SHORT[v.source] || v.label)} ${v.n}站</b></span>`).join('');
+${esc(v.first || '')} → ${esc(v.last || '')}">${esc(v.short || LNSRC_SHORT[v.source] || v.label)} ${v.n}站</b></span>`).join('');
       return `<div class="si multi" data-v="${esc(it.name)}" data-stops="1">
          <div class="srow"><span>${esc(it.name)}</span>
            <span class="c">${vs.length} 个来源${it.lib ? '' : ' · 线路库未收录'}${

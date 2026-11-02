@@ -916,8 +916,18 @@ def line_sources(name: str) -> List[dict]:
     ln = cnrail.line(name)
     if ln and len(ln.get("stations") or []) >= 2:
         st = ln["stations"]
-        out.append({"source": "custom" if ln.get("custom") else "lib",
-                    "label": _SRC_LABEL["custom" if ln.get("custom") else "lib"],
+        src = "custom" if ln.get("custom") else "lib"
+        label = _SRC_LABEL[src]
+        # 从备份 / GeoJSON 导入的线，站序确实算「自建」那一档，但徽标写「自建」会跟
+        # 线名后缀打架（「京沪线（底表）· 自建 150站」）。这里给个更准的短名，
+        # 前端优先用它；source 键不动（`from=custom` 取站序还照旧）
+        short = ""
+        ori = str(ln.get("source") or "")
+        if ori == "backup":
+            label, short = "备份导入", "备份"
+        elif ori == "geojson":
+            label, short = "GeoJSON 导入", "GeoJSON"
+        out.append({"source": src, "label": label, "short": short,
                     "sourceName": ln.get("name"), "n": len(st),
                     "km": ln.get("totalKm"),
                     "first": st[0].get("name"), "last": st[-1].get("name"),

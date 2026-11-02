@@ -3135,6 +3135,45 @@ function geoPick() {
   inp.click();
 }
 
+/* 批量导入：一次选中好几个 .geojson，逐个导。
+   批量里不弹「要不要覆盖」—— 撞名就直接跳过并在结果里说明，要覆盖就单独导那一个。 */
+async function geoImportMany(files) {
+  const ok = [], skip = [], bad = [];
+  const box = $('#netList'), det = $('#netDetail');
+  det.classList.remove('show');
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
+    box.innerHTML = `<div class="empty">导入 ${i + 1}/${files.length}：${esc(f.name)} …</div>`;
+    let data = null;
+    try {
+      data = JSON.parse((await f.text()).replace(/^\uFEFF/, ''));
+    } catch (e) {
+      bad.push(`${f.name}：不是合法 JSON`);
+      continue;
+    }
+    try {
+      const r = await postJSON('/api/line/import-geojson', { fileName: f.name, data, replace: false });
+      ok.push(`${r.name} —— ${r.n} 站 / ${lnKmText(r.totalKm)}`
+        + (r.broken ? `（${r.broken} 处走向断开）` : ''));
+    } catch (e) {
+      const msg = String(e.message || e);
+      if (/可以覆盖/.test(msg)) skip.push(`${f.name}：库里已有同名线路，要覆盖请单独导入这一个`);
+      else bad.push(`${f.name}：${msg}`);
+    }
+  }
+  dropLibCaches();
+  const rows = [];
+  if (ok.length) rows.push(`成功 ${ok.length} 条`, ...ok.map(s => '· ' + s));
+  if (skip.length) rows.push(`跳过 ${skip.length} 条`, ...skip.map(s => '· ' + s));
+  if (bad.length) rows.push(`失败 ${bad.length} 条`, ...bad.map(s => '· ' + s));
+  if (!rows.length) rows.push('没选中文件');
+  rows.push('导入的线都在线路库里了，重新搜一次线名就能打开');
+  // 结果放列表区（详情区清空），免得和某一条线的详情混在一起
+  box.innerHTML = `<div class="ln-card"><b>批量导入结果</b><br>${rows.map(esc).join('<br>')}</div>`;
+  det.innerHTML = '';
+  det.classList.remove('show');
+}
+
 async function geoImport(file, replace) {
   let text = '';
   try {
@@ -4324,9 +4363,11 @@ async function boot() {
   // 手工导入 GeoJSON（文件里的走向 + 车站点 → 一条自建线路）
   $('#btnImportGeo') && $('#btnImportGeo').addEventListener('click', geoPick);
   $('#geoSrc') && $('#geoSrc').addEventListener('change', e => {
-    const f = e.target.files && e.target.files[0];
-    if (f) geoImport(f, false);
+    const fs = Array.from((e.target && e.target.files) || []);
     e.target.value = '';
+    if (!fs.length) return;
+    if (fs.length === 1) geoImport(fs[0], false);   // 单个：走原路，撞名会问要不要覆盖
+    else geoImportMany(fs);                         // 多个：批量导，撞名跳过
   });
   $('#nmSave').addEventListener('click', nmSave);
   $('#nmCancel').addEventListener('click', nmClose);

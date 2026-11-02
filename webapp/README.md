@@ -625,6 +625,10 @@ python scripts\reset_lines.py --restore data\backup\lines-reset-20261102-100211
 `.geojson` 就落成一条**自建线路** —— 站序、里程、真实走向一起进来，之后改站序、倒排、
 改里程、删除都照旧能用在它身上。
 
+**可以一次选多个文件批量导**：撞名的（线路库里已有同名线）直接跳过并列在结果里，
+不会一个文件弹一次确认 —— 要覆盖就单独导那一个（单个导入会问「要用这份覆盖它吗」）。
+结果按「成功 N / 跳过 N / 失败 N」列在线路列表区，失败会带原话原因。
+
 文件怎么认：
 
 - `FeatureCollection` / 单个 `Feature` / 裸几何都收；`LineString`、`MultiLineString`、

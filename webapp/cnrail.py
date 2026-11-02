@@ -575,10 +575,13 @@ def line_detail(name: str) -> Optional[dict]:
     if not ln:
         return None
     pts = []
+    # 原样导入 / 从备份挑回来的线：站名就是文件里怎么写就怎么显示，
+    # 不再过 _key() 去掉「站」后缀（否则「唐海南站」会被显示成「唐海南」）
+    raw_name = str(ln.get("source") or "") in ("geojson", "backup")
     for p in ln["stations"]:
         c = coord(p["name"])
         st = station(p["name"]) or {}
-        pts.append({"name": _key(p["name"]), "km": p["km"],
+        pts.append({"name": p["name"] if raw_name else _key(p["name"]), "km": p["km"],
                     "kmBase": p.get("kmBase", p["km"]),
                     "kmSrc": p.get("kmSrc"),
                     "lat": c[0] if c else None, "lon": c[1] if c else None,

@@ -175,12 +175,84 @@ def test_cleanup():
        str(g.get("source")))
 
 
+# ---------------------------------------------------------------------------
+# 原样导入：站名不改、同名站留着、文件带里程就用文件的
+# ---------------------------------------------------------------------------
+
+RAW_LINE = "原样导入线（回归用）"
+
+
+def sample_raw():
+    """一条南北直线，4 个站：站名带「站」、其中两个同名、每站自带里程"""
+    return {
+        "type": "FeatureCollection",
+        "properties": {"线路名称": RAW_LINE, "起点": "甲站", "终点": "丙站"},
+        "features": [
+            {"type": "Feature",
+             "geometry": {"type": "LineString",
+                          "coordinates": [[120.0, 30.0], [120.0, 30.06], [120.0, 30.13]]}},
+            {"type": "Feature", "geometry": {"type": "Point", "coordinates": [120.0, 30.0]},
+             "properties": {"站名": "甲站", "里程": "0"}},
+            {"type": "Feature", "geometry": {"type": "Point", "coordinates": [120.0, 30.05]},
+             "properties": {"站名": "同名站", "km": 5.0}},
+            {"type": "Feature", "geometry": {"type": "Point", "coordinates": [120.0, 30.06]},
+             "properties": {"站名": "同名站", "km": 6.0}},
+            {"type": "Feature", "geometry": {"type": "Point", "coordinates": [120.0, 30.13]},
+             "properties": {"站名": "丙站", "km": "12 公里"}},
+        ],
+    }
+
+
+def test_raw():
+    print("\n== 原样导入：不改站名、同名站照留、文件里程优先")
+    try:
+        post("/api/line/delete", {"name": RAW_LINE})
+    except urllib.error.HTTPError:
+        pass
+    r = post("/api/line/import-geojson", {"fileName": "raw.geojson", "data": sample_raw()})
+    ck("导入成功", r.get("ok") is True, r.get("error"))
+    ck("4 个站都在（同名站没被合并）", r.get("n") == 4, str(r.get("n")))
+    ck("里程取自文件", r.get("kmFrom") == "file", str(r.get("kmFrom")))
+    ck("报告里说了有一组同名站",
+       r.get("dupCount") == 1 and (r.get("dupNames") or [""])[0] == "同名站",
+       str(r.get("dupNames")))
+
+    d = get("/api/line", q=RAW_LINE)
+    names = [s["name"] for s in d.get("stations") or []]
+    ck("站名一字不改、顺序按走向", names == ["甲站", "同名站", "同名站", "丙站"], str(names))
+    kms = [s["km"] for s in d.get("stations") or []]
+    ck("里程照文件（含「12 公里」这种写法）", kms == [0.0, 5.0, 6.0, 12.0], str(kms))
+
+    # 重启后也不会被二次归一（reload 时按 raw 重建）
+    d2 = get("/api/line", q=RAW_LINE)
+    ck("再读一遍站名没变", [s["name"] for s in d2.get("stations") or []] == names, "")
+
+    print("\n== 原样导入的线也能改站序（站名不被归一）")
+    keep = [{"name": s["name"], "km": s["km"]} for s in d2.get("stations") or []]
+    e = post("/api/line/stations", {"name": RAW_LINE, "stations": keep}, expect_error=True)
+    ck("改站序没被「站点重复」挡下来", e.get("_code") != 400, e.get("error"))
+    d3 = get("/api/line", q=RAW_LINE)
+    ck("改完还是原名",
+       [s["name"] for s in d3.get("stations") or []] == names,
+       str([s["name"] for s in (d3.get("stations") or [])]))
+
+    try:
+        post("/api/line/delete", {"name": RAW_LINE})
+    except urllib.error.HTTPError:
+        pass
+
+
 def main():
     try:
         test_import()
+        test_raw()
         test_cleanup()
     finally:
         drop()
+        try:
+            post("/api/line/delete", {"name": RAW_LINE})
+        except urllib.error.HTTPError:
+            pass
     print()
     if FAIL:
         print("失败 %d 项，通过 %d 项" % (FAIL, OK))

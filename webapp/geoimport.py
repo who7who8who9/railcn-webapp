@@ -49,6 +49,8 @@ DB_PATH = os.path.join(BASE_DIR, "data", "rail.db")
 _NAME_KEYS = ("线路名称", "线名", "name", "NAME", "Name", "title")
 _STA_KEYS = ("站名", "name", "车站名", "NAME", "Name")
 _TYPE_KEYS = ("类型", "type", "类别")
+# 车站要素里自带的里程（有就用文件的，没有才按走向量）
+_KM_KEYS = ("里程", "km", "KM", "Km", "公里", "累计里程", "里数", "mileage")
 # 站点离走向超过这个距离，仍然按投影入序列，但会在结果里报出来（多半是坐标错了）
 OFF_GEOM_M = 3000.0
 _CELL = 0.02          # 节点网格边长（度 ≈ 2 km）：建图补边和车站吸附共用
@@ -159,8 +161,20 @@ def parse(obj, filename: str = "") -> dict:
                 if isinstance(v, str):
                     kind = v.strip()
                     break
+            km = None
+            for k in _KM_KEYS:
+                v = pr.get(k)
+                if isinstance(v, bool) or v in (None, ""):
+                    continue
+                try:
+                    km = float(str(v).replace("km", "").replace("公里", "").strip())
+                except (TypeError, ValueError):
+                    km = None
+                if km is not None:
+                    break
             stations.append({"name": nm, "lon": float(c[0]), "lat": float(c[1]),
-                             "kind": kind, "osmId": str(pr.get("OSM_ID") or pr.get("osm_id") or ""),
+                             "kind": kind, "km": km,
+                             "osmId": str(pr.get("OSM_ID") or pr.get("osm_id") or ""),
                              "from": "file"})
         else:
             _line_parts(g, parts)
@@ -468,19 +482,20 @@ def assemble(parts: Sequence[Sequence[Sequence[float]]],
     """
     track = Track(parts)
 
-    by_name: Dict[str, dict] = {}
+    # 站名原样照搬（不按 12306 口径去「站」后缀），同名站也照原样留着 ——
+    # 导入以文件为准，系统不替用户改名、不替他合并
+    pts: List[dict] = []
     for s in stations:
-        nm = cnrail.station_name(s["name"]) or s["name"]
+        nm = str(s["name"] or "").strip()
+        if not nm:
+            continue
         lat, lon = float(s["lat"]), float(s["lon"])
         node, snap = track.add_station(lat, lon)
-        rec = {"name": nm, "lat": lat, "lon": lon, "kind": s.get("kind") or "",
-               "node": node, "snap": snap, "raw": s["name"]}
-        old = by_name.get(nm)
-        if old is None or snap < old["snap"]:
-            by_name[nm] = rec
-    pts = list(by_name.values())
+        pts.append({"name": nm, "lat": lat, "lon": lon, "kind": s.get("kind") or "",
+                    "node": node, "snap": snap, "raw": s["name"],
+                    "fileKm": s.get("km") if isinstance(s.get("km"), (int, float)) else None})
     if not pts:
-        return [], [], {"nodes": 0, "edges": 0, "broken": 0, "totalKm": 0.0}
+        return [], [], {"nodes": 0, "edges": 0, "broken": 0, "totalKm": 0.0, "kmFrom": "geom"}
     track.finalize()
 
     # 两两图上距离（不连通的退化成直线 ×1.2，免得整表失效）
@@ -503,17 +518,25 @@ def assemble(parts: Sequence[Sequence[Sequence[float]]],
     order = _local_search(_pca_order(pts), G)
 
     # 方向：props 的起点/终点能对上站名就用它，否则跟文件里第一个点走
-    idx_of = {p["name"]: i for i, p in enumerate(pts)}
+    idx_of: Dict[str, int] = {}
+    for i, p in enumerate(pts):
+        idx_of.setdefault(p["name"], i)       # 同名站取第一个
     rev = False
     hi, ti = idx_of.get(start_hint or ""), idx_of.get(end_hint or "")
     if hi is not None and ti is not None and hi != ti:
         rev = order.index(hi) > order.index(ti)
     elif stations:
-        head = cnrail.station_name(stations[0]["name"]) or stations[0]["name"]
+        head = str(stations[0]["name"] or "").strip()
         if head in idx_of:
             rev = order.index(idx_of[head]) > len(order) / 2
     if rev:
         order.reverse()
+
+    # 文件里自带里程（每站都有、且按排好的站序不递减）就按文件来 —— 导入以文件为准；
+    # 否则退回按走向量出来的里程
+    kms = [pts[i].get("fileKm") for i in order]
+    use_file_km = (bool(kms) and all(k is not None for k in kms)
+                   and all(kms[i] <= kms[i + 1] for i in range(len(kms) - 1)))
 
     seq: List[dict] = []
     chain: List[Tuple[float, float]] = []
@@ -542,8 +565,15 @@ def assemble(parts: Sequence[Sequence[Sequence[float]]],
         seq.append({**p, "km": round(total / 1000.0, 1)})
         prev = p
 
+    geom_km = round(total / 1000.0, 1)
+    if use_file_km:
+        for i, rec in enumerate(seq):
+            rec["km"] = round(float(pts[order[i]]["fileKm"]), 1)
+        seq[0]["km"] = seq[0]["km"] or 0.0
+    out_km = seq[-1]["km"] if seq else 0.0
     return seq, chain, {"nodes": len(track.nodes), "edges": len(track.edges),
-                        "broken": broken, "totalKm": round(total / 1000.0, 1)}
+                        "broken": broken, "totalKm": out_km, "geomKm": geom_km,
+                        "kmFrom": "file" if use_file_km else "geom"}
 
 
 
@@ -551,14 +581,23 @@ def assemble(parts: Sequence[Sequence[Sequence[float]]],
 # 落库
 # ---------------------------------------------------------------------------
 
-def _put_coords(seq: Sequence[dict]) -> List[str]:
-    """把文件里的站坐标补进车站库（档案里没有坐标/没有这个站才写），返回补了哪些"""
+def _put_coords(seq: Sequence[dict], exact: bool = False) -> List[str]:
+    """把文件里的站坐标补进车站库（档案里查不到坐标的站才写），返回补了哪些
+
+    站名按文件里怎么写就怎么存（exact 只是不再二次去重，保留参数给调用方语义）。
+    档案已有的坐标一律不动 —— 车站坐标以档案 / 人工为准，导入只补空缺。
+    """
     rows = []
     now = time.time()
+    seen = set()
     for s in seq:
+        # 档案里已经有这个站（按 12306 口径能查到）且有坐标：以档案为准，不再写
         st = cnrail.station(s["name"]) or {}
         if st.get("lat") is not None and st.get("lon") is not None:
-            continue                        # 档案有坐标，以档案为准
+            continue
+        if s["name"] in seen:
+            continue
+        seen.add(s["name"])
         typ = s.get("kind") or ("线路所" if s["name"].endswith("所") else "车站")
         rows.append((s["name"], s["lat"], s["lon"],
                      json.dumps([], ensure_ascii=False), typ, now))
@@ -726,33 +765,40 @@ def import_line(obj, filename: str = "", replace: bool = False,
         raise ValueError("走向串不成一条折线（碎段之间离得太远）")
 
     stops = [{"name": s["name"], "km": s["km"]} for s in seq]
-    bits = ["GeoJSON 导入"]
+    names = [s["name"] for s in stops]
+    dup = list(dict.fromkeys(n for i, n in enumerate(names) if n in names[:i]))
+    bits = ["GeoJSON 导入 · 按文件原样"]
     if props.get("编号"):
         bits.append("编号 %s" % props["编号"])
     if props.get("起点") or props.get("终点"):
         bits.append("%s→%s" % (props.get("起点") or "?", props.get("终点") or "?"))
     bits.append("%d 站 / %.1f km" % (len(stops), stops[-1]["km"]))
+    bits.append("里程按文件" if stat.get("kmFrom") == "file" else "里程按走向量")
     if d["file"]:
         bits.insert(1, d["file"])
     auto_note = " · ".join(bits)
 
-    filled = _put_coords(seq)
+    filled = _put_coords(seq, exact=True)
     if filled:
         railcore._apply_custom()             # 新补的坐标要并进 cnrail，详情页才有坐标
         railcore._reload_coord_cache()
     detail = railcore.save_custom_line(name, stops, note=note or auto_note,
-                                       replace=replace)
-    _save_geom(name, d["file"], d["parts"], stat["totalKm"], props, chain)
+                                       replace=replace, raw=True)
+    _save_geom(name, d["file"], d["parts"], stat.get("geomKm") or stat["totalKm"],
+               props, chain)
 
     off = [s for s in seq if s["snap"] > OFF_GEOM_M]
     cat = cnrail.catalog_get(name) or {}
     return {
         "ok": True, "name": detail.get("name") or name,
-        "n": len(stops), "totalKm": stops[-1]["km"], "geomKm": stat["totalKm"],
+        "n": len(stops), "totalKm": stops[-1]["km"],
+        "geomKm": stat.get("geomKm") or stat["totalKm"],
+        "kmFrom": stat.get("kmFrom") or "geom",
         "first": stops[0]["name"], "last": stops[-1]["name"],
         "points": sum(len(p) for p in d["parts"]), "parts": len(d["parts"]),
         "chainPoints": len(chain), "broken": stat["broken"],
         "stationsInFile": len(d["stations"]), "dropped": len(d["stations"]) - len(stops),
+        "dupNames": dup[:8], "dupCount": len(dup),
         "offGeom": [{"name": s["name"], "dist": (round(s["snap"]) if s["snap"] < 1e9 else None)}
                     for s in off[:6]],
         "filledStations": len(filled), "note": detail.get("note") or auto_note,

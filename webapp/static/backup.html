@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>railcn · 备份线路</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🗄️</text></svg>">
+<link rel="stylesheet" href="/bk.css">
+</head>
+<body>
+<div id="bk">
+
+  <header class="bk-top">
+    <div class="bk-brand">
+      <span style="font-size:17px">🗄️</span>
+      <b>备份线路</b>
+      <span class="sub">清空前的线路都在这里 —— 先看，挑中了再导入线路库</span>
+    </div>
+    <div class="bk-actions">
+      <label class="bk-batch">
+        <span>备份批次</span>
+        <select id="bkTag"><option value="">全部批次</option></select>
+      </label>
+      <a class="btn" href="/">回查询页</a>
+    </div>
+  </header>
+
+  <main>
+    <aside class="bk-left">
+      <div class="bk-search">
+        <input id="bkQ" placeholder="线路名，如 京沪、陇海、成昆" autocomplete="off">
+        <button id="bkGo" class="btn">查</button>
+      </div>
+      <div id="bkFilters" class="bk-filters"></div>
+      <div id="bkCount" class="bk-count"></div>
+      <div id="bkList" class="bk-list"></div>
+      <div class="bk-more"><button id="bkMore" class="btn ghost hidden">加载更多</button></div>
+    </aside>
+
+    <section class="bk-right">
+      <div id="bkEmpty" class="bk-empty">
+        <div>
+          <b>左边挑一条线</b>
+          <p>这里能看到它在备份里的<b>完整站序和里程</b>，确认无误再点「导入到线路库」。<br>
+             不点就只是看 —— 线路库一个字节都不会动。</p>
+          <p class="muted">备份来自 <code>data/backup/lines-reset-&lt;批次&gt;/lines_export.json</code>，
+             含自建 / 底表 / OSM / china-emu / 线路资料库五套来源。</p>
+        </div>
+      </div>
+      <div id="bkDetail" class="bk-detail hidden"></div>
+    </section>
+  </main>
+
+  <div id="bkToast" class="bk-toast hidden"></div>
+</div>
+<script src="/bk.js"></script>
+</body>
+</html>

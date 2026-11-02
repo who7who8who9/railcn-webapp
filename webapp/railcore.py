@@ -1211,8 +1211,13 @@ def _entry_name(name: str) -> str:
     return sn
 
 
-def _build_custom_line(name: str, stations, note: str = "") -> dict:
-    """校验并整理一条新增线路：站序 + 每站「自起点累计里程」（可空）"""
+def _build_custom_line(name: str, stations, note: str = "", raw: bool = False) -> dict:
+    """校验并整理一条新增线路：站序 + 每站「自起点累计里程」（可空）
+
+    raw=True 是「完全按导入」的通道（GeoJSON 导入的线走这条）：
+    站名一字不改（不去「站」后缀）、允许同名站 —— 文件里怎么写的就怎么存。
+    普通新增 / 改站表仍按 12306 口径归一，否则和车次经停站对不上。
+    """
     nm = _norm_line_name(name)
     if not nm:
         raise ValueError("线路名不能为空")
@@ -1222,17 +1227,18 @@ def _build_custom_line(name: str, stations, note: str = "") -> dict:
     clean: List[dict] = []
     seen = set()
     for it in stations or []:
+        rawname = it.get("name") if isinstance(it, dict) else it
         # 站名统一成 12306 口径（去掉「站」后缀）：自建线路要和库内线路、
         # 车次站名对得上，否则「天津站」和「天津」会被当成两个站
-        sn = _entry_name(it.get("name") if isinstance(it, dict) else it)
+        sn = (str(rawname or "").strip() if raw else _entry_name(rawname))
         if not sn:
             continue
-        if sn in seen:
+        if sn in seen and not raw:
             raise ValueError("站点重复：" + sn)
         seen.add(sn)
-        raw = it.get("km") if isinstance(it, dict) else None
+        rawkm = it.get("km") if isinstance(it, dict) else None
         try:
-            km = float(raw) if raw not in (None, "") else None
+            km = float(rawkm) if rawkm not in (None, "") else None
         except (TypeError, ValueError):
             raise ValueError(f"{sn} 的里程不是数字")
         if km is not None and km < 0:
@@ -1246,8 +1252,11 @@ def _build_custom_line(name: str, stations, note: str = "") -> dict:
     for p in clean:
         if p["km"] is None:
             continue
-        if last is not None and p["km"] <= last:
-            raise ValueError(f"{p['name']} 的累计里程要大于前一站（{last} km）")
+        if last is not None:
+            # 原样通道允许「相邻两站同一里程」（文件里两个同位置的点），普通录入仍要求严格递增
+            bad = (p["km"] < last) if raw else (p["km"] <= last)
+            if bad:
+                raise ValueError(f"{p['name']} 的累计里程要大于前一站（{last} km）")
         last = p["km"]
 
     total = clean[-1]["km"] if clean[-1]["km"] is not None else None
@@ -1352,24 +1361,28 @@ def backfill_line_stations() -> int:
     return n
 
 
-def save_custom_line(name: str, stations, note: str = "", replace: bool = False) -> dict:
+def save_custom_line(name: str, stations, note: str = "", replace: bool = False,
+                     raw: bool = False, src: str = "") -> dict:
     """新增 / 覆盖一条自建线路
 
     replace=True 时允许覆盖「自己建的」同名线路（补站、改站序），档案线路与
     资料库带进来的线路仍然拒绝 —— 那些的站表不归这里管。
+    raw=True 表示这份站表是「完全按导入」的（站名原样），`src` 记来源：
+    `geojson`（文件导入）/ `backup`（从备份挑回来），之后改站表也按原样走。
     """
-    ln = _build_custom_line(name, stations, note)
+    ln = _build_custom_line(name, stations, note, raw=raw)
     cur = cnrail.line(ln["name"])
     if cur and not (replace and cur.get("custom")):
         raise ValueError(f"线路库里已经有「{ln['name']}」，改里程请用「编辑里程」")
+    src = src or ("geojson" if raw else "manual")
     now = time.time()
     with _db_lock, db() as conn:
         conn.execute(
             """INSERT INTO line_custom(name, stations_json, note, created_at, updated_at, source)
-               VALUES(?,?,?,?,?,'manual')
+               VALUES(?,?,?,?,?,?)
                ON CONFLICT(name) DO UPDATE SET stations_json=excluded.stations_json,
-                 note=excluded.note, updated_at=excluded.updated_at, source='manual'""",
-            (ln["name"], json.dumps(ln["stations"], ensure_ascii=False), ln["note"], now, now),
+                 note=excluded.note, updated_at=excluded.updated_at, source=excluded.source""",
+            (ln["name"], json.dumps(ln["stations"], ensure_ascii=False), ln["note"], now, now, src),
         )
     _apply_custom()
     # 档案里没有的站补成自建车站（带 OSM / 人工坐标），否则线路页缺坐标、地图上没有点
@@ -1940,13 +1953,18 @@ def _apply_custom() -> None:
     _LIB_IDX = None                      # 库变了，OSM 占用表跟着作废（osm_extras 用）
     lines: Dict[str, dict] = {}
     for it in list_custom_lines():
+        src = it.get("source") or "manual"
         try:
-            ln = _build_custom_line(it["name"], it["stations"], it.get("note") or "")
+            # 原样导入 / 从备份挑回来的站表：站名不能在这里被二次归一（否则带同名站的线
+            # 会因为「站点重复」直接掉出线路库），所以按 raw 重建
+            ln = _build_custom_line(it["name"], it["stations"], it.get("note") or "",
+                                    raw=src in ("geojson", "backup"))
         except ValueError:
             continue
-        src = it.get("source") or "manual"
         ln["source"] = src
-        ln["custom"] = src == "manual"        # 资料库带进来的不算「自建」
+        # line_custom 里的都是用户自己的线（manual / geojson / backup）；
+        # 只有老库里从资料库带进来的那批（source=catalog 之类）不算
+        ln["custom"] = src not in ("catalog", "lib", "chinaemu", "osm")
         lines[ln["name"]] = ln
     sts: Dict[str, dict] = {}
     for it in list_custom_stations():
@@ -2379,22 +2397,31 @@ def save_line_stations(name: str, stations, note: str = "") -> dict:
             raise ValueError("线路库里没有这条线：" + str(name or "")
                              + "，资料库里也查不到它的站序")
     stops = _clean_stops(stations)
-    # 落库前按档案 / 12306 口径归一（「唐海南站」→「唐海南」），和车次经停站对得上
-    stops = [{"name": _entry_name(s["name"]), "km": s["km"]} for s in stops]
+    # 用 GeoJSON 原样导进来的线（source='geojson'）：站名不改、允许同名站，
+    # 改了就等于偷偷动了用户的文件内容；其它线仍按档案 / 12306 口径归一
+    cust = next((x for x in list_custom_lines() if x["name"] == ln["name"]), None) \
+        if ln.get("custom") else None
+    raw = bool(cust and cust.get("source") in ("geojson", "backup"))
+    if raw:
+        stops = [{"name": str(s["name"] or "").strip(), "km": s["km"]} for s in stops]
+    else:
+        # 落库前按档案 / 12306 口径归一（「唐海南站」→「唐海南」），和车次经停站对得上
+        stops = [{"name": _entry_name(s["name"]), "km": s["km"]} for s in stops]
     stops = [s for s in stops if s["name"]]
     if len(stops) < 2:
         raise ValueError("一条线路至少要两个车站")
     names = [s["name"] for s in stops]
-    dup = list(dict.fromkeys(n for i, n in enumerate(names) if n in names[:i]))
-    if dup:
-        raise ValueError("站表里有重复车站：" + "、".join(dup))
+    if not raw:
+        dup = list(dict.fromkeys(n for i, n in enumerate(names) if n in names[:i]))
+        if dup:
+            raise ValueError("站表里有重复车站：" + "、".join(dup))
 
     lname = ln["name"]
     now = time.time()
     if ln.get("custom"):
         old = next((x for x in list_custom_lines() if x["name"] == lname), None)
         detail = save_custom_line(lname, stops, note or (old or {}).get("note") or "",
-                                  replace=True)
+                                  replace=True, raw=raw)
         detail["stationOrder"] = "custom"
         if adopted_from:
             detail["adopted"] = True

@@ -34,6 +34,7 @@ import railgeom  # noqa: E402
 import lineseg   # noqa: E402  分段线 ↔ 整线的站序 / 走向互补
 import linedesk  # noqa: E402  线路整理台（独立库 linedesk.db）
 import geoimport  # noqa: E402  手工导入 GeoJSON 线路
+import backup_lines  # noqa: E402  备份里的线路：看、挑、导回来
 
 mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("text/css", ".css")
@@ -231,6 +232,15 @@ class Handler(BaseHTTPRequestHandler):
             # 导入过的 GeoJSON 线路一览（走向从哪来、什么时候导的）
             if path == "/api/line/import-geojson/list":
                 return self.json({"items": geoimport.list_imported()})
+
+            # 备份里的某条线：挑定了才正式写进线路库
+            if path == "/api/backup/restore":
+                try:
+                    r = backup_lines.restore(payload.get("tag"), payload.get("source"),
+                                             payload.get("name"), bool(payload.get("replace")))
+                except ValueError as e:
+                    return self.err(str(e), 400)
+                return self.json(r)
 
             if path == "/api/line/catalog/add":
                 ln = railcore.add_catalog_line(payload.get("id"))
@@ -467,6 +477,22 @@ class Handler(BaseHTTPRequestHandler):
                         stopsFrom = seg.get("source") or "parts"
             return self.json({"name": nm, "found": found, "from": stopsFrom,
                               "items": items or [], "count": len(items or [])})
+
+        # ---- 备份里的线路：先看、再挑，挑中才写库 ----
+        if path == "/api/backup/lines":
+            return self.json(backup_lines.lines(
+                one("tag"), one("source"), one("q"),
+                int(one("limit", "200")), int(one("offset", "0"))))
+
+        if path == "/api/backup/line":
+            try:
+                return self.json(backup_lines.detail(one("tag"), one("source"), one("name")))
+            except ValueError as e:
+                return self.err(str(e), 404)
+
+        if path == "/api/backup/geom":
+            g = backup_lines.geom_preview(one("tag"), one("name"))
+            return self.json(g or {})
 
         if path == "/api/line":
             kw = one("q")

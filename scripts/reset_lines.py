@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""清空所有线路（保留线路资料库），清之前做完整备份
+"""清空所有线路（含线路资料库），清之前做完整备份
 
 清的是「线路」这一层：
 
-  rail.db   line_custom        自建线路（含资料库带进来的）
+  rail.db   line_custom        自建线路（含 GeoJSON 导入的）
             line_override      人工站序 / 人工里程
             line_src_pick      站序默认来源勾选
             line_src_fix       来源级修正（倒排）
@@ -11,29 +11,34 @@
             line_ce / line_ce_stop          china-emu 导入的线路与站序
             station_osm_line               车站→所属线路 的归属关系
             line_geom          GeoJSON 导入的走向
+            line_catalog / line_catalog_stop  线路资料库（辉睿 844 条 + 站表）
+                                               —— 默认也清，--keep-catalog 才留
   底表      data/cnrail_lines.json        417 条带站序的线路
 
 留的：
 
-  line_catalog / line_catalog_stop   线路资料库（844 条资料 + 站表）—— 只作参考
   station_osm / station_custom / coord_override   车站与坐标
   curate / train_override / route_* / trains      车次与校对结果
   整理台 linedesk.db 同样清空（清前整个库文件一并备份）
+
+清完的线路库是彻底空的，之后靠「导入 GeoJSON」或者「备份线路」里挑着导回来。
 
 用法：
 
   python scripts/reset_lines.py                     # 只看会清什么（不写库）
   python scripts/reset_lines.py --yes               # 备份后清空
-  python scripts/reset_lines.py --yes --keep-linedesk   # 整理台保留
+  python scripts/reset_lines.py --yes --keep-catalog    # 资料库线路留着
+  python scripts/reset_lines.py --yes --keep-linedesk   # 整理台留着
   python scripts/reset_lines.py --restore data/backup/lines-reset-20261102-101500
 
 备份目录里放：rail.db / linedesk.db / cnrail_lines.json / lines_export.json / README.md，
 rail.db 是清空前的整库副本，还原直接覆盖即可；lines_export.json 是逐表的行级导出，
-万一只想捞回某一条线也能在 JSON 里找。
+备份线路面板（「备份线路」按钮）读的就是它 —— 想看哪条、想导哪条都在那儿挑。
 """
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import shutil
@@ -52,11 +57,15 @@ RAIL_TABLES = [
     "line_custom", "line_override", "line_src_pick", "line_src_fix",
     "line_osm", "line_osm_stop", "line_ce", "line_ce_stop",
     "station_osm_line", "line_geom",
+    # 线路资料库（辉睿 844 条 + 站表）：默认一起清，--keep-catalog 才留
+    "line_catalog", "line_catalog_stop",
 ]
 # 要保留的（写进说明，顺便自检用）
-KEPT_TABLES = ["line_catalog", "line_catalog_stop", "station_osm",
-               "station_custom", "coord_override", "curate", "trains"]
+KEPT_TABLES = ["station_osm", "station_custom",
+               "coord_override", "curate", "trains"]
 DESK_TABLES = ["ld_alias", "ld_line", "ld_relation", "ld_stop", "ld_log", "ld_meta"]
+# --keep-catalog 时留着不动的两张表
+CATALOG_TABLES = ["line_catalog", "line_catalog_stop"]
 
 
 def _tables(conn: sqlite3.Connection) -> set:
@@ -97,9 +106,15 @@ def survey() -> dict:
 def _dump_rows(conn: sqlite3.Connection, table: str) -> list:
     try:
         conn.row_factory = sqlite3.Row
-        return [dict(r) for r in conn.execute("SELECT * FROM %s" % table)]
+        rows = [dict(r) for r in conn.execute("SELECT * FROM %s" % table)]
     except sqlite3.DatabaseError:
         return []
+    # line_geom 的走向是 gzip 二进制：base64 存进来，备份面板才能拿它画走向
+    for r in rows:
+        for k, v in list(r.items()):
+            if isinstance(v, (bytes, bytearray, memoryview)):
+                r[k] = {"__b64__": base64.b64encode(bytes(v)).decode("ascii")}
+    return rows
 
 
 def backup(tag: str = "") -> str:
@@ -194,13 +209,14 @@ python scripts/reset_lines.py --restore %s
 """ % (export.get("takenAt") or "", "\n".join(rows), dst.replace(BASE + os.sep, ""))
 
 
-def clear(keep_linedesk: bool = False) -> dict:
+def clear(keep_linedesk: bool = False, keep_catalog: bool = False) -> dict:
     done = {"rail": {}, "desk": {}, "base": 0}
+    skip = set(CATALOG_TABLES) if keep_catalog else set()
     if os.path.exists(DB):
         with sqlite3.connect(DB, timeout=30) as c:
             have = _tables(c)
             for t in RAIL_TABLES:
-                if t not in have:
+                if t not in have or t in skip:
                     continue
                 done["rail"][t] = c.execute("DELETE FROM %s" % t).rowcount
             if "station_osm" in have:
@@ -244,6 +260,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="清空所有线路（保留线路资料库）")
     ap.add_argument("--yes", action="store_true", help="真的清（不给就只打印计划）")
     ap.add_argument("--keep-linedesk", action="store_true", help="整理台不动")
+    ap.add_argument("--keep-catalog", action="store_true", help="线路资料库（line_catalog）不动")
     ap.add_argument("--restore", default="", help="从备份目录还原")
     ap.add_argument("--tag", default="", help="备份目录后缀，默认时间戳")
     args = ap.parse_args()
@@ -258,7 +275,8 @@ def main() -> int:
     print("清空前：")
     for t, n in st["rail"].items():
         if t in RAIL_TABLES:
-            print("  清  %-20s %6d" % (t, n))
+            mark = "留" if (args.keep_catalog and t in CATALOG_TABLES) else "清"
+            print("  %s  %-20s %6d" % (mark, t, n))
     print("  清  底表 cnrail_lines.json %4d" % st["base"])
     for t, n in st["rail"].items():
         if t in KEPT_TABLES:
@@ -273,7 +291,7 @@ def main() -> int:
 
     dst = backup(args.tag)
     print("\n已备份到：", dst.replace(BASE + os.sep, ""))
-    done = clear(args.keep_linedesk)
+    done = clear(args.keep_linedesk, args.keep_catalog)
     print("已清空：")
     for t, n in done["rail"].items():
         print("  %-20s -%d" % (t, n))
@@ -281,7 +299,9 @@ def main() -> int:
         print("  底表 cnrail_lines.json -%d" % done["base"])
     for t, n in done["desk"].items():
         print("  整理台 %-14s -%d" % (t, n))
-    print("\n线路资料库（line_catalog）没有动。**重启服务**才生效：")
+    print("\n%s。**重启服务**才生效："
+          % ("线路资料库（line_catalog）没有动" if args.keep_catalog
+             else "线路库现在彻底空了（含资料库线路），可以一条一条导回来"))
     print("  taskkill /F /IM python.exe  然后 python webapp/server.py --port 8686")
     return 0
 

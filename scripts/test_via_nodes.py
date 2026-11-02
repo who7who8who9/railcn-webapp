@@ -18,9 +18,11 @@ import urllib.request
 from playwright.sync_api import sync_playwright
 
 BASE = "http://127.0.0.1:8686/"
-SHOT = os.path.join("D:/railcn/docs", "via-node.png")
 TMP = os.path.join(tempfile.gettempdir(), "railcn-via-node")
 os.makedirs(TMP, exist_ok=True)
+# 截图先落临时目录，全绿才复制去 docs/ —— 否则脚本一红就把 README 引用的图冲掉了
+SHOT = os.path.join(TMP, "via-node.png")
+DOC_SHOT = os.path.join("D:/railcn/docs", "via-node.png")
 
 
 def get(path):
@@ -174,6 +176,10 @@ def main():
         for b in bad:
             print("  -", b)
         raise SystemExit(1)
+    if os.path.exists(SHOT):
+        import shutil
+        shutil.copyfile(SHOT, DOC_SHOT)
+        print("（全绿，已更新文档配图 %s）" % DOC_SHOT)
     print("\nOK：线路所能在候选里选到，节点位置正确，库外线路也能选，UI 无报错")
 
 

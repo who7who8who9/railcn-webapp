@@ -3154,6 +3154,8 @@ async function geoImportMany(files) {
     try {
       const r = await postJSON('/api/line/import-geojson', { fileName: f.name, data, replace: false });
       ok.push(`${r.name} —— ${r.n} 站 / ${lnKmText(r.totalKm)}`
+        + (r.kmFrom === 'file' ? '（里程取自文件）' : '')
+        + (r.dupCount ? `（${r.dupCount} 组同名站原样保留：${r.dupNames.join('、')}）` : '')
         + (r.broken ? `（${r.broken} 处走向断开）` : ''));
     } catch (e) {
       const msg = String(e.message || e);
@@ -3195,7 +3197,9 @@ async function geoImport(file, replace) {
     });
     dropLibCaches();
     const bits = [`导入「${r.name}」：${r.n} 站 / ${lnKmText(r.totalKm)}`];
-    if (r.dropped) bits.push(`文件里 ${r.stationsInFile} 个站，同名合并掉 ${r.dropped} 个`);
+    bits.push(r.kmFrom === 'file' ? '里程取自文件' : '里程按走向量出');
+    if (r.dupCount) bits.push(`文件里 ${r.dupCount} 组同名站（${r.dupNames.join('、')}），按原样保留`);
+    if (r.dropped) bits.push(`有 ${r.dropped} 个站没能落到走向上，也照样留着`);
     if (r.filledStations) bits.push(`补了 ${r.filledStations} 站坐标`);
     if (r.broken) bits.push(`${r.broken} 处走向断开，按直线计里程`);
     if (r.catalog && r.catalog.title) bits.push(`资料库里有「${r.catalog.title}」的资料卡`);
@@ -3255,7 +3259,13 @@ async function showLine(q, notice, from) {
     const hit = await showCatalogList(q, box);
     if (!hit) {
       const hit2 = await showOsmList(q, box);
-      if (!hit2) box.innerHTML = `<div class="empty">${e.message}</div>`;
+      if (!hit2) {
+        box.innerHTML = `<div class="empty">${e.message}
+          <div class="hint" style="margin-top:6px;color:#77839a">
+            线路库现在是空的：可以用上面「导入 GeoJSON」，或者去
+            <a href="/backup.html">备份线路</a> 里挑一条导回来。
+          </div></div>`;
+      }
     }
   }
 }

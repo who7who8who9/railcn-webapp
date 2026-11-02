@@ -411,8 +411,10 @@ railcn/
 
 ## 7. 回归脚本（24 个，改完必跑）
 
-> **2026-11-02 起线路库清零**（见第 5 节第 22 条），依赖「底表 417 / OSM / china-emu / 自建 65」
-> 的脚本大面积为红，属预期 —— 清单见本节末尾的「清零后的状态」。
+> **2026-11-02 的库不是原来的库**：线路一层被清空过，又用 `scripts/import_backup_lines.py`
+> 从备份批量导回 **2646 条**（线名带「（来源）」后缀，见第 5 节第 22 条）；底表 / OSM / china-emu /
+> 资料库 / 整理库这几张**来源表还是空的**。所以有 11 个脚本是红的 —— 都是「写死了原名」或
+> 「依赖已清空的来源表」，不是代码坏。清单和逐条原因见本节末尾的「回归状态」。
 
 ```bash
 for f in test_chain test_line_km test_line_stations test_nm_stations test_osm_extras \
@@ -458,42 +460,42 @@ done
 同类脚本 `test_catalog_match` 遇到「侯西线被用户收进库」时跳过站数断言，
 别把用户的整理结果当成 bug。
 
-### 清零后的状态（2026-11-02 实测，24 个脚本：**绿 11 / 红 13**）
+### 回归状态（2026-11-02 实测，24 个脚本）
 
-**绿 11**：`test_chain` / `test_code_alias` / `test_dock_speed` / `test_geo_import`（35 项）/
-`test_geo_toggle` / `test_net_form` / `test_nm_stations` / `test_routestore` /
-`test_station_loose` / `test_tl_stops`。
-另 `test_osm_extras` 自己**跳过**（库空了，找不到「库内一条、OSM 另一条同核心名」的线对），退出码 0。
+库里现在有 2646 条备份线（第 5 节第 22 条），**绿 13 / 红 11**：
 
-**红 13，全部因为「线路库 / 资料库 / OSM / china-emu / 整理库都是空的」，不是代码坏**：
+**绿 13**：`test_chain` / `test_code_alias` / `test_curate_sync` / `test_dock_speed` /
+`test_geo_import`（35 项）/ `test_geo_toggle` / `test_line_km` / `test_net_form` /
+`test_nm_stations` / `test_routestore` / `test_station_loose` / `test_tl_stops`；
+另 `test_osm_extras` **跳过**（OSM 差集开关默认关，找不到「库内一条、OSM 另一条同核心名」的线对）。
 
-| 脚本 | 红在哪 | 靠什么数据 |
+**红 11，全是「脚本写死了具体线名」或「来源表已经清空」，不是代码坏**：
+
+| 脚本 | 红在哪 | 根因 |
 |---|---|---|
-| `test_catalog_match` / `test_line_stations` / `test_lineseg` / `test_loose_line` / `test_src_pick` | HTTP 404（`/api/line?q=…` 查不到这条线） | 线路库 / 资料库里的线 |
-| `test_line_km` | `#lnEditBtn` 30 秒等不到（详情页没有「改里程」按钮） | 线路库里的线 |
-| `test_nm_insert` | HTTP 400（`/api/line/stations/clear` 的前提没了：津霸客运专线不在库） | 线路库里的线 |
-| `test_curate_refresh` | 「重算没返回线路库概况」（`library.lines` 为空） | 线路库里的线 |
-| `test_curate_sync` | `via_covers_stops` 认不出「全在线上」（段算不出来） | 线路库里的线 + china-emu 唐曹线 |
-| `test_chinaemu` | 6 项断言：兰新线 / 沪昆高速线纠不回整条，兰新客专 / 沪蓉 / 京包客专补 0 站 | `line_ce`（已清） |
-| `test_osm_data` | 站序坐标覆盖率算成 `None / int` → TypeError（`line_osm` 表空，计数返回 None） | `line_osm`（已清） |
-| `test_via_nodes` | 线路下拉一条库外线路都没有、合新高速线搜不到、春申南所不在候选里 | OSM / china-emu / 资料库（已清） |
-| `test_linedesk` | `ld_line` 空 → 「找得到京沪高速线」FAIL，随后 `d["aliases"]` 是 None 崩 | `linedesk.db`（已清） |
+| `test_catalog_match` / `test_lineseg` / `test_line_stations` / `test_src_pick` | HTTP 404（`/api/line?q=…` 查不到这条线） | 脚本按原名查（`京广线` / `京沪高速线`），库里现在叫 `京广线（底表）` |
+| `test_loose_line` | HTTP 404 | 它测「库外线路」（侯西线只在资料库有站序），资料库清空后这个场景不存在了 |
+| `test_nm_insert` | HTTP 400 | 前提线「津霸客运专线」不在库 |
+| `test_curate_refresh` | 「点候选没把线路名填进手工列表」 | 唐曹线不在库 |
+| `test_chinaemu` | 兰新 / 沪昆高速线纠不回整条，客专补 0 站 | `line_ce` 空 |
+| `test_osm_data` | 站序坐标覆盖率算成 `None / int` → TypeError | `line_osm` 空 |
+| `test_via_nodes` | 下拉里没有库外线路、搜不到合新高速线 / 线路所 | 资料库 / china-emu / OSM 表空 |
+| `test_linedesk` | `ld_line` 空 → `d["aliases"]` 是 None 崩 | `linedesk.db` 空 |
 
-**要全绿就还原备份**（会覆盖当前导入的线，还原后重新导入即可）：
+**如果又把库清空**（同一天那次实测是绿 11 / 红 13）：多红 `test_line_km`（`#lnEditBtn` 等不到，
+详情页没有「改里程」按钮）、`test_curate_sync`（`via_covers_stops` 认不出「全在线上」），
+其余红的一样。要回到有线的状态：`python scripts/import_backup_lines.py --yes`。
 
-```bash
-python scripts/reset_lines.py --restore data/backup/lines-reset-20261102-100211
-```
-
-**跑完这批红脚本会留脏**（失败路径走不到 `finally` 的还原）。2026-11-02 第二次实测只多出
-4 个测试车站，`line_custom` / `line_override` / `line_src_fix` 都回到 0。
-现在 `test_geo_import` 收尾会自己删这几行（`drop_test_stations()`），手工只需在脚本中途崩掉时补一刀：
+**跑完这批红脚本会留脏**（失败路径走不到 `finally` 的还原）。`test_geo_import` 收尾会自己删
+测试车站（`drop_test_stations()`）；`test_line_km` 改过的里程会留在 `line_override` 里
+（按原名「京沪线」，还原时 400 失败）。手工补一刀：
 
 ```sql
 DELETE FROM station_custom WHERE source = 'geojson' AND name IN ('甲站', '乙站', '丙站', '同名站');
+DELETE FROM line_override WHERE name = '京沪线' AND note = '';
 ```
 
-第一次实测还多留过这三样（再跑出这三样就一并清）：
+早先还多留过「津保城际铁路」自建线、`line_src_fix` 的 `沪杭高铁 / catalog / reverse`，再跑出来一并清：
 
 ```sql
 DELETE FROM line_custom   WHERE name = '津保城际铁路';
@@ -501,11 +503,12 @@ DELETE FROM line_override WHERE name IN ('津保城际铁路', '京沪线');
 DELETE FROM line_src_fix  WHERE name = '沪杭高铁';
 ```
 
-**这些是用户真实数据，别当脏清**：`station_custom` 的 1880 条 `line-fill` + 8 条 `manual`、
-`coord_override` 20 条、`train_override` 54 条（`source` 是 `manual` / `sync`）。
+**这些是用户真实数据，别当脏清**：`station_custom` 的 1880 条 `line-fill` + 8 条 `manual`
+（导回备份后涨到 4496 条，新增的那批也是 `line-fill`）、`coord_override` 20 条、
+`train_override` 54 条（`source` 是 `manual` / `sync`）、用户自己导的 `京沪线`（163 站，`geojson`）。
 
 `test_via_nodes` 的截图现在先落 `%TEMP%`，**全绿才复制去** `docs/via-node.png` ——
-否则脚本一红就把 README 引用的配图冲掉（2026-11-02 真冲过一次）。
+否则脚本一红就把 README 引用的配图冲掉（2026-11-02 真冲过一次，`docs/curate-od.png` 也被冲过一次）。
 
 ## 8. 踩过的坑（省时间用）
 

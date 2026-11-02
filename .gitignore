@@ -10,6 +10,10 @@ webapp/data/rail.db.bak-*
 webapp/data/backup/
 # 清空线路前的整库备份（170 MB 级，留在本机）
 data/backup/
+# 批量导入 / 清空前的整库快照（170 MB 级）
+data/snapshots/
+# OSM 原始数据（china.osm.pbf 1.7 GB + 解压产物）
+osm/
 webapp/data/railcn.db
 webapp/data/exports/
 

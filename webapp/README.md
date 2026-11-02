@@ -654,6 +654,42 @@ python scripts\reset_lines.py --restore data\backup\lines-reset-clear-all
   备份里有走向的连走向一起写回（`line_geom`）。看多久都不会动库
 - 库里已有同名线时按钮变「覆盖库里的这条」，会先问一句
 
+### 一次把备份全导回来（线名后缀标清来源）
+
+备份面板适合挑几条，几千条一条条点不现实（而且每条都会触发一次全库重建）。
+`scripts/import_backup_lines.py` 专门干这个：
+
+```bat
+python scripts\import_backup_lines.py                    :: 只看会导什么，不写库
+python scripts\import_backup_lines.py --yes              :: 真导（先停服务，导完再起）
+python scripts\import_backup_lines.py --yes --source osm,base
+python scripts\import_backup_lines.py --yes --no-stations
+```
+
+**线名怎么标来源**（同名线在备份里太多了：京沪线 底表 150 站 / OSM 166 站 / 资料库 82 站 /
+自建 156 站，按原名导入会互相覆盖）：
+
+| 情况 | 名字 |
+|---|---|
+| 这个名字在全部备份里只出现一次 | 原名，不加后缀 |
+| 出现多次 | `京沪线（OSM）`、`京沪线（底表）`、`京沪线（自建）` |
+| 同来源还有多条（资料库内部） | `京沪线（线路资料库·82站）`、`（线路资料库·35站）` |
+| 仍撞（同来源同站数） | 再加 `#2` |
+
+来源同时写进 `note`，线路详情里能看到「备份导入：来源 OSM · 批次 xxx · 166 站 1433.1 km」。
+
+**跳过什么**：只有 1 站的线（734 条，`_build_custom_line` 要求至少两站）、里程递减或为负的
+（89 条，原样通道不接受倒扣）、完全重复的（同批次同来源同名同站数同站序，8 条）。
+
+**走向**：只有 GeoJSON 导入的那批自建线在备份里带走向，其余 2600 多条没有 —— 但地图仍能画，
+因为 `/api/line` 会拿线名去 OSM 匹配走向；`railgeom.match()` 现在会先剥掉「（来源）」后缀再匹配
+（`京沪线（OSM）` → `京沪线`），不剥的话带后缀的线一条走向都借不到。
+
+**补站**：导入后把档案里没有的沿线站补进 `station_custom`（`source='line-fill'`，坐标能从
+OSM 派生就填），2026-11-02 那次补了 2599 个。
+
+导之前脚本不备份，自己先留一份整库快照（`data/snapshots/` 不在备份面板的扫描范围里）。
+
 ### 人工导入 GeoJSON 走向
 
 清空之后按人工整理的 GeoJSON 重建：车站页 / 线路页顶部「导入 GeoJSON」，选一个

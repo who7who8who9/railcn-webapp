@@ -29,6 +29,9 @@ GEOMS_JSON = os.path.join(DIR, "geoms.json")
 STATIONS_JSON = os.path.join(DIR, "data_stations.json")
 
 _TAIL = re.compile(r"(高速铁路|高速线|高铁|客运专线|客专线|城际铁路|城际线|普速线|铁路|线)$")
+# 备份批量导入给同名线加的来源后缀（京沪线（OSM） / 京沪线（线路资料库·82站）），
+# 借走向时先去掉它 —— 见 match()
+_SRC_TAIL = re.compile(r"（(?:自建|底表|OSM|china-emu|线路资料库)(?:·\d+站)?）$")
 MIN_KM = 0.5          # 短于这个里程的线名当碎屑，不参与匹配和搜索
 
 _lock = threading.Lock()
@@ -121,12 +124,20 @@ def match(name: str, expect_km: Optional[float] = None) -> Optional[tuple]:
 
     expect_km 给了已知里程时，几何里程不到它 35% 的候选直接排除
     （潍烟高速铁路在 OSM 只有 2 km 的残段，对不上 585 km 的潍烟高铁）。
+
+    名字带来源后缀的先去掉再匹配：备份批量导入把同名线叫成「京沪线（OSM）」
+    「京沪线（线路资料库·82站）」，不去掉就一条走向都借不到（2026-11-02）。
     """
     _load()
     if not name:
         return None
     n = re.sub(r"\s+", "", str(name))
     cands = list(_FAM.get(_family(n)) or [])
+    if not cands:
+        bare = _SRC_TAIL.sub("", n)
+        if bare and bare != n:
+            cands = list(_FAM.get(_family(bare)) or [])
+            n = bare
     if not cands:
         return None
     want = _suffix_kind(n)

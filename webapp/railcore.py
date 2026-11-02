@@ -2059,6 +2059,14 @@ def _lib_same_family(name: str) -> List[str]:
     return [x for x in fam.get(railgeom._family(name), []) if x != name]
 
 
+# 「OSM 里有、线路库没收」的线名差集要不要出现在查询结果里。
+# 2026-11-02 用户要求线路库彻底清空、以后全靠人工导 GeoJSON，随后问「为啥输入线路还是有数据」
+# —— 那些候选不是库里的线，是从 data/crtrain/lines.json（OSM 原始地图抽出的线名清单）现算的。
+# 库空的时候它只会让人以为没清干净（点进去还是 404），所以默认关掉。
+# 要恢复这套「被同名前缀挡住 / 库外线路补站收编」的能力：启动时设 RAILCN_OSM_EXTRAS=1。
+OSM_EXTRAS_ON = os.environ.get("RAILCN_OSM_EXTRAS", "") == "1"
+
+
 def osm_extras(q: str, limit: int = 8, min_km: float = 5.0) -> List[dict]:
     """
     线路查询的「顺带提示」：和查询词相关、但线路库还没收录的 OSM 线路。
@@ -2068,13 +2076,15 @@ def osm_extras(q: str, limit: int = 8, min_km: float = 5.0) -> List[dict]:
     「津霸线」永远看不见。这类「被同名前缀挡住」的线不止一条（同类 400 多条 ≥20 km），
     所以在命中结果里附一份差集，点开就能看走向、补站、收进线路库。
 
+    **默认关闭**（`OSM_EXTRAS_ON`，见上面的说明）：线路库清空后这些候选全是噪声。
+
     滤掉两类噪声：
       * 短于 min_km 的（疏解线、站线、分段残片，用户查线路时不需要）
       * 同族里已有更长一条被收录的（京沪高速线 1296 km 收录了，
         「京沪高速铁路」9 km 这种 OSM 残段就不必再提）
     """
     q = (q or "").strip()
-    if not q:
+    if not q or not OSM_EXTRAS_ON:
         return []
     used, _fam, lib_km = _lib_index()
     used_km: Dict[str, float] = {}

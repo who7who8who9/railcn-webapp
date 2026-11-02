@@ -623,6 +623,24 @@ python scripts\reset_lines.py --restore data\backup\lines-reset-clear-all
   `lines-reset-clear-all`（自建 1 + 资料库 844 条 10377 站 + 京沪线走向）
   —— 两次备份一起构成「备份线路」里的 3480 条可选线路
 
+### 清完之后搜线路：只列库里的线（OSM 线名候选默认关掉）
+
+库清空以后输入「京沪」，下拉里还是会冒出「京沪线 1434.4 km · 无从查站序」「京沪高铁
+1296 km」一串，点进去 404 —— 这不是库没清干净，那批线名根本不在库里：
+
+| 入口 | 数据来源 | 现在 |
+|---|---|---|
+| `/api/lines` 的 `osm` 字段（联想下拉） | `data/crtrain/lines.json`：从 326 MB 的 OSM 原始地图里抽出的线名 + 里程清单（`webapp/data/railways.geojson` 是源文件） | 默认返回空 |
+| `/api/line/osm/list`（回车后「OSM 铁路数据里找到 N 条」） | 同上 | 默认返回空 |
+
+两个入口共用一个开关 `railcore.OSM_EXTRAS_ON`：**默认关**，所以空库时输入任何线名都不弹候选，
+回车只给一句「线路库现在是空的：可以用上面「导入 GeoJSON」，或者去备份线路里挑一条导回来」。
+
+- 要恢复原来那套「被同名前缀挡住的线也能看见 / 库外线路看走向、补站、收编」的能力：
+  `set RAILCN_OSM_EXTRAS=1` 再起服务（Linux/macOS 用 `RAILCN_OSM_EXTRAS=1 python webapp/server.py`）
+- **OSM 车站不受影响**：`station_osm` 那 10340 个车站、查车站时的 OSM 条目照旧
+- 线路详情里的「真实走向」也不受影响（那是 `/api/line` 按线名去 OSM 匹配走向，不是候选）
+
 ### 备份线路：先看，挑中了才导进来
 
 清空之后线路都在备份里，界面上能一条条看、一条条挑：右上角「备份线路」（`/backup.html`）。

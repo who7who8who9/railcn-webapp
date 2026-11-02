@@ -376,6 +376,13 @@ railcn/
       （站名 / 里程照备份原样，`source='backup'`，备份里有走向的一起写回 `line_geom`）。
       走向预览：备份里没存走向的（非 GeoJSON 那批）临时从 `/api/line/osm` 借一份来画，只是预览。
       资料库导出了 844 行、面板只列 610 条 —— 差的 234 条 `line_catalog_stop` 里没站序，导入也没用，直接不列。
+    - **空库之后搜线路只列库里的线**（用户 2026-11-02 追问「为啥输入线路还是有数据」）：
+      那些候选不是库，是 `data/crtrain/lines.json`（326 MB OSM 地图 `webapp/data/railways.geojson`
+      抽出的线名 + 里程）现算的，两个入口 —— `/api/lines` 的 `osm` 差集（`osm_extras()`，联想下拉）
+      和 `/api/line/osm/list`（回车后「OSM 铁路数据里找到 N 条」）。
+      两个入口共用开关 **`railcore.OSM_EXTRAS_ON`，默认关**；要恢复「同名前缀也能看见 / 库外线路
+      补站收编」就起服务时设 `RAILCN_OSM_EXTRAS=1`。OSM 车站（`station_osm` 10340 条）和
+      线路详情的「真实走向」不走这个开关，别一起关掉。
     - 回归 `scripts/test_geo_import.py`（35 项，含「原样导入」那一段）。
 
 ## 6. 前端约定
@@ -470,7 +477,8 @@ python scripts/reset_lines.py --restore data/backup/lines-reset-20261102-100211
 ```
 
 **跑完这批红脚本会留脏**（失败路径走不到 `finally` 的还原）。2026-11-02 第二次实测只多出
-4 个测试车站，`line_custom` / `line_override` / `line_src_fix` 都回到 0：
+4 个测试车站，`line_custom` / `line_override` / `line_src_fix` 都回到 0。
+现在 `test_geo_import` 收尾会自己删这几行（`drop_test_stations()`），手工只需在脚本中途崩掉时补一刀：
 
 ```sql
 DELETE FROM station_custom WHERE source = 'geojson' AND name IN ('甲站', '乙站', '丙站', '同名站');

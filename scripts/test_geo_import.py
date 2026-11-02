@@ -17,13 +17,33 @@
 """
 import json
 import os
+import sqlite3
 import urllib.error
 import urllib.parse
 import urllib.request
 
 BASE = "http://127.0.0.1:8686"
+DB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                  "webapp", "data", "rail.db")
 LINE = "测试导入线（回归用）"
 OK = FAIL = 0
+# 导入会顺手给「档案里没有」的站写坐标（source='geojson'），这几站是测试专用的
+TEST_STATIONS = ("甲站", "乙站", "丙站", "同名站")
+
+
+def drop_test_stations():
+    """把测试写进 station_custom 的坐标清掉，脚本才可反复跑、不留脏"""
+    try:
+        c = sqlite3.connect(DB, timeout=20)
+        n = c.execute(
+            "DELETE FROM station_custom WHERE source = 'geojson' AND name IN (%s)"
+            % ",".join("?" * len(TEST_STATIONS)), TEST_STATIONS).rowcount
+        c.commit()
+        c.close()
+        if n:
+            print("（已清掉测试写入的 %d 个车站）" % n)
+    except Exception as e:                    # noqa: BLE001
+        print("（清测试车站失败：%s —— 手工删 station_custom 里 source='geojson' 那几行）" % e)
 
 
 def ck(name, cond, msg=""):
@@ -253,6 +273,7 @@ def main():
             post("/api/line/delete", {"name": RAW_LINE})
         except urllib.error.HTTPError:
             pass
+        drop_test_stations()
     print()
     if FAIL:
         print("失败 %d 项，通过 %d 项" % (FAIL, OK))

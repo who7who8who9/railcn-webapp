@@ -614,6 +614,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.json({"items": geoimport.list_imported()})
 
         if path == "/api/line/osm/list":
+            # 线路库清空后（2026-11-02 用户要求「空库、全靠人工导 GeoJSON」），
+            # 拿 OSM 三千多条线名当候选只会让人以为没清干净 —— 与 osm_extras 同一个开关。
+            if not railcore.OSM_EXTRAS_ON:
+                return self.json({"items": [], "stats": {}})
             kw = one("q")
             used, _fam, _km = railcore._lib_index()
             items = railgeom.search(kw, int(one("limit", "30")))

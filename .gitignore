@@ -62,3 +62,13 @@ shots/
 
 # 移动盘同步回开发机时，被覆盖文件的自动备份
 /.sync-backup/
+
+# ---------- 本地数据集 / 中间产物（GB 级，只留本机，不进 GitHub） ----------
+# cnrail/ 2.4 GB（含 china-latest.osm.pbf 与切分碎段）；三个 geojson 目录、railway-data 为可重建产物
+/cnrail/
+/cnrail_geojson/
+/cnrail_geojson_corrected/
+/cnrail_geojson_gcj02/
+/railway-data/
+# 11-06 文档历史快照（zip + md 备份），当前版本在 docs/ 根目录
+/docs/archive/

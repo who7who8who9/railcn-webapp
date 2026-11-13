@@ -165,19 +165,27 @@ def check_ui():
 
 
 def check_new_line_visible():
-    """新加一条线路 + 一个车站后，校对页的下拉能搜到（这是第 3 条需求的根因）"""
-    print("== 新增线路后可见性")
+    """新加一条线路后：站序能查到，但它**不进**校对下拉（校对只认整理台确认的线）
+
+    2026-11-11 用户改口径：数据校对里出现的线路只有整理台完成全部确认的那些
+    （见 confvia.py），刚手工加进线路库的线还不算确认，所以下拉里搜不到 ——
+    要在整理台把它确认了才会出现。这里守的就是这个边界。
+    """
+    print("== 新增线路后的口径")
     post("/api/line/new", {"name": TMP_LINE, "stations": [
         {"name": "唐山", "km": 0}, {"name": "唐山南", "km": 8}]})
     try:
         names = get("/api/curate/lineNames")["names"]
-        assert TMP_LINE in names, "新线路没进 /api/curate/lineNames"
+        assert TMP_LINE not in names, "没确认的新线路不该进 /api/curate/lineNames"
         stops = get("/api/line/stops?q=" + urllib.parse.quote(TMP_LINE))["items"]
-        print(f"  新线路 {TMP_LINE} 已进线路名清单，站序 {stops}")
+        assert len(stops) >= 2, "新线路的站序查不到：%s" % stops
+        print(f"  新线路 {TMP_LINE} 站序 {stops}（校对下拉不列，等整理台确认）")
         d = get("/api/curate/cands?from=" + urllib.parse.quote("唐山")
                 + "&to=" + urllib.parse.quote("唐山南"))
-        print("  候选接口 唐山→唐山南：" + "/".join(x["line"] for x in d["items"][:4]))
-        assert d["items"], "候选接口没返回"
+        lines = [x["line"] for x in d["items"]]
+        confirmed = set(get("/api/curate/lineNames")["names"])
+        assert all(n in confirmed for n in lines), "缺口候选里混进没确认的线：%s" % lines
+        print("  候选接口 唐山→唐山南：" + ("/".join(lines[:4]) or "（无确认线路）"))
     finally:
         post("/api/line/delete", {"name": TMP_LINE})
         names = get("/api/curate/lineNames")["names"]

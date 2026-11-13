@@ -13,6 +13,7 @@ cnrail_data_v2 静态知识库（由 D:/railcn/tools/xlsx_to_json.py 生成）
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import statistics
@@ -34,6 +35,10 @@ _POSALL: Optional[Dict[str, List[Tuple[int, int]]]] = None       # 站名 -> [(�
 _CATALOG: Dict[str, dict] = {}                                   # 线路名 -> 线路资料（含站表）
 _CATALOG_ALL: Dict[str, dict] = {}                               # 资料 id -> 线路资料（含未收录线路）
 _NAMES: Optional[set] = None                                     # 线路库里出现过的站名（原样），station_name 用
+# 外部注入的「规范的裸站名」：12306 站表 + 六源合并表（station_master）。
+# 有了它，「北京南站 → 北京南」能截，而「十八站 → 十八」不会（十八 不是任何来源的站名）。
+_KNOWN_NAMES: set = set()
+_KNOWN_TRIED = False
 _LOADED = False
 
 # 人工里程：{线路名: {"segKm": {"0": 12.3}, "totalKm": 240.0}}
@@ -71,19 +76,70 @@ def _key(name: str) -> str:
 
 def station_name(name: str) -> str:
     """
-    站名规范化，存储 / 显示都用它：
+    站名规范化，存储 / 显示都用它（全项目统一不带「站」后缀）：
 
       「天津西站」→「天津西」（线路库里另有「天津西」这种不带「站」的写法）
+      「杭州东站」→「杭州东」
       「十八站」  →「十八站」（库里的站名本身带「站」，是地名的一部分，不能截）
 
-    判据：去掉尾部「站」之后，若线路库里存在**不带「站」的同名站**，说明裸名才是
-    规范写法，取短名；否则保持原样（「十八站」「新九站」这类不会被截坏）。
+    判据：去掉尾部「站」之后，若这个裸名**本身就是一个认得的站名**（线路库 / 12306 站表 /
+    六源合并表里出现过），说明裸名才是规范写法，取短名；否则保持原样
+    （「十八站」「新九站」「同名站」这类不会被截坏）。
+
+    注意：不叫「站」的名字原样返回，**不碰名字里的空格**（「Yên Viên」这种外文站名
+    去掉空格就变成另一个名字了）。
     """
-    n = _norm(name)
-    if not n or not n.endswith("站") or len(n) <= 1:
-        return n
-    short = n[:-1]
-    return short if short in _line_names() else n
+    raw = str(name or "").strip()
+    if not raw.endswith("站") or len(raw) <= 2:
+        return raw
+    cand = raw
+    for _ in range(2):                      # 最多剥两层：「郑州航空港站站」→「郑州航空港」
+        if not cand.endswith("站") or len(cand) <= 2:
+            break
+        short = cand[:-1].strip()
+        key = _norm(short)
+        if key and (key in _known() or key in _line_names() or short in _line_names()):
+            return short
+        if not short.endswith("站"):
+            break
+        cand = short
+    return raw
+
+
+def _known() -> set:
+    """规范裸站名集合（12306 站表 + station_master）
+
+    server 启动时 railcore 会注入一份；整理台 / 独立脚本没有 railcore 时，
+    这里自己从 station_master 读一次（只读打开，失败就退回空集合）。
+    """
+    global _KNOWN_NAMES, _KNOWN_TRIED
+    if not _KNOWN_TRIED:
+        _KNOWN_TRIED = True
+        if not _KNOWN_NAMES:
+            p = os.path.join(BASE_DIR, "data", "rail.db")
+            if os.path.exists(p):
+                try:
+                    import sqlite3
+                    con = sqlite3.connect("file:%s?mode=ro" % p, uri=True)
+                    try:
+                        _KNOWN_NAMES = {r[0] for r in
+                                        con.execute("SELECT name FROM station_master") if r[0]}
+                    finally:
+                        con.close()
+                except Exception:            # noqa: BLE001
+                    pass
+    return _KNOWN_NAMES
+
+
+def set_known_names(names) -> None:
+    """注入规范的裸站名（12306 站表 + station_master），station_name 拿它判「站」是不是后缀"""
+    global _KNOWN_NAMES, _KNOWN_TRIED
+    _KNOWN_NAMES = {_norm(x) for x in (names or ()) if x}
+    _KNOWN_TRIED = True
+
+
+def known_names() -> set:
+    return set(_KNOWN_NAMES)
 
 
 def _line_names() -> set:
@@ -575,13 +631,14 @@ def line_detail(name: str) -> Optional[dict]:
     if not ln:
         return None
     pts = []
-    # 原样导入 / 从备份挑回来的线：站名就是文件里怎么写就怎么显示，
-    # 不再过 _key() 去掉「站」后缀（否则「唐海南站」会被显示成「唐海南」）
+    # 原样导入 / 从备份挑回来的线：站名照文件里的写法，但末尾的「站」统一去掉
+    # （杭州东站 → 杭州东；「十八站」「同名站」这种真名不截）
     raw_name = str(ln.get("source") or "") in ("geojson", "backup")
     for p in ln["stations"]:
         c = coord(p["name"])
         st = station(p["name"]) or {}
-        pts.append({"name": p["name"] if raw_name else _key(p["name"]), "km": p["km"],
+        nm = station_name(p["name"]) if raw_name else _key(p["name"])
+        pts.append({"name": nm, "km": p["km"],
                     "kmBase": p.get("kmBase", p["km"]),
                     "kmSrc": p.get("kmSrc"),
                     "lat": c[0] if c else None, "lon": c[1] if c else None,
@@ -981,34 +1038,161 @@ def _via_hits(ka_: str, kb_: str, ka: float, kb: float, prefs) -> List[tuple]:
     return hits
 
 
+def _geo_km(a: Tuple[float, float], b: Tuple[float, float]) -> float:
+    """两点球面距离（km），a/b = (lat, lon)。只给经由端站的就近兜底用"""
+    p1, p2 = math.radians(a[0]), math.radians(b[0])
+    dl, dp = math.radians(b[1] - a[1]), p2 - p1
+    h = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * 6371.0088 * math.asin(math.sqrt(h))
+
+
+def _via_line(name: str) -> Optional[dict]:
+    """经由线名 → 线路档案：认规范名，也认「（来源）」后缀那一版。
+
+    人工经由写的是规范名（「大河沿联络线」「兰新客专」），库里这份线可能只
+    以「大河沿联络线（china-emu）」这类**来源版本名**存在。`line()` 只做
+    「+线 / 去线」的兜底，认不出括号后缀。以前整段会被跳过，跨线链断在这里。
+    """
+    L = line(name)
+    if L:
+        return L
+    n = _norm(name)
+    if not n:
+        return None
+    for ln in (_LINES or []):
+        bare = re.sub(r"[（(][^）)]*[）)]\s*$", "", ln.get("name") or "").strip()
+        if bare and _norm(bare) == n:
+            return ln
+    return None
+
+
+def _via_confirmed_stations(name: str) -> Optional[List[dict]]:
+    """整理台「全部确认」线路的站序（带坐标），只给经由链解析端点做兜底。
+
+    线路库那份站序可能缺一大截：滨洲线在库里只有 44 站，「对青山」之后直接跳到
+    367 km 外的「吉新河」，哈尔滨—大庆西—红旗营 整段没有。人工写
+    「滨洲线 哈尔滨→红旗营」时终点解析不到，这一段被整段丢掉，跨线链断在
+    大庆西，车次最后 100 多公里退化成一根直线，OSM 真实走向也就跟着走错。
+    整理台确认过的那份（78 站）这段是齐的。这里只按线名读，不改 `_LINES`。
+    """
+    try:
+        import confirmed
+        d = confirmed.detail_payload(name)
+    except Exception:                                   # noqa: BLE001
+        return None
+    if not d or not d.get("confirmed"):
+        return None
+    out = [{"name": s.get("name") or "", "lat": s["lat"], "lon": s["lon"],
+            "km": s.get("km")}
+           for s in (d.get("stations") or [])
+           if s.get("lat") is not None and s.get("lon") is not None]
+    return out if len(out) >= 2 else None
+
+
+def _via_sta_pos(st: Sequence[dict], name: str) -> Optional[int]:
+    """经由端点在线路站序里的下标；线路所 / 异名站用坐标就近兜底。
+
+    人工经由常把线路所写成简称（「头道河所」），而线路站序里叫「头道河线路所」、
+    或者压根没收这个所（南疆线站序从「珍珠泉」起算，不含头道河所）。名字匹配
+    不上时，借站表里同键正式名的坐标，取本线站序里离它最近的一站当端点。
+    没有这一步，整段链会被丢掉，车次路径退化成一根几百公里的大直线。
+    """
+    k = _key(name)
+    if not k:
+        return None
+    for p, x in enumerate(st):
+        if _key(x.get("name") or "") == k:
+            return p
+    target = None
+    for nm in (_STATIONS or {}):
+        if _key(nm) == k:
+            c = coord(nm)
+            if c:
+                target = c
+                break
+    if target is None:
+        return None
+    best, bd = None, 60.0                      # 太远就不是这个端点，别硬凑
+    for p, x in enumerate(st):
+        c = coord(x.get("name") or "")
+        if not c:
+            continue
+        d = _geo_km(target, c)
+        if d < bd:
+            best, bd = p, d
+    return best
+
+
 def _via_chain(segs: Optional[Sequence[dict]]) -> List[tuple]:
     """
-    把经由此番的线段解析成 [(线路序号, 起点下标, 终点下标)]，方向即运行方向。
+    把经由的线段解析成 [(线名, 站序, 起点下标, 终点下标)]，方向即运行方向。
 
-    线路库里没有的线名直接跳过（不影响其它段）；端站点在线路站序里找不到时也跳过。
+    线名认规范名也认带「（来源）」后缀的版本；端站认简称也认线路所正式名，
+    实在找不到时用坐标就近落到本线站序里的一站。**整理台确认站序优先**，
+    没确认的线才回到底表：底表那份可能缺一截（滨洲线只有 44 站，缺
+    哈尔滨→红旗营），也可能方向乱掉（平齐线把榆树屯之后的站倒着排），
+    拿它串中间站会串出往南绕一圈再跳回齐齐哈尔的假线路。
+    解析不了的段跳过，不影响其它段。
+
+    注意 chain 里直接带站序，不再是 `_LINES` 下标：兜底那份站序不在 `_LINES` 里。
     """
     chain: List[tuple] = []
-    idx = {ln["name"]: i for i, ln in enumerate(_LINES or [])}
     for s in segs or []:
         name = (s or {}).get("line") or ""
-        L = line(name)
-        if not L or L["name"] not in idx:
-            continue
-        st = L["stations"]
-        kf, kt = _key(s.get("from") or ""), _key(s.get("to") or "")
-        if not kf or not kt:
-            continue
-        pf = pt = None
-        for p, x in enumerate(st):
-            kx = _key(x.get("name") or "")
-            if pf is None and kx == kf:
-                pf = p
-            if pt is None and kx == kt:
-                pt = p
-        if pf is None or pt is None or pf == pt:
-            continue
-        chain.append((idx[L["name"]], pf, pt))
+        frm, to = s.get("from") or "", s.get("to") or ""
+        L = _via_line(name)
+        cands: List[tuple] = []
+        # 整理台确认站序优先：那是全项目唯一口径，线路库那份可能缺一截
+        # （滨洲线）甚至方向乱掉（平齐线把榆树屯之后的站倒着排）。
+        conf = _via_confirmed_stations(name)
+        if conf:
+            cands.append((name + "（整理台）", conf))
+        if L:
+            cands.append((L["name"], L["stations"]))     # 没确认的线才回到底表
+        for label, st in cands:
+            pf = _via_sta_pos(st, frm)
+            pt = _via_sta_pos(st, to)
+            if pf is None or pt is None or pf == pt:
+                continue
+            chain.append((label, st, pf, pt))
+            break
     return chain
+
+
+def via_segment_polyline(name: str, frm: str, to: str) -> Optional[dict]:
+    """一条经由线路 `from→to` 那一截的站序折线 —— 全项目唯一站序入口。
+
+    车次详情「按真实走向」按线名二次裁剪几何时，和 `path_stations()` 跨线展开
+    中间站时，**必须用同一份站序**：整理台确认站序优先、线路库（含「（来源）」
+    后缀版本）兜底，端点匹配走 `_via_sta_pos()`（线路所简称 / 异名站按坐标就近
+    落点）。以前几何裁剪只认 `confirmed.detail_payload()`，943 个经由段里只有
+    53 个（5%）是确认线路 ⇒ 规则形同只对个别车次生效。
+
+    返回 `{"pts": [(lon,lat),…], "confirmed": bool, "label": str}`；
+    站表里查不到坐标的站跳过，不足两点返回 None —— **调用方必须退回「不裁剪」**，
+    绝不能拿稀疏 / 乱序的站序硬切几何。
+    """
+    _ensure()
+    chain = _via_chain([{"line": name, "from": frm, "to": to}])
+    if not chain:
+        return None
+    label, st, pf, pt = chain[0]
+    step = 1 if pt >= pf else -1
+    pts: List[tuple] = []
+    for i in range(pf, pt + step, step):
+        s = st[i] or {}
+        lat, lon = s.get("lat"), s.get("lon")
+        if lat is None or lon is None:
+            c = coord(s.get("name") or "")
+            if not c:
+                continue
+            lat, lon = c
+        p = (float(lon), float(lat))
+        if not pts or p != pts[-1]:
+            pts.append(p)
+    if len(pts) < 2:
+        return None
+    return {"pts": pts, "confirmed": ("整理台" in label), "label": label}
 
 
 def _chain_mids(chain: List[tuple], ka_: str, kb_: str) -> Optional[List[str]]:
@@ -1017,9 +1201,9 @@ def _chain_mids(chain: List[tuple], ka_: str, kb_: str) -> Optional[List[str]]:
     而鸭园不是本趟车的经停站），把沿途中间站按运行顺序串出来。
 
     找不到「a 起、b 止」的完整链路时返回 None，交给原来的单线展开逻辑。
+    `chain` 每项自带站序（见 `_via_chain`），不要再回 `_LINES` 按序号取。
     """
-    for k, (li, pf, pt) in enumerate(chain):
-        lks = _LINES[li]["stations"]
+    for k, (label, lks, pf, pt) in enumerate(chain):
         stp = 1 if pt >= pf else -1
         pa = next((p for p in range(pf, pt + stp, stp)
                    if _key(lks[p].get("name") or "") == ka_), None)
@@ -1030,8 +1214,7 @@ def _chain_mids(chain: List[tuple], ka_: str, kb_: str) -> Optional[List[str]]:
             if _key(lks[p].get("name") or "") == kb_:
                 return mids
             mids.append(lks[p].get("name"))
-        for li2, pf2, pt2 in chain[k + 1:]:
-            lks2 = _LINES[li2]["stations"]
+        for label2, lks2, pf2, pt2 in chain[k + 1:]:
             st2 = 1 if pt2 >= pf2 else -1
             for p in range(pf2, pt2 + st2, st2):
                 if _key(lks2[p].get("name") or "") == kb_:

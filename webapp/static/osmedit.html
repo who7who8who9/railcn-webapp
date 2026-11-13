@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OSM 走向编辑器 · railcn</title>
+<link rel="stylesheet" href="/osmedit.css">
+</head>
+<body>
+<div class="oe-app">
+
+  <header class="oe-top">
+    <a class="oe-back" href="/" title="返回主页面">← 返回</a>
+    <div class="oe-title">✏️ OSM 走向编辑器
+      <span class="oe-sub" id="oeMode">—</span>
+    </div>
+    <div class="oe-top-actions">
+      <button id="oeKey" class="btn ghost sm" title="设置腾讯地图 Key（和主页面共用）">地图底图</button>
+      <button id="oeReload" class="btn primary sm">重新载入</button>
+    </div>
+  </header>
+
+  <div class="oe-body">
+    <aside class="oe-side">
+
+      <section class="oe-sec">
+        <div class="oe-sec-h">① 选择线路
+          <span class="oe-mini" id="oeKind"></span>
+        </div>
+        <div class="oe-newrow">
+          <input id="oeNewName" class="oe-in" placeholder="新线名（如 沪乍杭高铁）">
+          <button id="oeNew" class="btn primary sm" title="清空画布，从空白开始画一条新线">＋ 新建</button>
+        </div>
+        <div class="oe-search">
+          <input id="oeQ" class="oe-in" placeholder="搜有走向的线路（如 沪昆、京沪、成昆）">
+          <div id="oeCount" class="oe-count">正在统计有走向的线路…</div>
+          <div id="oeList" class="oe-list"></div>
+          <div class="oe-hint"><b class="oe-cf-tip">红名 = 整理台已确认线路</b>，排在列表最前，可直接修改走向；点「应用到线路库」会写回整理台，<b>保存后仍是已确认线路</b>。其余为库里真有走向的线；往下滚动继续加载，或输关键词搜（也能按走向来源名搜）。</div>
+        </div>
+      </section>
+
+      <section class="oe-sec">
+        <div class="oe-sec-h">② 抽稀精度
+          <span id="oeNLab" class="oe-mini"></span>
+        </div>
+        <input id="oeN" class="oe-range" type="range" min="40" max="1600" step="20" value="600">
+        <div class="oe-hint">载入主站那份<b>多段走向</b>，按段抽稀成可拖拽点；段与段之间不连线，数值越大越贴合。</div>
+        <button id="oeResample" class="btn ghost sm block">按当前精度重新载入</button>
+      </section>
+
+      <section class="oe-sec">
+        <div class="oe-sec-h">③ 编辑工具</div>
+        <div class="oe-tools">
+          <button id="oeAdd" class="btn ghost sm">＋ 添加点模式</button>
+          <button id="oeAppend" class="btn ghost sm" title="载入已有线路后，也能按点序接着最后一个点往后画">↳ 接着末尾画</button>
+          <button id="oeLink" class="btn ghost sm" title="依次点两个已有红点，把它们直接连成一段">⇄ 连接两点</button>
+        </div>
+        <div class="oe-tools">
+          <button id="oeDel" class="btn ghost sm">－ 删除选中点</button>
+          <button id="oeUndo" class="btn ghost sm">↶ 撤销</button>
+          <button id="oeClear" class="btn ghost sm">清空</button>
+        </div>
+        <label class="oe-chk"><input type="checkbox" id="oeShowSta"> 显示站点参考点（默认只画走向）</label>
+        <div class="oe-hint">点一下<b>红点</b>选中（变蓝）→ 拖动改走向，或按「删除选中点」/ Delete 键 / 右键删掉；「添加点模式」下点空白处加点：<b>新建线 / 刚起画时按点序往后接</b>（第 3 点也接在末尾，不会插回第 1、2 点之间），<b>编辑已有线路时才按最近线段插</b>，想接着末尾画就点「↳ 接着末尾画」。<b>连接两点</b>：点按钮后依次点两个已有红点，直接在它们之间连一条直线（断点两侧的 2 点会把两段接通）；也可以按住 <b>Shift</b> 依次点两个红点，Esc 取消。折线至少留 2 点。<b>没填地图 Key 的离线自绘模式同样能编辑</b>。撤销 Ctrl/⌘+Z。</div>
+      </section>
+
+      <section class="oe-sec hidden" id="oeStaSec">
+        <div class="oe-sec-h">④ 车站（建线用）
+          <span id="oeStaN" class="oe-mini"></span>
+        </div>
+        <div class="oe-tools">
+          <button id="oeSnap" class="btn primary sm">沿线抓站</button>
+          <select id="oeRadius" class="oe-sel" title="车站离走向多远算在线上">
+            <option value="1000">1 km</option>
+            <option value="2000" selected>2 km</option>
+            <option value="5000">5 km</option>
+            <option value="12000">12 km</option>
+          </select>
+        </div>
+        <div class="oe-addsta">
+          <input id="oeStaAdd" class="oe-in" list="oeStaDl" placeholder="按名字加一站（如 苏州北）">
+          <button id="oeStaAddBtn" class="btn ghost sm">加</button>
+        </div>
+        <datalist id="oeStaDl"></datalist>
+        <div id="oeStaList" class="oe-sta-list"></div>
+        <div class="oe-hint">抓站是<b>按原始轨道</b>算的：走向附近的国铁站会被认出来，按沿线里程排好序。展开「编辑里程」可改站序或删掉不想留的站 —— 改完的站序就是建线后的站序。</div>
+      </section>
+
+      <section class="oe-sec">
+        <div class="oe-sec-h">⑤ 保存</div>
+        <div class="oe-tools">
+          <button id="oeSave" class="btn primary sm">保存到草稿</button>
+          <button id="oeCreate" class="btn warn sm hidden">建线入库</button>
+          <button id="oeApply" class="btn warn sm">应用到线路库</button>
+        </div>
+        <div class="oe-hint" id="oeSaveHint">草稿只存本地编辑版（不破坏原几何）；「应用到线路库」会写回 line_geom，让贴线 / 列车地图真正采用这份走向。</div>
+      </section>
+
+      <section class="oe-sec oe-stat" id="oeStat">未载入线路</section>
+    </aside>
+
+    <main class="oe-stage">
+      <div id="oeMap"></div>
+      <canvas id="oeCanvas" class="hidden"></canvas>
+      <div class="oe-mapbar">
+        <span class="oe-badge" id="oeMapMode">底图加载中…</span>
+        <span class="oe-zoom" id="oeZoom"></span>
+      </div>
+      <div class="oe-toast hidden" id="oeToast"></div>
+    </main>
+  </div>
+
+  <div class="oe-modal hidden" id="oeKeyModal">
+    <div class="oe-modal-card">
+      <h3>地图底图设置</h3>
+      <p>本页使用<b>腾讯地图</b>作底图。Key 与主页面「地图 Key」按钮（以及数据校对右侧地图）共用，填一次全站生效；
+         不填则自动切换为<b>离线自绘模式</b>（不画国界、不带地图底图，但<b>加点 / 拖点 / 删点照常可用</b>）。</p>
+      <input id="oeKeyInput" class="oe-in" placeholder="粘贴腾讯位置服务 Key（留空=离线自绘，仍可编辑）">
+      <div class="oe-modal-actions">
+        <button class="btn ghost" id="oeKeyCancel">取消</button>
+        <button class="btn primary" id="oeKeySave">保存并重载</button>
+      </div>
+      <p class="oe-small">Key 只保存在本机浏览器 localStorage，不会写进代码或上传。</p>
+    </div>
+  </div>
+</div>
+
+<script src="/osmedit.js"></script>
+</body>
+</html>

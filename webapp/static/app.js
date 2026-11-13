@@ -125,6 +125,60 @@ const S = {
 const mapKey = () => localStorage.getItem('railcn.mapkey') || '';
 
 /* ============================================================
+ * 腾讯地图 SDK 加载器
+ *
+ * Key 是绑在 SDK 脚本 URL 上的，换 Key 必须重新注入脚本；但**不需要刷新整个页面**。
+ * `load(force)` 幂等：同一个 Key 且 SDK 已在就立刻返回；force 用于用户改了 Key。
+ * 无 Key 时只有 WorkBuddy 预览环境（占位符已被替换成真实代理地址）能继续加载，
+ * 普通浏览器直接抛 NO_KEY，由 MapView 降级成示意图。
+ * ============================================================ */
+const TMapSDK = {
+  key: null,          // 当前已加载脚本用的 Key（'' = 预览代理，无 Key）
+  loading: null,
+  disabled: false,    // 用户主动清空了 Key：即使旧的 SDK 还在也不用真底图
+  load(force = false) {
+    const key = mapKey();
+    if (!force && !this.disabled && window.TMap && this.key === key) return Promise.resolve();
+    if (this.loading) return this.loading;
+    const sdk = key
+      ? `https://map.qq.com/api/gljs?v=1.exp&key=${encodeURIComponent(key)}`
+      : 'https://map.qq.com/api/gljs?v=1.exp';
+    if (!key) {
+      const host = 'http://127.0.0.1:__WB_HTTP_PORT__/_TMapService/_wbt/__WB_TMAP_SECRET__';
+      if (host.includes('__WB')) {
+        const err = new Error('no-key');
+        err.code = 'NO_KEY';
+        return Promise.reject(err);
+      }
+      window._TMapSecurityConfig = { serviceHost: host };
+    } else {
+      delete window._TMapSecurityConfig;
+    }
+    this.loading = new Promise((res, rej) => {
+      const old = document.getElementById('tmap-sdk');
+      if (old) old.remove();
+      // 强制重载时让新脚本重新给全局 TMap 赋值，别读到上一份的鉴权上下文
+      if (force) window.TMap = undefined;
+      const el = document.createElement('script');
+      el.id = 'tmap-sdk';
+      el.src = sdk;
+      el.onload = () => {
+        if (typeof TMap === 'undefined') {
+          rej(new Error('SDK 脚本已加载但没有 TMap（Key 类型或鉴权可能不对）'));
+        } else {
+          this.key = key;
+          this.disabled = false;
+          res();
+        }
+      };
+      el.onerror = () => rej(new Error('SDK 脚本加载失败（检查网络 / Key / 域名白名单）'));
+      document.head.appendChild(el);
+    }).finally(() => { this.loading = null; });
+    return this.loading;
+  },
+};
+
+/* ============================================================
  * 地图后端：TMap（腾讯 GL JS）
  * ============================================================ */
 const TMapView = {
@@ -136,28 +190,12 @@ const TMapView = {
   pts: [],
 
   async init() {
-    const key = mapKey();
-    const sdk = key
-      ? `https://map.qq.com/api/gljs?v=1.exp&key=${encodeURIComponent(key)}`
-      : 'https://map.qq.com/api/gljs?v=1.exp';
-    if (!key) {
-      const host = 'http://127.0.0.1:__WB_HTTP_PORT__/_TMapService/_wbt/__WB_TMAP_SECRET__';
-      if (host.includes('__WB')) {
-        const err = new Error('no-key');
-        err.code = 'NO_KEY';
-        throw err;
-      }
-      window._TMapSecurityConfig = { serviceHost: host };
-    }
-    await new Promise((res, rej) => {
-      const el = document.createElement('script');
-      el.src = sdk;
-      el.onload = res;
-      el.onerror = () => rej(new Error('地图 SDK 加载失败（检查网络或 Key）'));
-      document.head.appendChild(el);
-    });
-    if (typeof TMap === 'undefined') throw new Error('地图 SDK 未就绪');
-
+    await TMapSDK.load(false);
+    // 重建时先清掉老实例与容器，否则腾讯 SDK 会在旧 canvas 上叠一层
+    try { this.map && this.map.destroy && this.map.destroy(); } catch (_) { }
+    this.map = null; this.layers = {}; this.ok = false;
+    const host = $('#map');
+    if (host) host.innerHTML = '';
     this.map = new TMap.Map('map', {
       center: new TMap.LatLng(34.5, 108.9),
       zoom: 5,
@@ -511,6 +549,7 @@ const SvgView = {
     const nStop = (route.stops || []).length;
     // 站特别多（整条线路）时只标一部分，否则文字糊成一片
     const labelIdx = new Set(thinStops(pts.map((_, i) => i), 16));
+    let lastLabel = null;              // 相邻站挨太近时把标签错开，别叠成一团
     // 整条线一百多个站时，点比站间距还大，会把走向线整个盖成一串珠子：
     // 站多就缩小圆点、白边收窄，让线露出来
     const dense = nStop > 60;
@@ -533,8 +572,12 @@ const SvgView = {
       if (stop && labelIdx.has(i)) {
         const last = (s.i || 0) >= nStop;
         const t = last ? (s.arr || s.dep) : (s.dep || s.arr);
+        let ly = p[1] - 6;
+        if (lastLabel && Math.abs(p[0] - lastLabel.x) < 170
+            && Math.abs(ly - lastLabel.y) < 16) ly = lastLabel.y + 16;
+        lastLabel = { x: p[0], y: ly };
         const label = this.mk('text', {
-          x: p[0] + 7, y: p[1] - 6, 'font-size': 11, fill: '#1a2b45',
+          x: p[0] + 7, y: ly, 'font-size': 11, fill: '#1a2b45',
           'pointer-events': 'none',
         });
         label.textContent = t ? `${s.name} ${t}${last ? '到' : '开'}` : s.name;
@@ -542,7 +585,7 @@ const SvgView = {
         // 灰色圆角底板垫在文字下面，压在线条和网格上也能看清
         const w = label.getComputedTextLength();
         const bg = this.mk('rect', {
-          x: p[0] + 3.5, y: p[1] - 16.5, width: w + 7, height: 15, rx: 3,
+          x: p[0] + 3.5, y: ly - 10.5, width: w + 7, height: 15, rx: 3,
           fill: 'rgba(240,244,249,.94)', stroke: '#cfd9e6', 'stroke-width': 1,
           'pointer-events': 'none',
         });
@@ -673,7 +716,7 @@ const MapView = {
       const hint = $('#mapHint');
       hint.classList.remove('hidden');
       hint.innerHTML = e.code === 'NO_KEY'
-        ? `当前为<b>无底图示意模式</b>（未配置腾讯地图 Key）。<br>点击右上角「地图」填入 Key 后即可显示真实地图底图。`
+        ? `当前为<b>无底图示意模式</b>（未配置腾讯地图 Key）。<br>点击右上角「地图 Key」（或数据校对右侧地图的「设置底图 Key」）填入 Key 即可启用真实底图。`
         : `地图 SDK 加载失败：${e.message}<br>已切换为无底图示意模式。`;
     }
     window.addEventListener('resize', () => this.impl && this.impl.resize && this.impl.resize());
@@ -842,7 +885,10 @@ function renderDetail(route) {
         <span>历时 ${fmtDur(route.durationMin)}</span>
         <span>${stops.length} 站 · ${route.totalKm} km${kmBadge(route)}</span>
         ${over ? `<span>${route.startDate} → ${route.endDate}，跨 ${span} 个自然日</span>` : ''}
-        <span class="geo-sw"><button class="linkbtn" id="geoBtn">按真实走向</button><em id="geoNote" class="geo-note"></em></span>
+        <span class="geo-sw"><button class="linkbtn" id="geoBtn">按真实走向</button>
+          <select class="geo-mode" id="geoMode" title="真实走向画法（原画法保留可随时切回）">
+            <option value="confirmed">按确认线路</option><option value="legacy">原画法</option>
+          </select><em id="geoNote" class="geo-note"></em></span>
       </div>
       ${viaHtml}
       ${gapsHtml}
@@ -901,6 +947,17 @@ function renderDetail(route) {
 
   const gb = $('#geoBtn');
   if (gb) gb.addEventListener('click', () => toggleGeo(route));
+  const gm = $('#geoMode');
+  if (gm) {
+    gm.value = geoMode();
+    gm.addEventListener('change', async () => {
+      localStorage.setItem('railcn.routeGeoMode', gm.value);
+      if (!S.geoOn) return;                 // 没开真实走向：下次点按钮自然用新画法
+      route.geoData = null;                 // 两种画法各拉一份，互不串味
+      applyGeo(route, false);
+      await toggleGeo(route);
+    });
+  }
 
   $$('#detail .stop').forEach(li => {
     li.addEventListener('click', () => {
@@ -920,11 +977,26 @@ function highlightStop(i) {
 /* ============================================================
  * 地图路线：站点直连 ⇄ 沿真实线路（OSM）
  * ============================================================ */
+/** 真实走向画法：默认「按确认线路」；「原画法」= 旧的贪心覆盖逻辑，完整保留 */
+function geoMode() {
+  return localStorage.getItem('railcn.routeGeoMode') === 'legacy' ? 'legacy' : 'confirmed';
+}
+
 function geoNoteText(d) {
   if (!d) return '';
-  const gaps = (d.gaps || []).length;
-  if (!gaps) return '全程沿真实线路';
-  return `${gaps} 处缺口 · ${Math.round(d.gapKm || 0)} km 走站间直线`;
+  const tag = d.fallback === 'legacy' ? '无确认线路·沿用原画法'
+    : (d.mode === 'legacy' ? '原画法' : '按确认线路');
+  const gaps = d.gaps || [];
+  // 按确认线路画法里，缺口分两种：断口（碎段之间自动连最近两点，规则 2b）
+  // 与真缺口（这段线没几何，走站间直线）。旧画法没有 kind，一律按缺口算。
+  const links = gaps.filter(g => g.kind === 'link');
+  const holes = gaps.filter(g => g.kind !== 'link');
+  const km = arr => Math.round(arr.reduce((s, g) => s + (Number(g.km) > 0
+    ? Number(g.km) : Math.max(0, (g.to || 0) - (g.from || 0))), 0));
+  const parts = [];
+  if (holes.length) parts.push(`${holes.length} 处缺口 · ${km(holes)} km 走站间直线`);
+  if (links.length) parts.push(`断口自动连接 ${links.length} 处 · ${km(links)} km`);
+  return `${tag} · ${parts.length ? parts.join(' · ') : '全程沿真实线路'}`;
 }
 
 function setGeoNote(txt) {
@@ -934,8 +1006,34 @@ function setGeoNote(txt) {
   n.title = txt || '';
 }
 
+/** 「站点直连」= 本趟车实际停车站之间连直线。
+ *
+ * 以前这里直接拿后端 `path`（`cnrail.path_stations()` 从**线路库**展开的
+ * 通过站折线）画，可那些通过站不少是仿射假坐标、站序还乱：Z75 北京西→保定
+ * 段来回折返、中卫→兰州段一堆锯齿，看着就像走错了线。整理台确认的站序才是
+ * 准的，但那是「真实走向」该干的事；直连就只认这 7 个停车站。
+ */
+function directPath(route) {
+  return (route.stops || []).filter(s => s.lat != null)
+    .map(s => ({ lat: s.lat, lon: s.lon, km: s.km || 0 }));
+}
+
+function directStops(route) {
+  return (route.stops || []).filter(s => s.lat != null)
+    .map(s => ({ ...s, stop: true }));
+}
+
 function applyGeo(route, on) {
-  route.path = on ? route.geoData.path : route.pathBase;
+  // 兼容没走 openTrain（例如老缓存）的 route：现算一份直连折线
+  if (!route.directPath) {
+    route.expandedPath = route.path;
+    route.expandedStops = route.lineStops;
+    route.directPath = directPath(route);
+    route.directStops = directStops(route);
+  }
+  route.path = on ? route.geoData.path : route.directPath;
+  // 两种模式只画本趟车停车站：线路库展开的通过站点坐标不可信，别摆上去
+  route.lineStops = route.directStops;
   S.geoOn = on;
   MapView.setRoute(route);
   const pos = posAt(route, S.simT);
@@ -948,7 +1046,6 @@ function applyGeo(route, on) {
 async function toggleGeo(route) {
   if (!route) return;
   const btn = $('#geoBtn');
-  if (!route.pathBase) route.pathBase = route.path;
   if (S.geoOn) { applyGeo(route, false); return; }
 
   if (!route.geoData) {
@@ -956,7 +1053,8 @@ async function toggleGeo(route) {
     btn.textContent = '正在拼线路…';
     btn.disabled = true;
     try {
-      const d = await api('/api/route/osm', { code: route.code, date: route.date });
+      const d = await api('/api/route/osm',
+        { code: route.code, date: route.date, mode: geoMode() });
       if (!d.ok) {
         btn.textContent = old;
         btn.disabled = false;
@@ -1369,6 +1467,13 @@ async function openTrain(code, date, opts = {}) {
   try {
     const route = await api('/api/route', { code, date: useDate, cache: cacheOnly ? 1 : '' });
     S.route = route;
+    // 默认「站点直连」：只连本趟车停车站，别把线路库展开的通过站折线画上来
+    route.expandedPath = route.path;
+    route.expandedStops = route.lineStops;
+    route.directPath = directPath(route);
+    route.directStops = directStops(route);
+    route.path = route.directPath;
+    route.lineStops = route.directStops;
     S.geoOn = false;                  // 每换一趟车都从「站点直连」开始
     S.followNow = true;
     S.simT = clamp(Date.now(), Date.parse(route.startIso), Date.parse(route.endIso));
@@ -1431,50 +1536,10 @@ function renderTrainList(items, title) {
   }));
 }
 
-async function searchOD() {
-  const from = $('#odFrom').value.trim();
-  const to = $('#odTo').value.trim();
-  if (!from || !to) return;
-  const box = $('#odList');
-  box.innerHTML = `<div class="empty">正在查询 ${from} → ${to} …</div>`;
-  try {
-    const data = await api('/api/tickets', { from, to, date: $('#odDate').value || S.date });
-    if (!data.trains.length) {
-      box.innerHTML = `<div class="empty">${data.from} → ${data.to} 当日无直达车次。</div>`;
-      return;
-    }
-    box.innerHTML = `<div class="listhdr">${data.from} → ${data.to} · ${data.date} · ${data.count} 趟</div>` +
-      data.trains.map(t => {
-        const seats = t.seats.slice(0, 3).map(s => {
-          const ok = s.num && s.num !== '无' && s.num !== '--' && s.num !== '';
-          const txt = /^\d+$/.test(s.num || '') ? `${s.num}张` : (s.num === '有' ? '有' : (s.num === '候补' ? '候补' : '无'));
-          return `<span class="seat${ok ? ' ok' : ''}">${s.name} <b>¥${Math.round(s.price)}</b> <i>${txt}</i></span>`;
-        }).join('');
-        const eff = Math.round(Number(t.lishi.slice(0, 2)) * 60 + Number(t.lishi.slice(3)));
-        return `<div class="orow" data-code="${t.code}">
-          <div class="l1">
-            <span class="code">${t.code}</span>
-            <span class="times">${t.dep}<i>→</i>${t.arr}</span>
-            <span class="dur">${fmtDur(eff)}</span>
-            <span class="flags">${t.flags.slice(0, 2).map(f => `<em>${f}</em>`).join('')}</span>
-          </div>
-          <div class="l2">${seats}</div>
-        </div>`;
-      }).join('');
-    $$('#odList .orow').forEach(r => r.addEventListener('click', () => {
-      openTrain(r.dataset.code);
-      switchTab('train');
-    }));
-  } catch (e) {
-    box.innerHTML = `<div class="empty">查询失败：${e.message}</div>`;
-  }
-}
-
 function switchTab(name) {
   $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   if (name !== 'net') { LN.editing = false; lnWide(false); }
   $('#paneTrain').classList.toggle('hidden', name !== 'train');
-  $('#paneOD').classList.toggle('hidden', name !== 'od');
   $('#paneNet').classList.toggle('hidden', name !== 'net');
   $('#paneDL').classList.toggle('hidden', name !== 'dl');
   $('#paneHist').classList.toggle('hidden', name !== 'hist');
@@ -1482,16 +1547,21 @@ function switchTab(name) {
   // 校对页要把右侧地图区让给编辑器
   const curateMode = name === 'curate';
   const fullMode = name === 'hist';          // 历史查询要整宽：日历 + 统计表
-  document.querySelector('.side').classList.toggle('full', fullMode);
+  const side = document.querySelector('.side');
+  side.classList.toggle('full', fullMode);
+  // 校对页把左侧名单收窄，宽度让给右侧走向图（见 style.css .side.curate）
+  side.classList.toggle('curate', curateMode);
   document.querySelector('.stage').classList.toggle('hidden', curateMode || fullMode);
   $('#curateStage').classList.toggle('hidden', !curateMode);
   if (name === 'dl') dlLoad();
   if (name === 'hist') hqEnter();
   if (name === 'curate') {
     cuLoad();
+    cuMapEnsure();                        // 地图容器这时才可见，才能正确量尺寸 / 画图
     if (CU.linesStale) {                 // 别处刚加过线路：把线路名清单补上，已开的编辑器重画一遍
       CU.linesStale = false;
-      cuLoadLineNames().then(() => {
+      cuLoadLineNames().then(async () => {
+        await cuLoadLineScope();
         $$('#ceViaRows .ve-row').forEach((row, i) => cuSyncRowCands(i));
       });
     }
@@ -1521,6 +1591,105 @@ function mapResize() {
  * ============================================================ */
 let netKind = 'station';
 let netTimer = 0;
+
+/* 「车站/线路」页只认线路整理台**完成全部确认**的线路（2026-11-06 用户要求）：
+   底表 / 资料库 / china-emu / OSM / 备份导回来的来源版本、候选线路、★ 选版本
+   都不再出现。清单从 /api/line/confirmed 拉，缓存一份用于车站卡片过滤。 */
+const NET = { names: null, stats: null, items: null, cfOpen: true };
+async function netLoadConfirmed(force) {
+  if (NET.stats && NET.items && !force) return NET.stats;
+  try {
+    /* full=1：连全量清单（带确认时间、按最新在前）一起拿，页面下方常驻列表
+       靠它本地筛选；不带 full 的老调用只给统计数，口径不变。 */
+    const d = await api('/api/line/confirmed', { full: 1 });
+    NET.stats = d;
+    NET.names = new Set(d.lines || []);
+    NET.items = Array.isArray(d.items) ? d.items : [];
+  } catch (_) {
+    NET.stats = { confirmed: 0, lines: [], items: [] };
+    NET.names = new Set();
+    NET.items = [];
+  }
+  return NET.stats;
+}
+const netIsConfirmed = nm => !!(NET.names && NET.names.has(nm));
+
+/* ---------- 线路模式下方的「整理台全部确认线路」常驻清单 ----------
+   2026-11-10 用户口径：查询框下面把**所有**确认线路列出来，按确认先后倒序
+   （最新确认排最上面），然后输入线名就在这份清单里筛，而不是另弹一层联想
+   下拉。清单与 #netList / #netDetail 完全独立，打开线路详情也不会被覆盖。 */
+const cfShortTime = ts => {
+  const s = String(ts || '');
+  return s.length >= 16 ? s.slice(5, 16) : (s || '—');
+};
+function cfHit(it, kw) {
+  if (!kw) return true;
+  const pool = [it.name, it.geomName, ...(it.covers || [])]
+    .join(' ').replace(/\s+/g, '').toLowerCase();
+  return pool.includes(kw.toLowerCase());
+}
+async function netRenderConfirmedList(force) {
+  const box = $('#netConfirmedList');
+  if (!box) return;
+  if (netKind !== 'line') { box.classList.add('hidden'); return; }
+  await netLoadConfirmed(force);
+  const all = NET.items || [];
+  const q = ($('#netQ').value || '').trim().replace(/\s+/g, '');
+  const hit = all.filter(it => cfHit(it, q));
+  const detailOn = $('#netDetail').classList.contains('show');
+  const cur = (detailOn && LN.data && LN.data.name) || '';
+  box.classList.remove('hidden');
+  box.classList.toggle('fold', !NET.cfOpen);
+  box.innerHTML = `<div class="cf-hd"><b>整理台已确认 ${all.length} 条线路</b>
+      <span>${q ? `匹配 ${hit.length} 条` : '全部'}</span>
+      <em>按确认先后 · 最新在上 · 输入线名即在其中筛选</em>
+      <button class="cf-toggle" id="cfToggle">${NET.cfOpen ? '收起' : '展开'}</button></div>`
+    + (hit.length ? hit.map(it => {
+      const rank = all.indexOf(it) + 1;      // 用全量名次，筛选后也不重新编号
+      const meta = [`${it.n || 0} 站`,
+        it.totalKm ? lnKmText(it.totalKm) : '',
+        (it.fromSta && it.toSta) ? `${it.fromSta}→${it.toSta}` : '',
+        `走向 ${it.nGeomPt || 0} 点`].filter(Boolean).join(' · ');
+      return `<div class="cf-row${it.name === cur ? ' on' : ''}" data-cf="${esc(it.name)}"
+        title="${esc(it.name)} · 确认于 ${esc(it.confirmedAt || '—')}">
+        <span class="no">${rank}</span><span class="nm">${esc(it.name)}</span>
+        <span class="meta">${esc(meta)}</span>
+        <span class="at">${esc(cfShortTime(it.confirmedAt))}</span></div>`;
+    }).join('')
+      : `<div class="cf-empty">${q ? `没有匹配「${esc(q)}」的确认线路。`
+          : '还没有完成全部确认的线路。'}到 <a href="/linedesk.html">线路整理台</a>
+          完成 ① 走向 ② 站点 ③ 合并保存后，才会出现在这里。</div>`);
+  const tg = $('#cfToggle');
+  if (tg) tg.addEventListener('click', () => {
+    NET.cfOpen = !NET.cfOpen;
+    netRenderConfirmedList();
+  });
+  $$('#netConfirmedList [data-cf]').forEach(el => el.addEventListener('click', async () => {
+    const nm = el.dataset.cf;
+    $('#sugNet').classList.add('hidden');
+    await showLine(nm, null, '', false, true);
+    netRenderConfirmedList();               // 重渲染，给当前打开的线加高亮
+  }));
+}
+/** 线路模式隐藏「+ 线路 / 导入 GeoJSON」：建线归整理台，主站不再引入未确认线路 */
+function netToggleAdd() {
+  const lineMode = netKind === 'line';
+  ['#btnNewLine', '#btnImportGeo'].forEach(s => {
+    const el = $(s);
+    if (el) el.classList.toggle('hidden', lineMode);
+  });
+  ['#btnNewStation'].forEach(s => {
+    const el = $(s);
+    if (el) el.classList.toggle('hidden', false);
+  });
+  const hint = $('#netConfHint');
+  if (hint) {
+    const n = (NET.stats && NET.stats.confirmed) || 0;
+    hint.textContent = lineMode
+      ? `整理台已确认 ${n} 条线路 · 下方按确认先后列出（最新在上），输入线名即在其中筛选`
+      : '';
+  }
+}
 
 /* ---------- 新增线路 / 车站 ---------- */
 const NM = { kind: 'line', rows: [], busy: false, stations: null, preset: null, replace: false };
@@ -1956,6 +2125,20 @@ async function nmSave() {
   }
 }
 
+/** 「车站」模式下点到了线路：把切换按钮、输入提示、查询一起切过去。
+ *  整理台刚定稿完来主站找那条线，最容易停在默认的车站模式，还以为数据丢了。 */
+async function netSwitchLine(name) {
+  $$('.net-toggle .chipsel[data-kind]').forEach(x =>
+    x.classList.toggle('active', x.dataset.kind === 'line'));
+  netKind = 'line';
+  $('#netQ').placeholder = '京沪高速';
+  $('#netQ').value = name;
+  $('#sugNet').classList.add('hidden');
+  netToggleAdd();
+  await showLine(name, null, '', false, true);
+  netRenderConfirmedList();        // 清单常驻，切过来也要在，并高亮这条
+}
+
 async function searchNet(from) {
   /* from 是指定站序来源。注意它被直接挂成 click 监听器（13 行下面那句），
      那时候第一个实参是 PointerEvent —— 不是字符串就当没指定，否则会把事件对象
@@ -1964,12 +2147,21 @@ async function searchNet(from) {
   const q = $('#netQ').value.trim();
   clearTimeout(netTimer);                       // 防止待触发的联想把下拉框又翻开
   $('#sugNet').classList.add('hidden');
+  if (netKind === 'line') {
+    /* 线路模式：清单跟着输入筛好，按回车再打开这条线的详情 */
+    await netRenderConfirmedList();
+    if (q) await showLine(q, null, from, false, true);
+    netRenderConfirmedList();                  // 打开后刷新高亮
+    return;
+  }
   if (!q) return;
-  netKind === 'station' ? await showStation(q) : await showLine(q, null, from);
+  await showStation(q);
 }
 
 async function showStation(q) {
   const box = $('#netList'), det = $('#netDetail');
+  /* 车站卡片里的「连接线路」也只留整理台确认过的线路（其它线路不显示） */
+  await netLoadConfirmed();
   $('#paneNet').classList.remove('line-only');
   lnWide(false);
   det.classList.remove('show');
@@ -1981,9 +2173,27 @@ async function showStation(q) {
          在哪条线的第几公里。联想既然把它列出来了，就给一张 OSM 卡片，
          别只回一句「没有」 */
       if (d.osmOnly) { showOsmStation(d); return; }
-      box.innerHTML = `<div class="empty">车站库里没有「${q}」</div>`; return;
+      /* 车站库里查不到、但线路库里有：多半是拿线路名在默认的「车站」模式里搜
+         （整理台整合完来主站找「京沪高速线」就是这种）。别只回一句「没有」，
+         把命中的线路摆出来，点一下自动切到「线路」模式。 */
+      let lines = [];
+      try { lines = (await api('/api/lines', { q, limit: 5, confirmed: 1 })).items || []; } catch (_) { /* 忽略 */ }
+      if (lines.length) {
+        box.innerHTML = `<div class="empty">车站库里没有「${esc(q)}」，不过线路库里有 ${lines.length} 条线路：
+          <div class="cat-list" style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px;justify-content:center">
+            ${lines.map(it => `<button class="chip" data-goline="${esc(it.name)}">${esc(it.name)} · ${it.n || 0} 站${it.base ? ' · 基本线路' : ''}</button>`).join('')}
+          </div>
+          <div class="hint" style="margin-top:8px;color:#77839a">点线路名自动切到「线路」查看</div></div>`;
+        $$('#netList [data-goline]').forEach(el => el.addEventListener(
+          'click', () => netSwitchLine(el.dataset.goline)));
+        return;
+      }
+      box.innerHTML = `<div class="empty">车站库里没有「${esc(q)}」</div>`; return;
     }
-    const chips = (d.lines || []).map(l => `<button class="chip" data-line="${l}">${l}</button>`).join('');
+    const confLines = (d.lines || []).filter(l => netIsConfirmed(l));
+    const ccN = (d.coordCandidates || {}).n || 0;
+    const ccFar = (d.coordCandidates || {}).maxDistM || 0;
+    const chips = confLines.map(l => `<button class="chip" data-line="${esc(l)}">${esc(l)}</button>`).join('');
     const svc = (d.services || []).map(s => `<span class="chip flat">${s}</span>`).join('');
     /* 档案里没有的站（货运支线 / 疏港线上的站）：没有「连接线路」，但能列出当天经停的车次；
        自建线路补进来的站有档案了，一样列一下（档案里没有车次数据） */
@@ -2006,25 +2216,31 @@ async function showStation(q) {
           ${d.type ? `<span class="tag">${d.type}</span>` : ''}
           ${d.archive === false ? '<span class="tag warn" title="线路库还没收录这个站，资料来自 12306 站表">仅 12306 站表</span>' : ''}
           ${d.custom ? `<span class="tag manual">${d.source === 'line-fill' ? '线路补全' : '自建'}</span>`
-            + '<button class="btn sm ghost ln-edit" id="stDel">删除</button>' : ''}</div>
+            + '<button class="btn sm ghost ln-edit" id="stDel">删除</button>' : ''}
+          ${ccN > 1 ? `<span class="tag warn" title="各套来源给的坐标不一致，下方「全部坐标」可逐处确认">多坐标 ${ccN} 处${ccFar > 100 ? ' · 最远 ' + fmtDist(ccFar) : ''}</span>` : ''}</div>
         <div class="l2">${[d.province, d.city, d.district].filter(Boolean).join(' / ') || d.loc || ''}</div>
         <div class="l3">
           ${d.bureau ? `<span>${d.bureau}</span>` : ''}
           ${d.opened ? `<span>${d.opened} 启用</span>` : ''}
           <span id="stCoordNow">${d.lat == null ? '坐标缺失'
             : `纬度 ${(+d.lat).toFixed(6)} · 经度 ${(+d.lon).toFixed(6)}`
-              + (d.coordSource === 'manual' ? '（人工）' : '')}</span>
+              + (d.coordSource === 'manual'
+                ? (d.coordConfirmSrc ? `（已确认自 ${esc(d.coordConfirmSrc)}）` : '（人工）') : '')}</span>
           ${d.alias ? `<span>原名 ${d.alias}</span>` : ''}
         </div>
         <div class="st-coord">
           <input id="stCoordIn" placeholder="经度:126.576636,纬度:42.038926" autocomplete="off" spellcheck="false">
           <button class="btn sm" id="stCoordSave">补坐标</button>
+          ${d.coordSource === 'manual' ? '<button class="btn sm ghost" id="stCoordClear">撤销人工</button>' : ''}
           <span class="st-coord-msg" id="stCoordMsg"></span>
         </div>
+        ${stCoordList(d)}
         ${stNote(d) ? `<div class="l3 st-note">${esc(stNote(d))}</div>` : ''}
+        ${d.nSources ? `<details class="st-src"><summary>数据来源 ${d.nSources} 套（名称不带来源，全部记在备注里）</summary>
+          <div class="src-body">${esc(d.mergedNote || '')}</div></details>` : ''}
         ${d.addr ? `<div class="l3 st-addr" title="来自 12306 站资料">${esc(d.addr)}</div>` : ''}
         ${svc ? `<div class="l3">${svc}</div>` : ''}
-        ${d.archive === false ? '' : `<div class="l3" style="margin-top:6px">连接线路 ${(d.lines || []).length} 条（点击可在地图查看）</div>
+        ${d.archive === false ? '' : `<div class="l3" style="margin-top:6px">整理台已确认线路 ${confLines.length} 条（点击可在地图查看）</div>
         <div class="l3 chips">${chips || '<span style="color:#9aa6ba">无</span>'}</div>`}
         ${stOsmLines(d)}
       </div>
@@ -2039,6 +2255,7 @@ async function showStation(q) {
         ${viaHtml}`;
     det.classList.add('show');
     bindStationCoord(d);
+    bindCoordCandidates(d);
     const stDel = $('#stDel');
     if (stDel) {
       let armed = false;
@@ -2057,7 +2274,7 @@ async function showStation(q) {
       });
     }
     $$('#netDetail .chip[data-line]').forEach(b =>
-      b.addEventListener('click', () => showLine(b.dataset.line)));
+      b.addEventListener('click', () => showLine(b.dataset.line, null, '', false, true)));
     $$('#netDetail .chip[data-code]').forEach(b =>
       b.addEventListener('click', () => { switchTab('train'); openTrain(b.dataset.code); }));
     if (d.lat != null) {
@@ -2075,20 +2292,33 @@ async function showStation(q) {
 function showOsmStation(d) {
   const det = $('#netDetail');
   const p = (d.points || [])[0] || {};
+  const la = d.lat != null ? d.lat : p.lat, lo = d.lon != null ? d.lon : p.lon;
+  const ccN = (d.coordCandidates || {}).n || 0;
   det.innerHTML = `
     <div class="dhead">
       <div class="l1"><span class="code">${esc(d.name)}</span>
         <span class="tag manual" title="OSM 国铁车站（railway=station/halt），通过到线路中心线的距离归属到线上">OSM 独有</span>
         ${p.railway === '乘降所' ? '<span class="tag">乘降所</span>' : ''}
         ${p.ref ? `<span class="tag">编号 ${esc(p.ref)}</span>` : ''}
-        ${(d.points || []).length > 1 ? `<span class="tag warn">全国 ${d.points.length} 个同名点</span>` : ''}</div>
-      <div class="l2">${p.lat != null
-        ? `纬度 ${(+p.lat).toFixed(6)} · 经度 ${(+p.lon).toFixed(6)}`
+        ${(d.points || []).length > 1 ? `<span class="tag warn">全国 ${d.points.length} 个同名点</span>` : ''}
+        ${ccN > 1 ? `<span class="tag warn" title="各套来源给的坐标不一致，下方「全部坐标」可逐处确认">多坐标 ${ccN} 处</span>` : ''}</div>
+      <div class="l2">${la != null
+        ? `纬度 ${(+la).toFixed(6)} · 经度 ${(+lo).toFixed(6)}`
+          + (d.coordSource === 'manual' ? (d.coordConfirmSrc ? `（已确认自 ${esc(d.coordConfirmSrc)}）` : '（人工）') : '')
         : '坐标缺失'}</div>
       <div class="l3" style="margin-top:6px">线路库和 12306 站表都没收录这个站，下列信息全部来自 OSM</div>
+      <div class="st-coord">
+        <input id="stCoordIn" placeholder="经度:126.576636,纬度:42.038926" autocomplete="off" spellcheck="false">
+        <button class="btn sm" id="stCoordSave">补坐标</button>
+        ${d.coordSource === 'manual' ? '<button class="btn sm ghost" id="stCoordClear">撤销人工</button>' : ''}
+        <span class="st-coord-msg" id="stCoordMsg"></span>
+      </div>
+      ${stCoordList(d)}
       ${stOsmLines(d)}
     </div>`;
   det.classList.add('show');
+  bindStationCoord(d);
+  bindCoordCandidates(d);
   $('#netList').innerHTML = '';
   $$('#netDetail .chip[data-line]').forEach(b =>
     b.addEventListener('click', () => showLine(b.dataset.line)));
@@ -2106,7 +2336,8 @@ function showOsmStation(d) {
    distM 越大说明它其实离正线越远（支线引入、站场股道误判都在这种地方），
    所以超过 300 m 的那几条标成橙色，别照单全收。 */
 function stOsmLines(d) {
-  const ls = d.osmLines || [];
+  /* OSM 归属线路也是「其它线路」，只留整理台确认过的那几条 */
+  const ls = (d.osmLines || []).filter(l => netIsConfirmed(l.line));
   if (!ls.length) return '';
   const rows = ls.slice(0, 12).map(l => `
       <div class="row${l.distM > 300 ? ' off' : ''}">
@@ -2122,15 +2353,105 @@ function stOsmLines(d) {
 
 /** 备注里已经用「原名」标过原写法了，别重复显示 */
 function stNote(d) {
+  /* 「来源：…」是 2026-11-05 车站合并写进来的全称备注，单独用 <details> 展示，
+     别挤在这行短备注里（十几个来源名会把卡片撑爆） */
   return String(d.note || '')
     .split('；')
-    .filter(x => x && !(d.alias && x === `原写法 ${d.alias}`))
+    .filter(x => x && !(d.alias && x === `原写法 ${d.alias}`) && !x.startsWith('来源：'))
     .join('；');
+}
+
+/* ---------------- 车站「多个坐标」清单 ----------------
+ * station_master 只留了一个生效坐标，其余散在 17 套来源里。后端把它们
+ * 按位置聚类后放在 d.coordCandidates.items，这里逐处列出来让人挑。
+ * 确认 = 写进项目原有的人工坐标通道 coord_override（可撤销），
+ * 不另开一套坐标口径；原「补坐标」手填入口保留不变。          */
+function fmtDist(m) {
+  if (m == null) return '';
+  return m < 1000 ? `${m} m` : `${(m / 1000).toFixed(m < 10000 ? 1 : 0)} km`;
+}
+
+function stCoordList(d) {
+  const cc = d.coordCandidates || {};
+  const items = cc.items || [];
+  if (!items.length) return '';
+  const rows = items.map((x, i) => {
+    const srcs = (x.sources || []).map(s =>
+      `<span class="cc-src${s.converted ? ' conv' : ''}" title="原始坐标系：${esc(s.crs)}${s.converted ? '（已换算为 WGS84）' : ''}">${esc(s.label)}${s.n > 1 ? ` ×${s.n}` : ''}</span>`).join('');
+    const dist = x.isCurrent
+      ? '<span class="cc-dist cur">当前生效</span>'
+      : `<span class="cc-dist${x.distM != null && x.distM > 2000 ? ' far' : ''}">${x.distM == null ? '' : '距当前 ' + fmtDist(x.distM)}</span>`;
+    const disabled = x.isCurrent && d.coordSource === 'manual';
+    return `<div class="cc-row${x.isCurrent ? ' cur' : ''}">
+      <div class="cc-h"><span class="cc-ll">纬度 ${(+x.lat).toFixed(6)} · 经度 ${(+x.lon).toFixed(6)}</span>${dist}</div>
+      <div class="cc-srcs">${srcs}</div>
+      <div class="cc-ops">
+        <button class="btn sm ghost" data-cc-loc="${i}">地图定位</button>
+        <button class="btn sm" data-cc-pick="${i}"${disabled ? ' disabled title="这就是当前生效坐标"' : ''}>用这个</button>
+      </div>
+    </div>`;
+  }).join('');
+  return `<details class="st-ccoords"${items.length > 1 ? ' open' : ''}>
+    <summary>全部坐标 ${items.length} 处${cc.maxDistM > 100 ? ` · 最远相距 ${fmtDist(cc.maxDistM)}` : ''}
+      <em>${cc.nRaw || 0} 条来源记录 · 相差 60 m 以内并作一处</em></summary>
+    <div class="cc-hint">下面是各套来源给的本站位置。点「用这个」即确认为本站坐标（写入人工坐标，可撤销）；也可以照旧在上方手填「补坐标」。坐标系不是 WGS84 的来源已按同名 WGS84 基准自动校准。</div>
+    <div class="cc-rows">${rows}</div>
+  </details>`;
+}
+
+function bindCoordCandidates(d) {
+  const items = (d.coordCandidates || {}).items || [];
+  const msgBox = () => $('#stCoordMsg');
+  $$('#netDetail [data-cc-pick]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const x = items[+btn.dataset.ccPick];
+      if (!x) return;
+      const labels = (x.sources || []).map(s => s.label).slice(0, 6).join('、');
+      btn.disabled = true; btn.textContent = '保存中…';
+      try {
+        await postJSON('/api/coord', { name: d.name, lat: x.lat, lon: x.lon, src: labels });
+        S.staleCode = d.code || null;
+        await showStation(d.name);
+        const msg = msgBox();
+        if (msg) { msg.style.color = ''; msg.textContent = `已确认：${labels} · 纬度 ${fmtDeg(x.lat)} · 经度 ${fmtDeg(x.lon)}`; }
+      } catch (e) {
+        btn.disabled = false; btn.textContent = '用这个';
+        const msg = msgBox();
+        if (msg) { msg.style.color = '#b42318'; msg.textContent = '确认失败：' + e.message; }
+      }
+    });
+  });
+  $$('#netDetail [data-cc-loc]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const x = items[+btn.dataset.ccLoc];
+      if (!x) return;
+      MapView.setRoute({ code: d.name, stops: [{ i: 1, name: d.name, lat: x.lat, lon: x.lon }] });
+      MapView.fit();
+    });
+  });
 }
 
 /* 车站详情里的「补坐标」：一行文本就能填（经度:126.576636,纬度:42.038926） */
 function bindStationCoord(d) {
   const inp = $('#stCoordIn'), btn = $('#stCoordSave');
+  const clr = $('#stCoordClear');
+  if (clr) {
+    clr.addEventListener('click', async () => {
+      if (!confirm('撤销人工坐标，回到车站档案 / OSM 的原值？')) return;
+      clr.disabled = true;
+      try {
+        await postJSON('/api/coord/clear', { name: d.name });
+        S.staleCode = d.code || null;
+        await showStation(d.name);
+        const msg = $('#stCoordMsg');
+        if (msg) { msg.style.color = ''; msg.textContent = '已撤销人工坐标，恢复原值'; }
+      } catch (e) {
+        clr.disabled = false;
+        const msg = $('#stCoordMsg');
+        if (msg) { msg.style.color = '#b42318'; msg.textContent = '撤销失败：' + e.message; }
+      }
+    });
+  }
   if (!inp || !btn) return;
   const label = btn.textContent;
   const save = async () => {
@@ -2173,7 +2494,7 @@ function bindStationCoord(d) {
 }
 
 /* ---------- 线路里程：人工校正 ---------- */
-const LN = { data: null, segKm: {}, staKm: {}, totalKm: '', editing: false, busy: false, mode: 'seg', bad: {}, gdata: null, notice: null };
+const LN = { data: null, segKm: {}, staKm: {}, totalKm: '', editing: false, busy: false, mode: 'seg', bad: {}, gdata: null, notice: null, naHard: {} };
 
 const lnKmText = v => (v == null ? '-' : `${v} km`);
 
@@ -2267,9 +2588,18 @@ function lnEffective() {
   return { seg, cum };
 }
 
-/** 编辑里程时把侧栏放宽（390 → 560），收起来还原 */
+/** 编辑里程时把侧栏放宽（390 → 560）并切到「编辑专用布局」，收起来还原。
+    2026-11-10：上方常驻确认清单最多 360px、下面站序列表上千 px，编辑区会被
+    整块顶到首屏之外（实测 y=899/窗口 900）。km-editing 由 CSS 统一把清单折成
+    表头、隐藏站序；退出编辑移除 class 即自动还原，NET.cfOpen 不受影响。 */
 function lnWide(on) {
   const side = $('.side');
+  const pane = $('#paneNet');
+  if (pane) pane.classList.toggle('km-editing', !!on);
+  if (on) {
+    const det = $('#netDetail');
+    if (det) det.scrollTop = 0;          // 编辑区紧跟标题，别停在原来站序的滚动位置
+  }
   if (!side) return;
   const had = side.classList.contains('wide');
   side.classList.toggle('wide', !!on);
@@ -2299,13 +2629,13 @@ function lnRenderSegs() {
     const delta = has && a != null ? Math.round((v - a) * 10) / 10 : null;
     const dtxt = delta == null ? '' : (Math.abs(delta) < 0.05 ? '=' : (delta > 0 ? '+' : '') + delta.toFixed(1));
     const est = unk ? lnGeoKm(i, i + 1) : null;     // 标了不详：用两站坐标估个值
-    const estTitle = est == null ? '' : `按两站经纬度估算：直线 ${lnGeoDist(i, i + 1)} km × ${LN_GEO_K} ≈ ${est} km（点一下填入）`;
+    const estTitle = est == null ? '' : `按两站经纬度估算：直线 ${lnGeoDist(i, i + 1)} km × ${LN_GEO_K} ≈ ${est} km（点一下填入）${lnNAFillTip(i + 1)}`;
     return `<div class="seg-row${has ? ' manual' : ''}${unk ? ' unk' : ''}" data-i="${i}">
       <span class="i">${i + 1}</span>
       <span class="od" title="${esc(p.name)} → ${esc(st[i + 1].name)}">${esc(p.name)}<em>→</em>${esc(st[i + 1].name)}</span>
       <input class="km" type="text" inputmode="decimal" autocomplete="off"
-             value="${unk ? '-' : (has ? v : '')}" placeholder="${a == null ? '-' : a.toFixed(1)}"
-             title="留空沿用档案值${a == null ? '（档案也是不详）' : ' ' + a.toFixed(1) + ' km'}；填「-」表示这一段站间距不详（后面的车站照常计算）">
+             value="${unk ? (LN.naHard['s' + i] ? '不详' : '-') : (has ? v : '')}" placeholder="${a == null ? '-' : a.toFixed(1)}"
+             title="留空沿用档案值${a == null ? '（档案也是不详）' : ' ' + a.toFixed(1) + ' km'}；填「-」= 保存时按两站直线 × ${LN_NA_FILL_K} 自动补；要保留「不详」就写「不详」">
       <span class="u">km</span>
       <button class="seg-clr" title="恢复这一段的档案值"${has || unk ? '' : ' disabled'}>↺</button>
       <span class="auto${est != null ? ' est' : ''}"${estTitle ? ` title="${estTitle}"` : ''}>${est != null ? '≈' + est.toFixed(1) : dtxt}</span>
@@ -2329,7 +2659,7 @@ function lnRenderSegs() {
         const est = unk ? lnGeoKm(i, i + 1) : null;
         aEl.classList.toggle('est', est != null);
         aEl.title = est != null
-          ? `按两站经纬度估算：直线 ${lnGeoDist(i, i + 1)} km × ${LN_GEO_K} ≈ ${est} km（点一下填入）` : '';
+          ? `按两站经纬度估算：直线 ${lnGeoDist(i, i + 1)} km × ${LN_GEO_K} ≈ ${est} km（点一下填入）${lnNAFillTip(i + 1)}` : '';
         aEl.textContent = est != null ? '≈' + est.toFixed(1)
           : (dd == null ? '' : (Math.abs(dd) < 0.05 ? '=' : (dd > 0 ? '+' : '') + dd.toFixed(1)));
       }
@@ -2338,19 +2668,22 @@ function lnRenderSegs() {
       const raw = inp.value.trim();
       if (raw === '') {
         delete LN.segKm[i];                       // 空 = 沿用档案值
+        delete LN.naHard['s' + i];
         row.classList.remove('bad');
       } else if (lnIsNA(raw)) {
-        LN.segKm[i] = null;                       // - = 明确不详
+        LN.segKm[i] = null;                       // - = 保存时按坐标补；不详/未知 = 明确不详
+        if (lnIsDash(raw)) delete LN.naHard['s' + i]; else LN.naHard['s' + i] = 1;
         row.classList.remove('bad');
       } else {
         const n = Number(raw.replace(/[^0-9.]/g, ''));
         if (!Number.isFinite(n) || n <= 0 || n > 5000) {
           row.classList.add('bad');
-          if (!silent) lnSetDirty(`第 ${i + 1} 段要填正数（km），或填「-」表示不详`, true);
+          if (!silent) lnSetDirty(`第 ${i + 1} 段要填正数（km），或填「-」按两站坐标自动补`, true);
           lnMarkSave();
           return;
         }
         LN.segKm[i] = Math.round(n * 10) / 10;
+        delete LN.naHard['s' + i];
         row.classList.remove('bad');
       }
       repaint();
@@ -2360,7 +2693,8 @@ function lnRenderSegs() {
     };
     inp.addEventListener('input', () => apply(true));   // 输入过程中别刷红字
     inp.addEventListener('blur', () => {
-      if (lnSegUnk(i)) inp.value = '-';           // 统一显示成半角 -
+      // 只把「-」写法统一成半角；写了「不详 / 未知」的保留原样（那是明确不详，保存时不自动补）
+      if (lnSegUnk(i) && !LN.naHard['s' + i]) inp.value = '-';
       apply();
     });
     inp.addEventListener('keydown', e => {
@@ -2372,6 +2706,7 @@ function lnRenderSegs() {
     clr.addEventListener('click', () => {
       inp.value = '';
       delete LN.segKm[i];
+      delete LN.naHard['s' + i];
       row.classList.remove('manual', 'unk', 'bad');
       clr.disabled = true;
       const aEl = row.querySelector('.auto');
@@ -2410,13 +2745,13 @@ function lnRenderCum() {
     const dd = (cur != null && base != null) ? Math.round((cur - base) * 10) / 10 : null;
     const dtxt = dd == null ? '' : (Math.abs(dd) < 0.05 ? '=' : (dd > 0 ? '+' : '') + dd.toFixed(1));
     const est = unk ? lnGeoKm(i - 1, i) : null;     // 这一站不详：到上一站的坐标估算
-    const estTitle = est == null ? '' : `按两站经纬度估算：直线 ${lnGeoDist(i - 1, i)} km × ${LN_GEO_K} ≈ ${est} km（点一下按"上一站累计 + 它"填入）`;
+    const estTitle = est == null ? '' : `按两站经纬度估算：直线 ${lnGeoDist(i - 1, i)} km × ${LN_GEO_K} ≈ ${est} km（点一下按"上一站累计 + 它"填入）${lnNAFillTip(i)}`;
     return `<div class="seg-row cum${has ? ' manual' : ''}${unk ? ' unk' : ''}" data-i="${i}">
       <span class="i">${i + 1}</span>
       <span class="od" title="自 ${esc(first)} 起算">${esc(p.name)}</span>
       <input class="km" type="text" inputmode="decimal" autocomplete="off"
-             value="${unk ? '-' : (has && cur != null ? cur : '')}" placeholder="${cur == null ? '-' : cur.toFixed(1)}"
-             title="留空沿用当前累计 ${cur == null ? '-' : cur.toFixed(1)} km；填「-」表示这一站里程不详（不影响后面的车站）">
+             value="${unk ? (LN.naHard['t' + i] ? '不详' : '-') : (has && cur != null ? cur : '')}" placeholder="${cur == null ? '-' : cur.toFixed(1)}"
+             title="留空沿用当前累计 ${cur == null ? '-' : cur.toFixed(1)} km；填「-」= 保存时按「上一站 + 两站直线 × ${LN_NA_FILL_K}」自动补；要保留「不详」就写「不详」">
       <span class="u">km</span>
       <button class="seg-clr" title="恢复档案值"${has || unk ? '' : ' disabled'}>↺</button>
       <span class="auto${est != null ? ' est' : ''}"${estTitle ? ` title="${estTitle}"` : ''}>${est != null ? '≈' + est.toFixed(1) : dtxt}</span>
@@ -2431,10 +2766,12 @@ function lnRenderCum() {
       const raw = inp.value.trim();
       if (raw === '') {
         delete LN.staKm[i];                        // 空 = 沿用档案 / 累加值
+        delete LN.naHard['t' + i];
         row.classList.remove('manual', 'bad', 'unk');
         clr.disabled = true;
       } else if (lnIsNA(raw)) {
-        LN.staKm[i] = null;                        // - = 这一站的累计里程不详
+        LN.staKm[i] = null;                        // - = 保存时按坐标补；不详/未知 = 明确不详
+        if (lnIsDash(raw)) delete LN.naHard['t' + i]; else LN.naHard['t' + i] = 1;
         row.classList.remove('bad', 'manual');
         row.classList.add('unk');
         clr.disabled = false;
@@ -2467,7 +2804,10 @@ function lnRenderCum() {
       lnSetDirty('有未保存的修改');
     };
     inp.addEventListener('input', () => apply(true));
-    inp.addEventListener('blur', () => { if (lnStaUnk(i)) inp.value = '-'; apply(); });
+    inp.addEventListener('blur', () => {
+      if (lnStaUnk(i) && !LN.naHard['t' + i]) inp.value = '-';
+      apply();
+    });
     inp.addEventListener('keydown', e => {
       if (e.key !== 'Enter') return;
       e.preventDefault();
@@ -2476,6 +2816,7 @@ function lnRenderCum() {
     });
     clr.addEventListener('click', () => {
       delete LN.staKm[i];
+      delete LN.naHard['t' + i];
       lnRenderSegs();
       lnRefreshPreview();
       lnMarkSave();
@@ -2505,7 +2846,7 @@ function lnRefreshCumRows() {
     const unk = lnStaUnk(i);
     const has = lnStaSet(i) && !unk;
     if (document.activeElement !== inp) {
-      inp.value = unk ? '-' : (has && eff.cum[i] != null ? eff.cum[i] : '');
+      inp.value = unk ? (LN.naHard['t' + i] ? '不详' : '-') : (has && eff.cum[i] != null ? eff.cum[i] : '');
       inp.placeholder = eff.cum[i] == null ? '-' : eff.cum[i].toFixed(1);
     }
     row.classList.toggle('unk', unk);
@@ -2516,7 +2857,7 @@ function lnRefreshCumRows() {
       const est = unk ? lnGeoKm(i - 1, i) : null;
       el.classList.toggle('est', est != null);
       el.title = est != null
-        ? `按两站经纬度估算：直线 ${lnGeoDist(i - 1, i)} km × ${LN_GEO_K} ≈ ${est} km（点一下按"上一站累计 + 它"填入）` : '';
+        ? `按两站经纬度估算：直线 ${lnGeoDist(i - 1, i)} km × ${LN_GEO_K} ≈ ${est} km（点一下按"上一站累计 + 它"填入）${lnNAFillTip(i)}` : '';
       el.textContent = est != null ? '≈' + est.toFixed(1)
         : (dd == null ? '' : (Math.abs(dd) < 0.05 ? '=' : (dd > 0 ? '+' : '') + dd.toFixed(1)));
     }
@@ -2540,6 +2881,51 @@ const lnGeoKm = (i, j) => {
   const d = lnGeoDist(i, j);
   return d == null ? null : Math.round(d * LN_GEO_K * 10) / 10;
 };
+
+/* ---------- 填「-」的自动补值（保存时生效） ----------
+   里程格填「-」= 这一站/这一段没数据：保存时按「上一站累计 + 两站经纬度直线距离 × 0.85」取整补上，
+   不写进 override 的「不详」里。写「不详 / 未知 / ?」这些词才算真正的明确不详，不自动补。 */
+const LN_NA_FILL_K = 0.85;
+const LN_DASH_RE = /^(?:-+|—+|–+)$/;
+const lnIsDash = s => LN_DASH_RE.test(String(s == null ? '' : s).trim());
+
+/** 这一站按「上一站 + 直线 × 0.85」补出来的累计里程；上一站或坐标缺了返回 null */
+function lnNAFillCum(i) {
+  if (!(i > 0)) return null;
+  const prev = lnEffective().cum[i - 1];
+  const gd = lnGeoDist(i - 1, i);
+  if (prev == null || gd == null) return null;
+  return Math.max(Math.round(prev + 1), Math.round(prev + gd * LN_NA_FILL_K));
+}
+
+/** 给「-」那行加一句：保存时会补成多少（少数行才调，别整表算） */
+function lnNAFillTip(i) {
+  const v = lnNAFillCum(i);
+  return v == null ? '' : `；保存时按「上一站 + 直线 × ${LN_NA_FILL_K}」补成 ${v} km`;
+}
+
+/** 保存前把「-」换成估算值（上一站 + 两站直线 × 0.85，取整），明确不详（不详/未知/?）不动 */
+function lnFillDash() {
+  const st = (LN.data && LN.data.stations) || [];
+  const eff = lnEffective();
+  const segKm = { ...LN.segKm }, staKm = { ...LN.staKm };
+  const filled = [], missed = [];
+  const cum = (eff.cum || []).slice();
+  for (let i = 1; i < st.length; i++) {
+    const staDash = lnStaUnk(i) && !LN.naHard['t' + i];             // 这一站累计填了 -
+    const segDash = lnSegUnk(i - 1) && !LN.naHard['s' + (i - 1)];   // 上一段站间距填了 -
+    if (!staDash && !segDash) continue;
+    const gd = lnGeoDist(i - 1, i);
+    const prev = cum[i - 1];
+    if (gd == null || prev == null) { missed.push(st[i].name); continue; }
+    const v = Math.max(Math.round(prev + 1), Math.round(prev + gd * LN_NA_FILL_K));
+    staKm[i] = v;
+    if (segDash) delete segKm[i - 1];        // 段距由累计差推出来，别留「不详」压着
+    cum[i] = v;
+    filled.push({ name: st[i].name, km: v });
+  }
+  return { segKm, staKm, filled, missed };
+}
 
 /** 只重画里程数字：合计 + 各站累计（不碰输入框，避免丢焦点） */
 function lnRefreshPreview() {
@@ -2601,6 +2987,14 @@ async function lnSave() {
     lnMarkSave();
     return;
   }
+  /* 填「-」的站/段：保存前按「上一站 + 两站直线 × 0.85」取整补上，不落成「不详」 */
+  const na = lnFillDash();
+  const nFill = na.filled.length;
+  if (nFill) {
+    LN.segKm = na.segKm;
+    LN.staKm = na.staKm;
+    lnRenderEditor();               // 输入框直接显示补出来的数值，跟落库的一致
+  }
   LN.busy = true;
   lnSetDirty('保存中…');
   try {
@@ -2609,6 +3003,7 @@ async function lnSave() {
       segKm: LN.segKm,
       staKm: LN.staKm,
       totalKm: LN.totalKm === '' ? null : Number(LN.totalKm),
+      confirmed: LN.data.confirmedOnly ? 1 : 0,
     });
     LN.data = r.line;
     LN.segKm = { ...((r.line.override && r.line.override.segKm) || {}) };
@@ -2617,7 +3012,10 @@ async function lnSave() {
     lnRenderHead();
     lnRenderEditor();
     lnMarkSave();
-    lnSetDirty('已保存');
+    const notes = [];
+    if (nFill) notes.push(`${nFill} 处「-」按「上一站 + 直线 × ${LN_NA_FILL_K}」补成数值`);
+    if (na.missed.length) notes.push(`${na.missed.length} 处缺坐标或上一站也不详，仍存为不详`);
+    lnSetDirty('已保存' + (notes.length ? '：' + notes.join('，') : ''));
   } catch (e) {
     lnSetDirty('保存失败：' + e.message);
   } finally {
@@ -2630,10 +3028,12 @@ async function lnResetAll() {
   LN.busy = true;
   lnSetDirty('正在恢复档案值…');
   try {
-    const r = await postJSON('/api/line/km/clear', { name: LN.data.name });
+    const r = await postJSON('/api/line/km/clear',
+      { name: LN.data.name, confirmed: LN.data.confirmedOnly ? 1 : 0 });
     LN.data = r.line;
     LN.segKm = {};
     LN.staKm = {};
+    LN.naHard = {};
     LN.totalKm = '';
     lnRenderHead();
     lnRenderEditor();
@@ -2653,9 +3053,63 @@ function lnMissCoordNote(d) {
     + `${miss.length > 4 ? '…' : ''}），地图上不显示，可到「车站」里搜站名补坐标</b>`;
 }
 
+/** 搜的是基础线名、系统按「基本线路 / 默认 / 底表」替用户挑了一份时，说清楚挑的是哪份 */
+function lnAutoNote(d) {
+  const g = d && d.group;
+  if (!d || !g) return '';
+  /* 基本线路（整理台定稿）：全面接管，跟「替你挑一份」不是一回事，文案分开 */
+  if (g.hasBase && g.effectiveWhy === 'linebase') {
+    return `<div class="ln-notice">「${esc(d.askedName || d.name)}」已整理成<b>基本线路</b>${
+      g.baseInfo ? `（${g.baseInfo.nStop} 站${
+        g.baseInfo.geomName ? ' · 走向 ' + esc(g.baseInfo.geomName) : ''}）` : ''
+    }—— 校对、地图、选经由都用这一份。原来各来源的版本仍在下面来源条里，可点开比对。</div>`;
+  }
+  if (!d.autoFrom || !(g.groupN > 1)) return '';
+  const why = g.effectiveWhy === 'default'
+    ? '按你设为默认的那一份'
+    : g.effectiveWhy === 'base'
+      ? '没设默认，按「底表」这一份'
+      : '没设默认，按站数最多的那一份';
+  return `<div class="ln-notice">「${esc(d.askedName || d.name)}」在库里有 ${g.groupN} 个来源版本：${why}展示<i>（${esc(d.name)}）</i>—— 要固定用哪一份，点下面来源条上的 ★</div>`;
+}
+
+/** 整理台确认线路：只报「停站 + 线路走向」，不画来源版本条 / ★ / 改站序等选线控件 */
+function lnRenderHeadConfirmed(d, el) {
+  const c = d.confirm || {};
+  const miss = (d.stations || []).filter(s => s.km == null).length;
+  el.innerHTML = `
+    <div class="l1"><span class="code">${esc(d.name)}</span>
+      <span class="tag">${d.n} 站</span>
+      <span class="tag${d.totalKm == null ? ' warn' : ''}">${lnKmText(d.totalKm)}</span>
+      <span class="tag manual" title="线路整理台完成全部确认：① 线路来源 ✓ ② 站点来源 ✓ ③ 停站 ④ 线路走向">整理台已确认</span>
+      <span class="tag" title="停站 ${c.nStop || 0} 个 · 有定位 ${c.nCoord || 0} 个 · 走向 ${c.geomNPart || 0} 段 / ${c.geomNPt || 0} 点">停站 ${c.nStop || 0} · 定位 ${c.nCoord || 0} · 走向 ${c.geomNPart || 0} 段</span>
+      ${miss ? `<span class="tag warn" title="这些站整理台里没填累计里程">缺 ${miss} 站里程</span>` : ''}
+      <span class="ln-acts">
+        <button class="btn sm${LN.editing ? ' on' : ''}" id="lnEditBtn">${
+          LN.editing ? '收起编辑' : '编辑里程'}</button>
+      </span>
+    </div>
+    <div class="l2">${esc(d.fromSta || '')}${d.fromSta && d.toSta ? ' → ' : ''}${esc(d.toSta || '')}
+      · 坐标覆盖 ${d.coordCoverage}%${lnMissCoordNote(d)}
+      · 停站与线路走向均来自「线路整理台」</div>
+    <div class="ln-notice">本页只显示线路整理台完成全部确认的线路；其它线路、来源版本与选线入口已隐藏。
+      改站序 / 走向请到 <a href="/linedesk.html">线路整理台</a>；里程可在这里「编辑里程」。</div>
+    ${LN.notice ? `<div class="ln-notice">${esc(LN.notice)}</div>` : ''}`;
+  /* 编辑里程保留（之前专门修过「保存不正确」）：保存/恢复走 confirmed=1，
+     详情回到整理台确认线路这一份，不会跳回旧的多来源视图 */
+  $('#lnEditBtn').addEventListener('click', () => {
+    LN.editing = !LN.editing;
+    lnWide(LN.editing);
+    lnRenderHead();
+    lnRenderEditor();
+  });
+  lnRenderInfo();
+}
+
 function lnRenderHead() {
   const d = LN.data, el = $('#lnHead');
   if (!el || !d) return;
+  if (d.confirmedOnly) return lnRenderHeadConfirmed(d, el);
   el.innerHTML = `
     <div class="l1"><span class="code">${esc(d.name)}</span>
       <span class="tag">${d.n} 站</span>
@@ -2684,7 +3138,9 @@ function lnRenderHead() {
       ${d.stopsFrom === 'osm'
         ? `<span class="tag manual" title="站序取自 OSM：车站插值到线路几何上，站点最全（含并线枢纽站），里程是沿线里程">站序来自 OSM</span>`
         : ''}
-      ${d.custom ? '<span class="tag manual">自建</span>' : ''}
+      ${d.base ? `<span class="tag manual" title="整理台定稿、全面接管的那条；校对 / 地图 / 选经由都用它">基本线路${
+        d.geomName ? ' · 走向 ' + esc(d.geomName) : ''}</span>` : ''}
+      ${d.custom ? `<span class="tag manual">${(d.group && d.group.origin) || '自建'}</span>` : ''}
       ${d.stopsManual ? '<span class="tag manual">站序人工</span>' : ''}
       <span class="ln-acts">
         ${d.stopsManual ? '<button class="btn sm ghost" id="lnStopsReset">恢复档案站序</button>' : ''}
@@ -2707,30 +3163,67 @@ function lnRenderHead() {
       </span>
     </div>
     <div class="l2">${d.aliasOf ? `「${esc(d.aliasOf)}」在资料库里对应这条线 · ` : ''}坐标覆盖 ${d.coordCoverage}%${lnMissCoordNote(d)} · 点击站点查看所属线路 · <span id="lnFoot"></span></div>
+    ${lnAutoNote(d)}
     ${(d.sources || []).length > 1 ? (() => {
       /* 当前生效的那份：临时点选 > 勾成默认的 > 系统规则 */
+      const g = d.group || {};
+      const mem = (d.sources || []).filter(v => v.kind === 'member');
       const eff = d.pickedFrom || d.srcPick || '';
-      const pick = d.srcPick || '';
+      const pick = g.default || d.srcPick || '';
       return `<div class="ln-src">
-        <b class="srcb${eff ? '' : ' on'}" data-from=""
-           title="站序来源 —— 系统按走向长度在资料库 / china-emu 之间挑，都没有才用 OSM">系统默认</b>
-        ${(d.sources || []).map(v => `<span class="srcwrap">
+        ${g.hasBase ? `<span class="srcwrap">
+           <b class="srcb on" data-base="1"
+              title="整理台定稿的基本线路（${
+                g.baseInfo ? g.baseInfo.nStop + ' 站' + (g.baseInfo.geomName ? ' · 走向 ' + esc(g.baseInfo.geomName) : '') : ''
+              }）：校对 / 地图 / 选经由都用这一份">基本 ${
+                g.baseInfo ? g.baseInfo.nStop : d.n}站</b></span>` : ''}
+        ${mem.length ? '' : `<b class="srcb${eff ? '' : ' on'}" data-from=""
+           title="站序来源 —— 系统按走向长度在资料库 / china-emu 之间挑，都没有才用 OSM">系统默认</b>`}
+        ${(d.sources || []).map(v => v.kind === 'member'
+          ? /* 同一条线的其它来源版本（京沪线（底表）/（OSM）/…）：点名字看那一份，★ 设默认 */
+            `<span class="srcwrap">
+           <i class="pick${pick === v.sourceName ? ' on' : ''}" data-gpick="${esc(v.sourceName)}"
+              title="${pick === v.sourceName ? '已是默认版本，点一下取消' : '设为默认：数据校对的线路选择、地图展示都按这一份'}">★</i>
+           <b class="srcb${v.sourceName === d.name ? ' on' : ''}" data-vnm="${esc(v.sourceName)}"
+              title="${esc(v.label)}：${v.n} 站 · ${lnKmText(v.km)}${v.first ? `\n${esc(v.first)} → ${esc(v.last)}` : ''}">${
+              esc(v.short || v.label)} ${v.n}站</b></span>`
+          : `<span class="srcwrap">
            <i class="pick${pick === v.source ? ' on' : ''}" data-pick="${esc(v.source)}"
               title="${pick === v.source ? '已设为全项目默认，点一下取消' : '设为默认：之后所有用到这条线的地方都按这份站序'}">★</i>
            <b class="srcb${eff === v.source ? ' on' : ''}" data-from="${esc(v.source)}"
               title="${esc(v.label)}：${v.n} 站 · ${lnKmText(v.km)}${v.first ? `\n${esc(v.first)} → ${esc(v.last)}` : ''}${v.reversed ? '\n（这份被人工倒排过，只影响这一份）' : ''}">${
               esc(v.short || LNSRC_SHORT[v.source] || v.label)} ${v.n}站${v.reversed ? '<i class="rvb" title="已倒排">↺</i>' : ''}</b></span>`).join('')}
-        <em class="hint">点站名临时看这份 · 点 ★ 设为默认${pick ? `（默认：${esc(LNSRC_SHORT[pick] || pick)}）` : ''}</em>
+        <em class="hint">点名字看那一份 · 点 ★ 设为默认${pick ? `（默认：${esc(pick)}）` : ''}</em>
       </div>`;
     })() : ''}
     ${LN.notice ? `<div class="ln-notice">${esc(LN.notice)}</div>` : ''}`;
   lnRenderInfo();
   $$('#lnHead .ln-src .srcb').forEach(b => b.addEventListener('click', () => {
+    if (b.dataset.vnm) return showLine(b.dataset.vnm, null, '', true);   // 换看另一份版本
     showLine(d.name, null, b.dataset.from);
+  }));
+  /* ★ 版本默认：之后的「数据校对的线路选择」和「地图展示」都按这一份 */
+  $$('#lnHead .ln-src .pick[data-gpick]').forEach(el => el.addEventListener('click', async ev => {
+    ev.stopPropagation();
+    const vnm = el.dataset.gpick;
+    const g = LN.data.group || {};
+    const now = (g.default || '') === vnm ? '' : vnm;
+    el.disabled = true;
+    try {
+      await postJSON('/api/line/default', { name: d.name, pick: now });
+      CU.linesStale = true;                 // 校对下拉按默认收窄了，下次进校对页重拉
+      showLine(now || d.name, now
+        ? `已把「${vnm}」设为「${g.base || d.name}」的默认版本：数据校对与地图都用这一份`
+        : `已取消默认，「${g.base || d.name}」回到按底表取数`,
+        '', true);
+    } catch (e) {
+      el.disabled = false;
+      alert('设置失败：' + e.message);
+    }
   }));
   /* ★ = 勾成默认：之后全项目所有「不指定来源」的取数（选经由、算里程、补站序）
      都按这一份来。再点一次取消，回到系统规则。 */
-  $$('#lnHead .ln-src .pick').forEach(el => el.addEventListener('click', async ev => {
+  $$('#lnHead .ln-src .pick[data-pick]').forEach(el => el.addEventListener('click', async ev => {
     ev.stopPropagation();
     const src = el.dataset.pick;
     const cur = (LN.data && LN.data.srcPick) === src ? '' : src;
@@ -2930,8 +3423,9 @@ function lnBindBanner() {
     btn.disabled = true;
     btn.textContent = '重算中…';
     try {
-      const r = await postJSON('/api/line/km/rebase', { name: d.name });
-      await showLine(d.name);
+      const r = await postJSON('/api/line/km/rebase',
+        { name: d.name, confirmed: d.confirmedOnly ? 1 : 0 });
+      await showLine(d.name, null, '', false, !!d.confirmedOnly);
       const box = $('#lnInfo');
       if (box) {
         const tip = document.createElement('div');
@@ -2951,28 +3445,37 @@ function lnBindBanner() {
 function lnRenderEditor() {
   const host = $('#lnKmBox');
   if (!host) return;
+  const pane = $('#paneNet');
+  if (pane) pane.classList.toggle('km-editing', !!LN.editing);   // 幂等：任何入口都对齐
   host.hidden = !LN.editing;
   if (!LN.editing) { host.innerHTML = ''; return; }
   const d = LN.data;
   const segs = lnSegBase(d);
   const known = segs.filter(v => v != null).length;
+  /* 2026-11-10 版面：工具条一行 / 总里程一行 / 段距列表独立滚动 /
+     长说明默认折叠。原来把提示、按钮、总里程、两大段说明全堆在 560px 侧栏
+     里，编辑区 550px 又被清单 + 站序顶到首屏外，用户得滚好几屏才看得见。 */
+  const hint = LN.mode === 'seg'
+    ? `灰字是档案值，留空沿用；填数字锁住这一段；填「-」= 保存时按两站直线 × ${LN_NA_FILL_K} 自动补（要保留「不详」就写「不详」）`
+    : `填「从起点站到这一站」的累计公里数；填「-」= 保存时按「上一站 + 两站直线 × ${LN_NA_FILL_K}」自动补（要保留「不详」就写「不详」）`;
+  const note = LN.mode === 'seg'
+    ? `档案里 ${segs.length} 段，其中 ${known} 段有里程（其余不详）。填「-」<b>不是</b>把这一段标成不详：保存时会按「上一站累计 + 两站经纬度直线距离 × ${LN_NA_FILL_K}」取整算出这一站的累计里程，直接落成数字（要真保留不详，写「不详」）。行尾的「≈」是直线距离 × ${LN_GEO_K} 的参考值，点一下也能填进来。填了总里程时只有没手填的段会等比缩放。`
+    : `按累计填写时，填了数字的站就以你填的为准（后面没填的站按档案段距顺延），留空沿用档案值。填「-」保存时会按「上一站 + 两站经纬度直线距离 × ${LN_NA_FILL_K}」取整补上（要真保留不详，写「不详」）；行尾的「≈」是同一算法的参考值，点一下也能填。`;
   host.innerHTML = `
-    <div class="lnkm-head">
+    <div class="lnkm-bar">
       <b>线路里程</b>
       <div class="segmode" id="lnMode">
         <button data-mode="seg" class="${LN.mode === 'seg' ? 'on' : ''}" title="填相邻两站之间的公里数">按段距</button>
         <button data-mode="cum" class="${LN.mode === 'cum' ? 'on' : ''}" title="填自起点站算起的累计公里数">按累计</button>
       </div>
-      <span class="lnkm-hint">${LN.mode === 'seg'
-        ? '灰字是档案值，留空沿用；填数字锁住这一段；填「-」表示这一段站间距不详（不计入累加，后面的车站照常算）'
-        : '填「从起点站到这一站」的累计公里数；填「-」表示这一站的里程不详（不影响后面的车站）'}</span>
+      <span class="lnkm-count">${segs.length} 段 · 档案有 ${known} 段</span>
+      <button class="btn sm ghost" id="lnHelpBtn" title="展开 / 收起填写规则">${LN.kmHelp ? '收起说明' : '说明'}</button>
       <div class="lnkm-btns">
         <button class="btn sm primary" id="lnSave">保存</button>
         <button class="btn sm" id="lnResetAll">全部恢复档案</button>
         <button class="btn sm ghost" id="lnCancel">取消</button>
       </div>
     </div>
-    <div class="seg-list" id="lnSegs"></div>
     <div class="lnkm-foot">
       <label for="lnTotal">线路总里程</label>
       <input id="lnTotal" type="number" step="0.1" min="1" max="20000" inputmode="decimal"
@@ -2984,10 +3487,19 @@ function lnRenderEditor() {
       <span class="lnkm-warn" id="lnWarn"></span>
       <span class="lnkm-seg" id="lnMsg"></span>
     </div>
-    <div class="ve-note">${LN.mode === 'seg'
-      ? `档案里 ${segs.length} 段，其中 ${known} 段有里程（其余不详）。填「-」= 这一段站间距明确不详，不参与累加，后面的车站仍按档案里程计算；标了「-」的行尾会出现「≈」，那是用两站经纬度算的直线距离 × ${LN_GEO_K}，点一下就能填进去当参考。填总里程时只有没手填、也没标不详的段会等比缩放。`
-      : `按累计填写时，填了数字的站就以你填的为准（后面没填的站按档案段距顺延），留空沿用档案值。填「-」= 这一站的里程不详，不影响后面的车站；标了「-」的行尾会出现「≈」，那是「上一站的累计 + 两站经纬度估算的段距」，点一下就能填进来。`}保存后车次详情、地图、时间轴全部同步。</div>`;
+    <div class="seg-list" id="lnSegs"></div>
+    <div class="lnkm-help" id="lnKmHelp"${LN.kmHelp ? '' : ' hidden'}>
+      <div class="lnkm-hint">${hint}</div>
+      <div class="ve-note">${note}保存后车次详情、地图、时间轴全部同步。</div>
+    </div>`;
 
+  const helpBtn = $('#lnHelpBtn');
+  if (helpBtn) helpBtn.addEventListener('click', () => {
+    LN.kmHelp = !LN.kmHelp;
+    const h = $('#lnKmHelp');
+    if (h) h.hidden = !LN.kmHelp;
+    helpBtn.textContent = LN.kmHelp ? '收起说明' : '说明';
+  });
   $$('#lnMode button').forEach(b => b.addEventListener('click', () => {
     if (LN.mode === b.dataset.mode) return;
     LN.mode = b.dataset.mode;
@@ -3003,6 +3515,7 @@ function lnRenderEditor() {
     LN.editing = false;
     LN.segKm = { ...((LN.data.override && LN.data.override.segKm) || {}) };
     LN.staKm = { ...((LN.data.override && LN.data.override.staKm) || {}) };
+    LN.naHard = {};
     LN.totalKm = LN.data.override && LN.data.override.totalKm != null ? String(LN.data.override.totalKm) : '';
     lnWide(false);
     lnRenderHead();
@@ -3032,14 +3545,23 @@ function lnGeomOn() {
 }
 
 /** 拉一条线的几何，缓存到 LN.gdata */
-async function lnLoadGeom(osmName, expectKm) {
+async function lnLoadGeom(osmName, expectKm, confirmedOnly) {
   if (!osmName) return null;
-  if (LN.gdata && LN.gdata.name === osmName && LN.gdata.ask === osmName) return LN.gdata;
+  // ③ 定稿常把别名线收编成规范名（济南线 ← ① 选的「京沪四线」），此时 d.osm.ask
+  // 还是来源名；但 confirmed=1 通道按「确认线路规范名」查白名单，拿来源名去请求
+  // 会 404，LN.gdata 为空 → 地图只剩站点直连。确认视图一律用规范名请求，
+  // 来源名只留给「真实走向」小卡展示。服务端 confirmed.geom() 另有 geom_name 反查兜底。
+  const qname = (confirmedOnly && LN.data && LN.data.name) ? LN.data.name : osmName;
+  if (LN.gdata && LN.gkey === qname) return LN.gdata;
   try {
     // expectKm 用来挡掉同名残段：osm 里「潍烟高速铁路」只剩 2 km，和 585 km 的线对不上
-    LN.gdata = await api('/api/line/osm', { q: osmName, km: expectKm });
+    // confirmed=1 时只画整理台确认线路自己的走向，不按线名去 rail.db 借同名旧版本
+    LN.gdata = await api('/api/line/osm',
+      { q: qname, km: expectKm, confirmed: confirmedOnly ? 1 : '' });
+    LN.gkey = qname;
   } catch (_) {
     LN.gdata = null;
+    LN.gkey = null;
   }
   return LN.gdata;
 }
@@ -3068,7 +3590,11 @@ function lnOsmBlock(d) {
   }
   // 走向来自用户导入的 GeoJSON：段数/桥隧这些 OSM 统计没有，换成文件信息
   const isGeo = o.source === 'geojson';
-  const fam = (!isGeo && o.match === 'family') ? `　<span class="ln-osm-tag">同族匹配</span>` : '';
+  // 整理台「线路来源 + 站点来源」合并保存后定下的走向（ld_geom，没回灌线路库）
+  const isLd = !!o.ldGeom;
+  // 走向来自「整理台定稿时选的某个来源包」（line_route：rail-globe / OSM / cnrail 那几套走向数据）
+  const isRoute = o.source === 'route';
+  const fam = (!isGeo && !isRoute && o.match === 'family') ? `　<span class="ln-osm-tag">同族匹配</span>` : '';
   // 分段线名在 OSM 里不存在（成昆线元昆段 ↔ 成昆线）：几何借整条线、再按本段首末站裁
   const borrow = o.borrowed
     ? `<span class="ln-osm-tag${o.clipped ? '' : ' warn'}" title="${
@@ -3078,10 +3604,18 @@ function lnOsmBlock(d) {
     : '';
   // kmChain 是把上下行复线并掉的单线里程；源数据的 km 会把复线各算一遍
   const geomKm = (o.kmChain && o.km && Math.abs(o.kmChain - o.km) > 0.5) ? o.kmChain : o.km;
-  const diff = (!isGeo && d.totalKm != null && geomKm)
+  const diff = ((!isGeo) && d.totalKm != null && geomKm)
     ? Math.round(geomKm - d.totalKm) : null;
   const c = o.clip || {};
-  const rows = isGeo ? [
+  const rows = isRoute ? [
+    ['来源包', o.file || o.routeLabel || o.routeSrc],
+    ['几何里程', `${o.km} km`],
+    ['走向分段', `${o.nPart} 段 · ${o.nPt || 0} 点`],
+  ] : isLd ? [
+    ['走向来源', '整理台「合并保存」整合的走向'],
+    ['几何里程', `${o.km} km（源数据含复线重复，非营业里程）`],
+    ['走向分段', `${o.nPart} 段 · ${o.nPt || 0} 点`],
+  ] : isGeo ? [
     ['导入文件', o.file || '—'],
     ['几何里程', `${o.km} km`],
     ['走向分段', `${o.nPart} 段`],
@@ -3102,7 +3636,9 @@ function lnOsmBlock(d) {
         : (o.why || '—')]);
   }
   return `<div class="ln-osm">
-    <div class="ln-i-head"><b>真实走向</b><span class="ln-i-src">${isGeo ? 'GeoJSON' : 'OSM'}${fam}</span>
+    <div class="ln-i-head"><b>真实走向</b><span class="ln-i-src">${
+      isRoute ? esc(o.routeLabel || '来源包走向')
+        : (isLd ? '整理台合并' : (isGeo ? 'GeoJSON' : 'OSM'))}${fam}</span>
       ${borrow}
       ${diff != null ? `<span class="ln-osm-diff${Math.abs(diff) > 40 ? ' warn' : ''}">几何比档案 ${diff > 0 ? '+' : ''}${diff} km</span>` : ''}
       <button class="btn sm ghost" id="lnGeomBtn">${lnGeomOn() ? '改站点直连' : '按真实走向'}</button>
@@ -3118,7 +3654,9 @@ function lnBindGeom() {
   btn.addEventListener('click', async () => {
     const on = !lnGeomOn();
     localStorage.setItem('railcn.lineGeom', on ? '1' : '0');
-    if (on && LN.data && LN.data.osm && !LN.gdata) await lnLoadGeom(LN.data.osm.ask || LN.data.osm.name, LN.data.totalKm);
+    if (on && LN.data && LN.data.osm && !LN.gdata)
+      await lnLoadGeom(LN.data.osm.ask || LN.data.osm.name, LN.data.totalKm,
+                       !!(LN.data && LN.data.confirmedOnly));
     lnDrawMap();
     lnRenderInfo();
   });
@@ -3213,18 +3751,35 @@ async function geoImport(file, replace) {
   }
 }
 
-async function showLine(q, notice, from) {
+async function showLine(q, notice, from, exact, confirmedOnly) {
   const box = $('#netList'), det = $('#netDetail');
+  /* confirmedOnly：车站/线路页专用。只查整理台完成全部确认的线路，
+     停站 + 走向都从整理台现读；不带这个标记的老入口（车次详情的线路 chip 等）
+     仍按原来的「多来源版本」口径走。 */
+  const co = !!confirmedOnly;
   try {
     det.classList.remove('show');
     box.innerHTML = `<div class="empty">查询线路 ${q} …</div>`;
     /* from：指定站序来源（osm / chinaemu / catalog）。同一条线几个来源各有说法，
-       用户点了哪个就按哪个给，不再让系统替他挑 */
-    const d = await api('/api/line', { q, from: from || '' });
+       用户点了哪个就按哪个给，不再让系统替他挑。
+       exact：q 正好是某一份版本的名字（京沪线（底表）），别被「默认 / 底表」换掉 */
+    const d = co
+      ? await api('/api/line', { q, confirmed: 1 })
+      : await api('/api/line', { q, from: from || '', exact: exact ? 1 : '' });
+    if (co && !d.found) {
+      det.classList.remove('show');
+      lnWide(false);
+      box.innerHTML = `<div class="empty">${esc(d.reason || '这条线路还没完成全部确认')}
+        <div class="hint" style="margin-top:8px;color:#77839a">
+          到 <a href="/linedesk.html">线路整理台</a> 完成 ① 线路来源 ② 站点来源 ③ 合并保存，
+          这条线才会出现在这里。</div></div>`;
+      return;
+    }
     LN.data = d;                       // 先挂上，lnDrawMap 要靠它取站点
     LN.notice = notice || null;        // 一次性提示（收进线路库之类），换线路就清掉
     LN.gdata = null;
-    if (d.osm && lnGeomOn()) await lnLoadGeom(d.osm.ask || d.osm.name, d.totalKm);
+    LN.gkey = null;
+    if (d.osm && lnGeomOn()) await lnLoadGeom(d.osm.ask || d.osm.name, d.totalKm, co);
     lnDrawMap();
     $('#hud').classList.add('hidden');
     $('#dock').classList.add('hidden');
@@ -3233,12 +3788,14 @@ async function showLine(q, notice, from) {
     lnWide(false);
     LN.segKm = { ...((d.override && d.override.segKm) || {}) };
     LN.staKm = { ...((d.override && d.override.staKm) || {}) };
+    LN.naHard = {};
     LN.totalKm = d.override && d.override.totalKm != null ? String(d.override.totalKm) : '';
     det.innerHTML = `
       <div class="dhead" id="lnHead"></div>
+      <!-- 编辑区紧跟标题：别再排在「线路资料 / 真实走向」之后被顶出首屏 -->
+      <div class="lnkm" id="lnKmBox" hidden></div>
       <div class="lnosm" id="lnOsmOther" hidden></div>
       <div class="lninfo" id="lnInfo" hidden></div>
-      <div class="lnkm" id="lnKmBox" hidden></div>
       <ul class="stops" id="lnStops">
         ${d.stations.map((p, i) => `<li class="stop${i === 0 ? ' start' : ''}${i === d.stations.length - 1 ? ' end' : ''}" data-i="${i}">
           <div class="t"><div class="arr">${i + 1}</div></div>
@@ -3255,6 +3812,17 @@ async function showLine(q, notice, from) {
       MapView.focusStop(Number(li.dataset.i));
     }));
   } catch (e) {
+    if (co) {
+      /* 只认整理台确认线路：别再退到资料库 / OSM / 备份版本清单，
+         否则「其它线路」又从后门钻出来了 */
+      det.classList.remove('show');
+      lnWide(false);
+      box.innerHTML = `<div class="empty">${esc(e.message)}
+        <div class="hint" style="margin-top:8px;color:#77839a">
+          到 <a href="/linedesk.html">线路整理台</a> 完成 ① 线路来源 ② 站点来源 ③ 合并保存，
+          这条线才会出现在这里。</div></div>`;
+      return;
+    }
     // 线路库里没有：先看「线路资料库」，再退到 OSM（CRTrainRoute）那 3000 多条线
     const hit = await showCatalogList(q, box);
     if (!hit) {
@@ -3609,11 +4177,16 @@ const LNSRC_SHORT = { lib: '线路库', custom: '自建', catalog: '资料库',
 async function suggestNet() {
   const q = $('#netQ').value.trim();
   const box = $('#sugNet');
+  /* 线路模式：输入框**下方常驻的全量确认清单**就是搜索结果。清单本地筛选、
+     不另弹一层联想下拉（下拉会盖住清单）、也不用每敲一个字打一次接口。 */
+  if (netKind === 'line') {
+    box.classList.add('hidden');
+    await netRenderConfirmedList();
+    return;
+  }
   if (!q) { box.classList.add('hidden'); return; }
   try {
-    const d = netKind === 'station'
-      ? await api('/api/stations', { q, limit: 10 })
-      : await api('/api/lines', { q, limit: 8 });
+    const d = await api('/api/stations', { q, limit: 10 });
     if (netKind === 'station') {
       /* 车站：三个来源**一个都不合并**，同名的也照列（像 OSM 的「石家庄」和
          站表里的「石家庄」不是一个口径），每行标上来源让用户自己点 */
@@ -3629,110 +4202,44 @@ async function suggestNet() {
           warn: false, osm: 1,
         })),
       ];
+      /* 车站库一条都没命中时，再问一次线路库：用户常常是在整理台整合完，
+         回主站直接输线名（页面默认停在「车站」模式），这时联想全空，
+         看起来就像「这条线没了」。把线路命中补进联想，点一下自动切模式。 */
+      if (!rows.length) {
+        try {
+          const ld = await api('/api/lines', { q, limit: 5, confirmed: 1 });
+          for (const it of (ld.items || [])) rows.push({
+            v: it.name, n: it.name, src: it.base ? '基本线路' : '线路',
+            memo: `${it.n || 0} 站 · 点一下切到线路`, warn: false, line: 1,
+          });
+        } catch (_) { /* 线路接口异常就维持原来的空联想 */ }
+      }
       if (!rows.length) { box.classList.add('hidden'); return; }
       box.innerHTML = rows.map(it =>
         `<div class="si${it.warn ? ' nocoord' : ''}" data-v="${esc(it.v)}" data-osm="${it.osm || 0}"
-           title="${it.src === 'OSM' ? 'OSM 国铁车站：按到线路中心线的距离归属到线上' : '来源：' + it.src}">
+           data-line="${it.line || 0}"
+           title="${it.line ? '线路库命中，点一下切到「线路」' : it.src === 'OSM' ? 'OSM 国铁车站：按到线路中心线的距离归属到线上' : '来源：' + it.src}">
            <span>${esc(it.n)}</span>
            <span class="c"><b class="ssrc s-${esc(it.src === 'OSM' ? 'osm' : it.src === '两边都有' ? 'both' : it.src === '12306 站表' ? 't123' : 'arch')}">${esc(it.src)}</b>${it.memo ? ' · ' + it.memo : ''}</span></div>`).join('');
       box.classList.remove('hidden');
       $$('#sugNet .si').forEach(el => el.addEventListener('click', () => {
         $('#netQ').value = el.dataset.v;
         box.classList.add('hidden');
-        searchNet();
+        if (el.dataset.line === '1') netSwitchLine(el.dataset.v);
+        else searchNet();
       }));
       return;
     }
 
-    /* 线路：库里命中的 + OSM 有、线路库没收的，**一个都不合并**。
-       每行下面挂来源徽标（线路库 212 站 / 资料库 89 站 / OSM 218 站），
-       点哪个进哪个；点行本身 = 走系统默认。 */
-    const vars = d.variants || {};
-    const picks = d.picks || {};
-    const items = [...(d.items || []).map(x => ({ ...x, lib: true })),
-                   ...(d.osm || []).map(x => ({ ...x, lib: false }))].slice(0, 12);
-    if (!items.length) { box.classList.add('hidden'); return; }
-    box.innerHTML = items.map(it => {
-      const vs = vars[it.name] || [];
-      if (!vs.length) {                    // 一个站序都没查到的，按老样子一行说完
-        return `<div class="si" data-v="${esc(it.name)}" data-stops="0">
-           <span>${esc(it.name)}</span>
-           <span class="c">${it.km} km · 无从查站序</span></div>`;
-      }
-      const pick = picks[it.name] || '';
-      const badges = vs.map(v => `<span class="sw">
-           <i class="pick${pick === v.source ? ' on' : ''}" data-v="${esc(it.name)}"
-              data-pick="${esc(v.source)}" title="${pick === v.source
-                ? '已设为默认（点一下取消）'
-                : '设为默认：之后所有用到这条线的地方都按这份站序'}">★</i><b class="srcb" data-v="${esc(it.name)}"
-           data-from="${esc(v.source)}" title="${esc(v.label)}：${v.n} 站 · ${lnKmText(v.km)}
-${esc(v.first || '')} → ${esc(v.last || '')}">${esc(v.short || LNSRC_SHORT[v.source] || v.label)} ${v.n}站</b></span>`).join('');
-      return `<div class="si multi" data-v="${esc(it.name)}" data-stops="1">
-         <div class="srow"><span>${esc(it.name)}</span>
-           <span class="c">${vs.length} 个来源${it.lib ? '' : ' · 线路库未收录'}${
-             pick ? ` · 默认 ${esc(LNSRC_SHORT[pick] || pick)}` : ''}</span></div>
-         <div class="srcb-row">${badges}</div></div>`;
-    }).join('');
-    box.classList.remove('hidden');
-    $$('#sugNet .srcb').forEach(el => el.addEventListener('click', ev => {
-      ev.stopPropagation();
-      $('#netQ').value = el.dataset.v;
-      box.classList.add('hidden');
-      showLine(el.dataset.v, null, el.dataset.from);
-    }));
-    /* 下拉里也能勾默认，省得进详情页再点一次 */
-    $$('#sugNet .pick').forEach(el => el.addEventListener('click', async ev => {
-      ev.stopPropagation();
-      const src = el.dataset.pick;
-      const now = (picks[el.dataset.v] || '') === src ? '' : src;
-      $('#netQ').value = el.dataset.v;
-      box.classList.add('hidden');
-      try {
-        await postJSON('/api/line/src-pick', { name: el.dataset.v, source: now });
-        showLine(el.dataset.v, now
-          ? `已把「${LNSRC_SHORT[src] || src}」设为默认：之后用到「${el.dataset.v}」的地方都按这份站序`
-          : '已取消默认，回到系统规则', now ? src : '');
-      } catch (e) {
-        alert('设置失败：' + e.message);
-      }
-    }));
-    $$('#sugNet .si').forEach(el => el.addEventListener('click', ev => {
-      if (ev.target.closest('.srcb')) return;
-      $('#netQ').value = el.dataset.v;
-      box.classList.add('hidden');
-      if (el.dataset.stops === '1') searchNet();
-      else showOsmLine(el.dataset.v);
-    }));
-  } catch (_) { box.classList.add('hidden'); }
-}
+    /* 线路模式已在本函数开头交给 netRenderConfirmedList()：下方全量清单按确认
+       先后排好，输入即时在其中筛选。原来那套 chip 列表 + 联想下拉（只取前 12
+       条、还会盖住清单）已删除，这里只剩车站模式一条路径。 */
+    return;
 
-/* 站名联想 */
-function bindSuggest(inputSel, sugSel) {
-  const input = $(inputSel), box = $(sugSel);
-  let timer = 0;
-  input.addEventListener('input', () => {
-    clearTimeout(timer);
-    const q = input.value.trim();
-    if (!q) { box.classList.add('hidden'); return; }
-    timer = setTimeout(async () => {
-      try {
-        const d = await api('/api/stations', { q, limit: 10 });
-        if (!d.items.length) { box.classList.add('hidden'); return; }
-        box.innerHTML = d.items.map(it =>
-          `<div class="si${it.hasCoord ? '' : ' nocoord'}" data-v="${it.name}"
-             title="${it.archive === false ? '线路库还没收录这个站，资料来自 12306 站表' : ''}">
-             <span>${it.name}</span><span class="c">${it.city || ''}</span></div>`).join('');
-        box.classList.remove('hidden');
-        $$('.si', box).forEach(si => si.addEventListener('click', () => {
-          input.value = si.dataset.v;
-          box.classList.add('hidden');
-        }));
-      } catch (e) { box.classList.add('hidden'); }
-    }, 160);
-  });
-  document.addEventListener('click', e => {
-    if (!box.contains(e.target) && e.target !== input) box.classList.add('hidden');
-  });
+    /* 旧版「同名多来源版本 + ★ 选版本 + 候选线路」的联想整段已删除：
+       车站/线路页 2026-11-06 起只认整理台完成全部确认的线路。
+       其它页面（数据校对、备份线路）的多来源口径不受影响。 */
+  } catch (_) { box.classList.add('hidden'); }
 }
 
 /* ============================================================
@@ -3759,6 +4266,7 @@ function dlBadge(s) {
 async function dlLoad() {
   if (DL.loading) return;
   DL.loading = true;
+  if (!DL.dates.length) $('#dlList').innerHTML = '<div class="empty">正在统计各天的下载进度…</div>';
   try {
     const d = await api('/api/dates');
     DL.dates = d.items;
@@ -3857,13 +4365,23 @@ function dlRenderChain() {
 async function dlChainAct(kind, start) {
   const sel = $('#dlWorkers');
   const workers = sel ? Number(sel.value) : 6;
-  // 全新开跑 → 先刷新全集；暂停后继续 → 只在「刷新全集那一步被中断」时才重刷
-  const doEnum = start ? (DL.chain && DL.chain.phase === 'enum' ? 1 : 0) : 1;
+  const enumBox = $('#dlEnumFirst');
+  const futureBox = $('#dlEnumFuture');
+  if (enumBox) { try { localStorage.setItem('railcn.dlEnumFirst', enumBox.checked ? '1' : '0'); } catch (_) {} }
+  if (futureBox) { try { localStorage.setItem('railcn.dlEnumFuture', futureBox.checked ? '1' : '0'); } catch (_) {} }
+  // 勾选框说了算：勾着就是「连跑的第一件事：刷新车次全集」，后端不再按 7 天冷却自己跳过。
+  // 例外：上次就是卡在「刷新全集」那一步被中断的，继续时无论如何都要重刷。
+  const wantEnum = enumBox ? enumBox.checked : true;
+  const wantFuture = futureBox ? futureBox.checked : true;
+  const inEnum = !!(start && DL.chain && DL.chain.phase === 'enum');
+  const doEnum = (wantEnum || inEnum) ? 1 : 0;
   try {
     if (kind === 'stop') {
       await api('/api/collect/chain/stop');
     } else {
-      await api('/api/collect/chain/start', { workers, enum: doEnum, start: start || '' });
+      await api('/api/collect/chain/start',
+        { workers, enum: doEnum, force: doEnum, start: start || '',
+          future: wantFuture ? 1 : 0 });
     }
   } catch (e) {
     alert('操作失败：' + e.message);
@@ -3902,7 +4420,8 @@ function dlRenderList() {
       </div>
       <div class="dl-meta">开行 ${nfmt(s.trains)} 趟${
         s.pending ? ` · 待处理 ${nfmt(s.pending)}` : ''}${
-        s.skipped ? ` · 不开行 ${nfmt(s.skipped)}` : ''}</div>
+        s.stale ? ` · 待复核 ${nfmt(s.stale)}` : ''}${
+        s.skipped ? ` · 本轮未查到 ${nfmt(s.skipped)}` : ''}</div>
       <div class="dl-bar${running ? ' run' : (pct >= 100 ? ' done' : '')}">
         <i style="width:${pct}%"></i></div>
     </div>`;
@@ -3933,7 +4452,7 @@ function dlRenderDetail() {
     <div class="dl-grid">
       <div><span class="k">已确认开行</span><b>${nfmt(s.trains)} 趟</b></div>
       <div><span class="k">待处理（车次全集 ${nfmt(s.universe)}）</span><b>${nfmt(s.pending)}</b></div>
-      <div><span class="k">当天不开行</span><b>${nfmt(s.skipped || 0)}</b></div>
+      <div><span class="k" title="当时没查到经停站，不是永久结论；发车日已过的才算终态。其中 ${nfmt(s.stale || 0)} 条已到复核期，每轮下载自动放行 200 条，也可点「复核旧标记」全部重查">待复核旧标记</span><b>${nfmt(s.skipTotal || 0)}</b></div>
       <div><span class="k">失败</span><b>${nfmt(s.failed)}</b></div>
       <div><span class="k">完成度</span><b>${s.percent || 0}%</b></div>
       <div><span class="k">${running ? '本轮进度' : '并发 / 间隔'}</span><b>${
@@ -3949,6 +4468,8 @@ function dlRenderDetail() {
             : `<button class="btn sm primary" data-act="start">${
                 s.trains ? (s.pending ? `▶ 继续补 ${nfmt(s.pending)} 趟` : '↻ 重新校验') : '▶ 开始下载'}</button>`)}
       ${running || chainBusy() ? '' : '<button class="btn sm" data-act="reenum">刷新全集</button>'}
+      ${running || chainBusy() ? '' : `<button class="btn sm" data-act="recheck"
+        title="把这天所有「当时未查到经停站」的旧标记放行，下一轮下载重新核实（预售期放票、临时加开后能补上）">↻ 复核旧标记${s.skipTotal ? ` (${nfmt(s.skipTotal)})` : ''}</button>`}
       <button class="btn sm" data-act="export-json">⬇ JSON</button>
       <button class="btn sm" data-act="export-csv">⬇ CSV</button>
     </div>
@@ -3968,9 +4489,17 @@ async function dlAct(act, date) {
     if (act === 'start') {
       await api('/api/collect/start', { date, workers });
     } else if (act === 'reenum') {
-      await api('/api/collect/start', { date, workers, enum: 1 });
+      const fb = $('#dlEnumFuture');
+      await api('/api/collect/start', { date, workers, enum: 1,
+        future: (fb && !fb.checked) ? 0 : 1 });
     } else if (act === 'stop') {
       await api('/api/collect/stop', { date });
+    } else if (act === 'recheck') {
+      const r = await api('/api/collect/recheck', { date });
+      alert(`已放行 ${r.released} 条「当时未查到经停站」的旧标记。\n`
+        + `下一轮下载会逐趟重查这些车（数量较大时可能要跑几十分钟）；`
+        + `真不开行的会再记回来，并带上新的复核期限。\n`
+        + `只想小步补的话，不要点这个按钮——连跑每轮会自动放行 200 条。`);
     } else if (act === 'export-json') {
       location.href = `/api/collect/download?date=${date}&fmt=json`;
       return;
@@ -4126,7 +4655,7 @@ function hqRenderCal() {
       : `${r.from.slice(5)}~${r.to.slice(5)}（${r.days} 天）`).join('、')
     : '';
   $('#hqCalSum').innerHTML = `<b>${esc(d.code)}</b> ${esc(od)} · ${d.from} ~ ${d.to}（${d.span} 天）<br>
-    开行 <b>${s.open}</b> 天 · 不开行 <b>${s.skip}</b> 天 · 无数据 ${s.nodata} 天${
+    开行 <b>${s.open}</b> 天 · 当时未查到 <b>${s.skip}</b> 天 · 无数据/待复核 ${s.nodata} 天${
       s.withStops ? ` · 其中 ${s.withStops} 天有停站时刻` : ''}${
       runs ? `<br><span style="color:#64748b">${runs}</span>` : ''}${
       s.stopChanged ? `<br><span class="warn">有 ${s.stopChanged} 天的停站/时刻和前一开行日不一样</span>` : ''}${
@@ -4155,7 +4684,8 @@ function hqRenderCal() {
       : (x.state === 'skip' ? 'skip' : 'none');
     const lab = x.state === 'open'
       ? (x.stops ? `${x.stops} 站` : '停站未下载')
-      : (x.state === 'skip' ? (x.inferred ? '不开行·推断' : '不开行') : '无数据');
+      : (x.state === 'skip' ? (x.inferred ? '未查到·推断' : '当时未查到')
+         : (x.rechecking ? '待复核' : '无数据'));
     const vTag = (vs.length > 1 && x.v) ? `v${x.v}` : '';
     const tip = `${x.date} ${x.weekday} · ${lab}${x.trainNo ? ' · ' + x.trainNo : ''}${
       vTag ? ` · 方案 ${vTag}` : ''}${x.from || x.to ? ` · ${x.from || '?'} → ${x.to || '?'}` : ''}${
@@ -4326,8 +4856,13 @@ function hqRenderTypes() {
 }
 
 async function boot() {
+  /* 确认线路清单异步拉，别挡住事件绑定（其它回归脚本靠启动后立刻点页签）；
+     showStation / suggestNet 用到时各自 await，拿不到就当 0 条。 */
+  netLoadConfirmed().then(() => {
+    netToggleAdd();
+    netRenderConfirmedList();      // 默认停在车站模式：函数内部会把清单隐藏
+  }).catch(() => {});
   $('#date').value = S.date;
-  $('#odDate').value = S.date;
   $('#date').addEventListener('change', e => {
     S.date = e.target.value || todayStr();
     if (S.route) openTrain(S.route.code);
@@ -4337,21 +4872,31 @@ async function boot() {
     if (e.key === 'Enter') searchTrain();
     if (e.key === 'Escape') $('#sugg').classList.add('hidden');
   });
-  $('#btnOD').addEventListener('click', searchOD);
-  $('#odFrom').addEventListener('keydown', e => e.key === 'Enter' && searchOD());
-  $('#odTo').addEventListener('keydown', e => e.key === 'Enter' && searchOD());
-  $('#btnSwap').addEventListener('click', () => {
-    const a = $('#odFrom'), b = $('#odTo');
-    [a.value, b.value] = [b.value, a.value];
-  });
   $$('.tab').forEach(t => t.addEventListener('click', () => switchTab(t.dataset.tab)));
-  bindSuggest('#odFrom', '#sugFrom');
-  bindSuggest('#odTo', '#sugTo');
 
   // 车站 / 线路
   $('#btnNet').addEventListener('click', searchNet);
   $('#netQ').addEventListener('keydown', e => e.key === 'Enter' && searchNet());
-  $('#netQ').addEventListener('input', () => { clearTimeout(netTimer); netTimer = setTimeout(suggestNet, 220); });
+  $('#netQ').addEventListener('input', () => {
+    clearTimeout(netTimer);
+    if (netKind === 'line') {
+      /* 线路模式：在下方全量清单里即时本地筛选，不打接口、不等 debounce */
+      netRenderConfirmedList();
+      return;
+    }
+    netTimer = setTimeout(suggestNet, 220);
+  });
+  /* 线路模式点一下输入框就把「已确认线路」全列出来，不用先打字 */
+  $('#netQ').addEventListener('focus', () => {
+    if (netKind === 'line') {
+      NET.cfOpen = true;
+      suggestNet();
+    }
+  });
+  /* 在整理台 ③ 刚确认完切回主站：重新拉一次清单，新确认的线立刻排到最上 */
+  window.addEventListener('focus', () => {
+    if (netKind === 'line') netLoadConfirmed(true).then(() => netRenderConfirmedList());
+  });
   // 联想框：点别处 / 按 Esc 收起（下拉盖住了下面那排「车站 / 线路」，不收起来会一直挡着）
   document.addEventListener('click', e => {
     const box = $('#sugNet');
@@ -4364,8 +4909,23 @@ async function boot() {
     $$('.chipsel').forEach(x => x.classList.remove('active'));
     b.classList.add('active');
     netKind = b.dataset.kind;
+    /* 换模式就是换上下文：清掉上一个模式留下的详情 / 输入，线路模式直接
+       把全部确认线路按确认先后摆出来，用户再输入即在这份清单里筛。 */
+    $('#netQ').value = '';
     $('#netQ').placeholder = netKind === 'station' ? '北京南' : '京沪高速';
-    if ($('#netQ').value.trim()) searchNet();
+    $('#sugNet').classList.add('hidden');
+    $('#netList').innerHTML = '';
+    $('#netDetail').classList.remove('show');
+    $('#netDetail').innerHTML = '';
+    $('#paneNet').classList.remove('line-only');
+    lnWide(false);
+    netToggleAdd();
+    if (netKind === 'line') {
+      NET.cfOpen = true;
+      netRenderConfirmedList();
+    } else {
+      $('#netConfirmedList').classList.add('hidden');
+    }
   }));
   // 新增线路 / 车站
   $('#btnNewLine') && $('#btnNewLine').addEventListener('click', () => nmOpen('line'));
@@ -4479,20 +5039,78 @@ async function boot() {
   spdPaint();
   TL.init();
 
-  // map key modal
+  // map key modal —— 保存后**原地生效，不 reload**：刷新会丢掉校对页选中的车次 /
+  // 正在编辑的经由，而且用户填完 Key 只想立刻看到底图，不想整页重来。
+  const closeKeyModal = () => {
+    $('#keyModal').classList.add('hidden');
+    document.body.classList.remove('modal-open');
+  };
+  const keyMsg = (txt, bad) => {
+    const m = $('#keyMsg');
+    if (!m) return;
+    m.textContent = txt || '';
+    m.classList.toggle('bad', !!bad);
+  };
   $('#btnKey').addEventListener('click', () => {
     $('#keyInput').value = mapKey();
+    keyMsg('');
     $('#keyModal').classList.remove('hidden');
     document.body.classList.add('modal-open');
   });
-  $('#keyCancel').addEventListener('click', () => {
-    $('#keyModal').classList.add('hidden');
-    document.body.classList.remove('modal-open');
-  });
-  $('#keySave').addEventListener('click', () => {
+  $('#keyCancel').addEventListener('click', closeKeyModal);
+  $('#keySave').addEventListener('click', async () => {
     const v = $('#keyInput').value.trim();
+    const old = mapKey();
     if (v) localStorage.setItem('railcn.mapkey', v); else localStorage.removeItem('railcn.mapkey');
-    location.reload();
+    if (v === old) { closeKeyModal(); return; }        // 没改就不用动
+    const btn = $('#keySave');
+    btn.disabled = true;
+    // 腾讯 SDK 的 key 绑在脚本 URL 上，换 Key 必须重新注入脚本；先把老实例清干净
+    const destroy = () => {
+      try { TMapView.map && TMapView.map.destroy && TMapView.map.destroy(); } catch (_) { }
+      TMapView.map = null; TMapView.layers = {}; TMapView.ok = false;
+      const m = $('#map'); if (m) m.innerHTML = '';
+      try { CUMAP.tmap && CUMAP.tmap.destroy && CUMAP.tmap.destroy(); } catch (_) { }
+      CUMAP.tmap = null; CUMAP.tLayers = []; CUMAP.backend = null;
+      const t = $('#cuTMap'); if (t) { t.innerHTML = ''; t.classList.add('hidden'); }
+      const cv = $('#cuMapCanvas'); if (cv) cv.classList.remove('hidden');
+    };
+    if (!v) {                                          // 清空 Key：退回示意图，不必加载 SDK
+      destroy();
+      TMapSDK.disabled = true;
+      MapView.impl = SvgView;
+      $('#map').style.visibility = 'hidden';
+      try { SvgView.init(); } catch (_) { }
+      const hint = $('#mapHint');
+      if (hint) { hint.classList.remove('hidden'); hint.innerHTML = '当前为<b>无底图示意模式</b>（已清除腾讯地图 Key）。'; }
+      if (S.route) MapView.setRoute(S.route);
+      if (CU.mapOn) cuMapEnsure();
+      cuMapKeyBadge();
+      closeKeyModal(); btn.disabled = false;
+      return;
+    }
+    keyMsg('正在加载腾讯地图 SDK…');
+    try {
+      destroy();
+      await TMapSDK.load(true);
+      await TMapView.init();
+      MapView.impl = TMapView;
+      $('#fallback').classList.add('hidden');
+      $('#map').style.visibility = 'visible';
+      const hint = $('#mapHint'); if (hint) hint.classList.add('hidden');
+      if (S.route) MapView.setRoute(S.route);
+      mapResize();
+      cuMapUpgrade();                                 // 校对页右侧地图同步切到真底图
+      closeKeyModal(); keyMsg('');
+    } catch (e) {
+      // 不关弹窗，让用户直接改 Key；页面保持示意图，不白屏
+      keyMsg('未能启用腾讯底图：' + e.message
+        + '。请确认 Key 是「Web 端 / JavaScript GL」类型、域名白名单放行 localhost / 127.0.0.1、网络可达。当前仍是示意图模式。', true);
+      try { MapView.degrade(e); } catch (_) { }
+      cuMapKeyBadge();
+    } finally {
+      btn.disabled = false;
+    }
   });
 
   try {
@@ -4508,11 +5126,18 @@ async function boot() {
 
   $('#trainList').innerHTML = `<div class="empty">
     输入车次号后回车，即可查看行程与实时推算位置。<br><br>
-    <b>试试：</b> G1（京沪标杆）、G1033、D2287、Z21<br>
-    <b>站站查询：</b> 切到「站站查询」查余票并直接看图。</div>`;
+    <b>试试：</b> G1（京沪标杆）、G1033、D2287、Z21</div>`;
 
   // 数据下载页
   $('#dlRefresh').addEventListener('click', dlLoad);
+  const enumBox = $('#dlEnumFirst');
+  if (enumBox) {
+    try { if (localStorage.getItem('railcn.dlEnumFirst') === '0') enumBox.checked = false; } catch (_) {}
+  }
+  const futureBox = $('#dlEnumFuture');
+  if (futureBox) {
+    try { if (localStorage.getItem('railcn.dlEnumFuture') === '0') futureBox.checked = false; } catch (_) {}
+  }
   $('#dlChain').addEventListener('click', () => {
     const st = DL.chain && DL.chain.status;
     if (st === 'running') return dlChainAct('stop');
@@ -4552,13 +5177,13 @@ async function boot() {
     openTrain(qCode, S.date, { cacheOnly: qs.get('cache') === '1' });
   } else if (qLine) {
     switchTab('net');                     // ?line=浑白线 直接看这条线
-    showLine(qLine, null, qFrom || null);
+    showLine(qLine, null, qFrom || null, false, true);
   } else {
     openTrain('G1');
   }
 
   const h = (location.hash || '').replace('#', '');
-  if (['train', 'od', 'net', 'dl', 'hist', 'curate'].includes(h)) switchTab(h);
+  if (['train', 'net', 'dl', 'hist', 'curate'].includes(h)) switchTab(h);
 
   // 历史查询深链：?hq=train&hqcode=G1&hqfrom=…&hqto=… / ?hq=type&hqtfrom=…&hqtto=…
   const hp = new URLSearchParams(location.search);
@@ -4599,6 +5224,10 @@ const CU = {
   sel: null, detail: null, via: [], segKm: {}, lines: null, poll: null,
   coordQ: '', coordOnlyMiss: false, mode: 'seg', linesStale: false,
   mates: new Set(), mateOpen: new Set(), loadSeq: 0,
+  // 线路下拉按发车站筛：只缓存「本趟车这些站」的候选，不缓存整库索引。
+  // 整理台以后再确认多少条线 / 补多少站，每次打开编辑器重取一次就自动跟上。
+  staMap: new Map(), staPending: new Set(), showAllLines: false,
+  mapOn: true, mapLine: '',
 };
 
 const esc = s => String(s == null ? '' : s)
@@ -4668,6 +5297,8 @@ function cuRenderStats(st) {
     cls.includes('sub') ? ' title="同步入库也算已校正，是已校正里从同起讫点车次同步过来的那部分"'
                         : ''}>${k}<b>${nfmt(v || 0)}</b></span>`).join('');
 
+  if (st.renum) cuRenderEra(st.renum);
+
   const p = $('#cuProg');
   const btn = $('#cuScan');
   if (st.running) {
@@ -4683,6 +5314,50 @@ function cuRenderStats(st) {
     else p.textContent = '还没扫过，点「重新扫描」生成清单';
     if (CU.poll) { clearTimeout(CU.poll); CU.poll = null; }
   }
+}
+
+/* 2026 车次改号：两个阶段勾选框。勾上 = 那批新字头已切换，纳入待校对；
+   两个都不勾 = 老车次全部出范围、清单为空（等新号真出现再勾）。 */
+function cuRenderEra(r) {
+  const box = $('#cuEra');
+  if (!box) return;
+  if (!r.enabled) {                    // 没设切换日 = 改号前，不显示这行
+    box.innerHTML = '';
+    box.classList.add('hidden');
+    return;
+  }
+  box.classList.remove('hidden');
+  const none = !r.phase1 && !r.phase2;
+  box.innerHTML = `
+    <span class="lbl">车次改号</span>
+    <span class="cut">切换日 ${esc(r.cutoff || '—')}</span>
+    <label title="普速客车与旅游列车（绿皮）：Z 直达特快(160) / N 快速普速(140) / V 普通快速(120) / Y 旅游">
+      <input type="checkbox" id="cuP1"${r.phase1 ? ' checked' : ''}>阶段一 · 普速（V/N/Z/Y）</label>
+    <label title="高速动车与动集 / 城际 / 市郊：X 超高速 / G 高铁 / T 高速动车组(300-310) / K 高速动车(200-250) / D 动车 / C 城际 / S 市郊">
+      <input type="checkbox" id="cuP2"${r.phase2 ? ' checked' : ''}>阶段二 · 动车（G/T/K/D/C/S/X）</label>
+    <span class="tip${none ? ' warn' : ''}">${none
+      ? '两个都没勾：老车次已全部退出校对，清单为空（新号出现后再勾）'
+      : `只校对勾选阶段的新车次（${r.letters.join(' / ')}），切换日之前的老车次不再出现 · 点「重新扫描」生成清单`}</span>`;
+  const save = async () => {
+    try {
+      // 注意 app.js 的 api() 是 GET + query，写操作要走 postJSON
+      const d = await postJSON('/api/curate/renum', {
+        phase1: $('#cuP1').checked, phase2: $('#cuP2').checked,
+      });
+      cuRenderEra(d.renum);
+      cuLoad();                     // 统计和清单先按新口径重取（旧表）
+      // 口径变了 ⇒ curate 表还是上一套口径扫的，必须重扫才会出现新车次。
+      // 以前只重读旧表，勾了阶段一也「一趟也没有」（2026-11-11 用户反馈）；
+      // 这里切换阶段后自动重扫一次，扫完 cuPoll 会自动载入新清单。
+      $('#cuProg').textContent = '口径已切换，正在重新扫描新车次…';
+      try { await postJSON('/api/curate/scan', {}); } catch (_) { /* 已在跑就忽略 */ }
+      cuPoll();
+    } catch (e) {
+      $('#cuProg').textContent = '改号口径保存失败：' + e.message;
+    }
+  };
+  $('#cuP1').onchange = save;
+  $('#cuP2').onchange = save;
 }
 
 function cuPoll() {
@@ -4763,10 +5438,12 @@ async function cuOpen(code) {
       $('#cuEditor').innerHTML = `<div class="cu-empty">${esc(d.error || '这趟车在本地库里没有数据')}</div>`;
       return;
     }
-    await cuLoadLineNames();          // 每次打开都重拉：刚加进线路库的线路要立刻能选到
+    await cuLoadLineNames();          // 每次打开都重拉：刚确认的线路要立刻能选到
     CU.via = cuInitVia(d);
     CU.segKm = cuInitSegKm(d);
+    await cuLoadLineScope();          // 线路 / 车站会持续增加：只预取本趟车这些站的候选
     cuRenderEditor();
+    cuMapReset();                     // 换了车次：右侧地图回到本趟车全景
   } catch (e) {
     $('#cuEditor').innerHTML = `<div class="cu-empty">载入失败：${esc(e.message)}</div>`;
   }
@@ -4820,10 +5497,11 @@ async function cuRefreshAuto() {
     CU.detail = nd;
     CU.via = cuInitVia(nd);
     CU.segKm = cuInitSegKm(nd);
+    await cuLoadLineScope();            // 重算后按新清单重取发车站候选
     cuRenderEditor();
     const nseg = (nd.auto.viaSegs || []).length;
     const ngap = (nd.auto.viaUnknown || []).length;
-    const lib = nd.library ? `线路库 ${nd.library.lines} 条（自建 ${nd.library.customLines}）` : '当前线路库';
+    const lib = `整理台确认线路 ${(CU.lines || []).length} 条`;
     cuMsg('ok', `已按${lib}重算：识别 ${nseg} 段、缺口 ${ngap} 段，覆盖 ${nd.auto.viaCoverage}%`);
     cuLoad();                            // 清单里的经由与标记跟着更新
   } catch (e) {
@@ -4861,6 +5539,88 @@ async function cuLoadLineNames() {
     CU.lines = (d.items || []).map(x => (typeof x === 'string'
       ? { name: x, n: null, totalKm: null } : x));
   } catch (e) { CU.lines = []; }
+}
+
+/* ---------- 线路下拉按「发车站」筛（线路 / 车站会一直增加，全部动态取） ---------- */
+
+/** 站名比对键：与后端 confvia._key / cnrail._key 完全一致 */
+function cuStaKey(name) {
+  let s = String(name || '').replace(/\s+/g, '');
+  for (const suf of ['线路所', '站', '所']) {
+    if (s.length > suf.length && s.endsWith(suf)) { s = s.slice(0, -suf.length); break; }
+  }
+  return s;
+}
+
+/** 预取「本趟车用得到的站」各自的候选线路，规模跟车次站数走，
+ *  不随线路库 / 车站库增长；整理台确认新线后重开编辑器即自动生效。 */
+async function cuLoadLineScope() {
+  const d = CU.detail || {};
+  const code = CU.sel;                  // 连点不同车次时，旧结果别盖住新的
+  const set = new Set();
+  const add = v => { const s = String(v || '').trim(); if (s) set.add(s); };
+  add(d.from); add(d.to);
+  (d.stops || []).forEach(s => add(s && s.name));
+  const auto = d.auto || {};
+  (auto.viaSegs || []).forEach(s => { add(s.from); add(s.to); });
+  (auto.viaUnknown || []).forEach(s => { add(s.from); add(s.to); });
+  (d.gapCands || []).forEach(g => { add(g.from); add(g.to); });
+  (CU.via || []).forEach(r => { add(r.from); add(r.to); });
+  CU.staMap = new Map();
+  CU.staPending.clear();
+  const stas = [...set].slice(0, 500);
+  if (!stas.length) return;
+  try {
+    const r = await api('/api/curate/linesForStops', { stas: stas.join('|') });
+    if (CU.sel !== code) return;
+    Object.entries(r.staMap || {}).forEach(([k, v]) => CU.staMap.set(k, v || []));
+  } catch (e) { /* 取不到就退回下面的按需单查，别让编辑器打不开 */ }
+}
+
+/** 用户手打了车次站表里没有的站：按需只查这一个站，回来重画打开着的下拉 */
+function cuFetchStaLines(sta) {
+  if (!sta || CU.staMap.has(sta) || CU.staPending.has(sta)) return;
+  CU.staPending.add(sta);
+  const done = names => {
+    CU.staMap.set(sta, names || []);
+    CU.staPending.delete(sta);
+    cuRepaintOpen($$('#ceViaRows .combo[data-cbkind="line"]'));
+  };
+  api('/api/curate/lineNames', { sta })
+    .then(d => done(d.names || []))
+    .catch(() => done([]));
+}
+
+/** 当前线路下拉该按哪个发车站筛：本段「从」→ 上一段「到」→ 车次始发站 */
+function cuScopeSta(box) {
+  const row = box && box.closest('.ve-row');
+  const i = row ? Number(row.dataset.i) : -1;
+  if (i >= 0 && CU.via[i]) {
+    const own = (CU.via[i].from || '').trim();
+    if (own) return own;
+    const prev = i > 0 ? (CU.via[i - 1] || {}) : {};
+    if ((prev.to || '').trim()) return prev.to.trim();
+  }
+  return String((CU.detail && CU.detail.from) || '').trim();
+}
+
+/** 返回 {lines, sta, all, pending, empty}；ali=显示全部时不筛 */
+function cuLineScope(box) {
+  const all = CU.lines || [];
+  const sta = cuScopeSta(box);
+  if (CU.showAllLines || !sta) return { lines: all, sta: '', all: true, pending: false };
+  if (!CU.staMap.has(sta)) {
+    cuFetchStaLines(sta);
+    return { lines: [], sta, all: false, pending: true };
+  }
+  const hit = CU.staMap.get(sta) || [];
+  const byName = new Map(all.map(l => [l.name, l]));
+  // 以服务端给的线名为准；万一 CU.lines 还没刷到（刚确认的新线）也补一个最小项，
+  // 别因为两份清单的时间差让用户选不到那条线。
+  const lines = hit.map(nm => byName.get(nm) || { name: nm, n: null, totalKm: null });
+  // 一个都匹配不上就退回全部，别让用户选不到线（多半是站名写法 / 还没确认那条线）
+  if (!lines.length) return { lines: all, sta, all: true, empty: true };
+  return { lines, sta, all: false, pending: false };
 }
 
 function cuChainHtml(segs, gaps) {
@@ -5202,6 +5962,7 @@ function cuRenderEditor() {
       ${(a.viaUnknown || []).length ? '<span class="ce-badge warn">经由有缺口</span>' : ''}
       ${d.variants > 1 ? `<span class="ce-badge warn" title="这个车次号在库里有 ${d.variants} 套不同走法（调图/缩线/改号）。校正按车次号保存，会同时作用到其它日期的运行">该号有 ${d.variants} 套走法</span>` : ''}
       <span class="ce-spacer"></span>
+      <button id="ceMapToggle" class="btn sm ghost" title="显示 / 收起右侧的线路走向与停站图">${CU.mapOn ? '收起走向图' : '显示走向图'}</button>
       <button id="ceGoTrain" class="btn sm ghost">在车次详情中打开</button>
     </div>
 
@@ -5213,11 +5974,11 @@ function cuRenderEditor() {
     </div>
 
     <div class="ce-card">
-      <h4>自动推断的经由 <span class="hint">（按线路库临时算的，不写库；确认为已校正后才进正式库）</span>
+      <h4>自动推断的经由 <span class="hint">（只认整理台确认的线路，临时算的、不写库；认不出的区间就是缺口，等整理台确认那条线）</span>
         <span class="hint">${covText} · 总里程 ${a.totalKm} km（${kmModeCn}）· 线路里程配对 ${esc(a.kmMatched)}</span>
         <span class="right">
-          <span class="hint" id="ceLibInfo">${d.library
-            ? `线路库 ${d.library.lines} 条（自建 ${d.library.customLines}）` : ''}</span>
+          <span class="hint" id="ceLibInfo">${CU.lines && CU.lines.length
+            ? `整理台确认线路 ${CU.lines.length} 条` : ''}</span>
           <button id="ceAccept" class="btn sm primary"
             title="整趟都认全了才可用：把自动推断的每一段都确认为人工，并立即保存入库"
             ${(a.viaUnknown || []).length || !(a.viaSegs || []).length ? 'disabled' : ''}>确认自动结果并入库</button>
@@ -5232,8 +5993,9 @@ function cuRenderEditor() {
 
     <div class="ce-card">
       <h4>手工填写经由
-        <span class="hint">按运行顺序；标「人工」的段会存为正式经由，标「自动」的段只作参考、不保存</span>
+        <span class="hint">按运行顺序；标「人工」的段会存为正式经由，标「自动」的段只作参考、不保存。线路名只列整理台确认的线（${(CU.lines || []).length} 条），<b>默认只显示含本段发车站的那些</b>；整理台新增线路 / 车站后重开本页即自动跟上</span>
         <span class="right">
+          <label class="cu-mini ce-alllines" title="不按发车站筛，列出全部整理台确认线路"><input type="checkbox" id="ceAllLines"${CU.showAllLines ? ' checked' : ''}> 显示全部线路</label>
           <button id="ceFill" class="btn sm ghost">按自动结果填充</button>
           <button id="ceAllManual" class="btn sm ghost">全部确认为人工</button>
           <button id="ceClear" class="btn sm ghost">清空</button>
@@ -5336,6 +6098,11 @@ function cuRenderEditor() {
     S.staleCode = null;             // 下面自己会重拉，别让 switchTab 再触发一次
     switchTab('train');
     openTrain(d.code, d.date, { cacheOnly: true });
+  });
+  const allLinesCb = $('#ceAllLines');
+  if (allLinesCb) allLinesCb.addEventListener('change', () => {
+    CU.showAllLines = allLinesCb.checked;
+    cuRepaintOpen($$('#ceViaRows .combo[data-cbkind="line"]'));
   });
   $('#ceAdd').addEventListener('click', () => {
     const last = CU.via[CU.via.length - 1];
@@ -5582,23 +6349,35 @@ function cuApplyCoord(name, r) {
 /* ---------- 通用下拉：线路名 / 该线路的车站名，可搜索、可键盘选 ---------- */
 const CB = { box: null, items: [], idx: -1, kick: null };
 
+/* 中间段落 → 右侧地图的实时跟随：打字、方向键浏览都走防抖，别每敲一个字发一次请求 */
+const cuMapTimers = new Map();
+
 /** 线路车站名单缓存：{线路名: [站名…]}，避免同一段反复请求 */
 const CUSTA = { cache: new Map(), pending: new Map() };
 
 const cbKind = box => box.dataset.cbkind || 'line';
 const cbInput = box => box.querySelector('input');
 
-function cbLineList(q) {
-  const all = CU.lines || [];
+function cbLineList(q, box) {
+  // 默认只列「含这一段发车站」的确认线路；候选由服务端按本趟车站点动态算，
+  // 线路 / 车站以后再增加也不用改前端，整理台确认过就自动出现。
+  const scope = cuLineScope(box);
+  if (box) box._scope = scope;
+  const all = scope.lines || [];
   const v = (q || '').trim();
-  if (!v) return all.slice(0, 500);
-  const hits = all.filter(l => l.name.includes(v));
-  hits.sort((a, b) => {
-    const ap = a.name.startsWith(v) ? 0 : 1;
-    const bp = b.name.startsWith(v) ? 0 : 1;
-    return ap - bp || a.name.length - b.name.length;
-  });
-  return hits.slice(0, 200);
+  let hits;
+  if (!v) {
+    hits = all.slice(0, 300);       // 线路多了也别一次塞几千个 DOM，输入线名可缩小
+  } else {
+    hits = all.filter(l => l.name.includes(v));
+    hits.sort((a, b) => {
+      const ap = a.name.startsWith(v) ? 0 : 1;
+      const bp = b.name.startsWith(v) ? 0 : 1;
+      return ap - bp || a.name.length - b.name.length;
+    });
+    hits = hits.slice(0, 200);
+  }
+  return hits;
 }
 
 /** 车站候选：该行线路在库里的全部车站；线路不在库里就退回这趟车的经停站。
@@ -5678,13 +6457,21 @@ function cbKick() {
 }
 
 function cbClose() {
-  if (CB.box) {
-    CB.box.classList.remove('open');
-    const pop = CB.box.querySelector('.cb-pop');
+  const box = CB.box;
+  if (box) {
+    box.classList.remove('open');
+    const pop = box.querySelector('.cb-pop');
     if (pop) {
       pop.classList.remove('up');
       ['position', 'left', 'top', 'bottom', 'width', 'minWidth']
         .forEach(k => { pop.style[k] = ''; });
+    }
+    // 只是用方向键 / 鼠标在候选里浏览过、没真选中就关掉了：
+    // 地图退回这一段实际填的线路，别停在最后预览的那条上
+    if (box._preview) {
+      box._preview = false;
+      clearTimeout(cuMapTimers.get('preview'));
+      if (box._i != null) cuMapSync(box._i, true, cbKind(box) === 'line');
     }
   }
   cbUnkick();
@@ -5739,7 +6526,8 @@ function cbPaintList(box, q, noHilite) {
   if (!pop) return;
   const v = (q || '').trim();
   if (cbKind(box) === 'sta') return cbPaintSta(box, pop, v, noHilite);
-  const list = cbLineList(v);
+  const list = cbLineList(v, box);
+  const scope = (box && box._scope) || {};
   const exact = list.some(l => l.name === v);
   const rows = list.slice();
   if (v && !exact) rows.push({ name: v, custom: true });
@@ -5747,7 +6535,20 @@ function cbPaintList(box, q, noHilite) {
   // 命中只认库里的线路名；自定义项跟输入值同名，不能算「命中」
   const hit = list.findIndex(l => l.name === v);
   CB.idx = hit >= 0 ? hit : (rows.length ? 0 : -1);
-  pop.innerHTML = rows.length
+  let note = '';
+  if (scope.pending) {
+    note = `<div class="cb-scope">正在按发车站「${esc(scope.sta)}」查线路…</div>`;
+  } else if (scope.empty) {
+    note = `<div class="cb-scope warn">没有含「${esc(scope.sta)}」的整理台确认线路，已显示全部`
+      + ` ${(CU.lines || []).length} 条（检查站名写法，或先去整理台确认那条线）</div>`;
+  } else if (!scope.all) {
+    note = `<div class="cb-scope">发车站 <b>${esc(scope.sta)}</b> · 含该站的确认线路`
+      + ` <b>${(scope.lines || []).length}</b> 条`
+      + `<button type="button" class="cb-scope-all" data-act="showall">显示全部 ${(CU.lines || []).length} 条</button></div>`;
+  } else if ((scope.lines || []).length > list.length && !v) {
+    note = `<div class="cb-scope">共 ${scope.lines.length} 条，先显示 ${list.length} 条；输入线名可缩小范围</div>`;
+  }
+  pop.innerHTML = note + (rows.length
     ? rows.map((r, k) => {
       const mt = r.custom ? '用这个名称'
         : [r.n ? `${r.n} 站` : '', lnKmText(r.totalKm), r.kmManual ? '人工' : '',
@@ -5758,7 +6559,9 @@ function cbPaintList(box, q, noHilite) {
       return `<div class="cb-item${k === CB.idx ? ' active' : ''}${r.custom ? ' custom' : ''}"
         data-k="${k}"><span class="nm">${esc(r.name)}</span><span class="mt">${esc(mt)}</span></div>`;
     }).join('')
-    : '<div class="cb-empty">线路库里没有匹配项 —— 直接输入的字就是自定义线路名</div>';
+    : (scope.pending
+      ? '<div class="cb-empty">正在按发车站查线路…</div>'
+      : '<div class="cb-empty">整理台里没有匹配的确认线路 —— 直接输入的字就是自定义线路名（不参与自动识别，先在整理台确认这条线才会认）</div>'));
 }
 
 /** 车站下拉内容：候选取自该行线路在库里的站名（按站序），库外站名也能填 */
@@ -5796,18 +6599,19 @@ function cbOpen(box, i, all) {
   if (!inp) return;
   box.classList.add('open');
   CB.box = box;
-  if (cbKind(box) === 'sta' && !(box._cands || []).length && box._load) box._load();
+  const kind = cbKind(box);
+  if (kind === 'sta' && !(box._cands || []).length && box._load) box._load();
   // 车站框里的旧值可能不属于新线路：这时先列出全部候选，别只留一个「用这个名称」
   const val = inp.value.trim();
-  const miss = cbKind(box) === 'sta' && val && cbStaAll(box).indexOf(val) < 0;
-  if (miss && !all) {
-    cbPaintList(box, '', true);               // 不预先高亮，回车不会误改
-  } else {
-    cbPaintList(box, all ? '' : inp.value);
-    if (all) {                                // 看全部时仍把当前值标出来
-      const k = CB.items.findIndex(r => r.name === inp.value.trim());
-      if (k >= 0) { CB.idx = k; cbHilite(box); }
-    }
+  const miss = kind === 'sta' && val && cbStaAll(box).indexOf(val) < 0;
+  // 线路框点开就列「含本段发车站」的全部线路：已填的线名不该把候选缩成一条，
+  // 用户点进来多半就是想换线。打字时 input 事件再按输入实时过滤。
+  const listAll = kind === 'line' || all || (miss && !all);
+  cbPaintList(box, listAll ? '' : inp.value, miss && !all);
+  if (kind === 'line' || all || miss) {
+    const k = CB.items.findIndex(r => r.name === val);
+    CB.idx = kind === 'line' ? k : (k >= 0 ? k : CB.idx);
+    cbHilite(box);                            // 高亮当前值，回车不会误改
   }
   cbPlace(box);
   cbKick();
@@ -5828,6 +6632,7 @@ function cbPick(box, i, name) {
     }
     CU.via[i].src = 'manual';                 // 人工选过的段才算正式经由
     cuRefreshRowTag(i);
+    cuMapSync(i, true, cbKind(box) === 'line');   // 地图立刻切到这条线并高亮本段
   }
   cbClose();
   cuCheck();
@@ -5840,6 +6645,7 @@ function cbBind(box, i) {
   if (!inp || !pop) return;
   const kind = cbKind(box);
   const field = box.dataset.field || '';
+  box._i = i;                                 // 下拉预览要知道自己是第几段（地图实时跟随）
   const write = v => {
     if (i == null || !CU.via[i]) return;
     if (kind === 'line') { CU.via[i].line = v; cuQueueRowCands(i); }
@@ -5849,10 +6655,14 @@ function cbBind(box, i) {
       CU.via[i].src = 'manual';
       cuRefreshRowTag(i);
     }
+    // 这一段改了什么，右侧地图就跟着看什么：改线路 → 换走向；改起讫站 → 挪红圈
+    cuMapSync(i, false, kind === 'line', kind === 'line' ? 300 : 180);
   };
   inp.addEventListener('focus', () => {
     inp.select();                              // 直接打字就是替换，不用先全删
     cbOpen(box, i);
+    // 点哪一段，右侧地图就看哪一段的线路走向 / 停站
+    cuMapSync(i, true, kind === 'line');
   });
   inp.addEventListener('click', () => { if (CB.box !== box) cbOpen(box, i); });
   inp.addEventListener('input', () => {
@@ -5875,6 +6685,7 @@ function cbBind(box, i) {
       if (!n) return;
       CB.idx = (CB.idx + (e.key === 'ArrowDown' ? 1 : -1) + n) % n;
       cbHilite(box);
+      cbPreviewLine(box);                     // 上下选的同时右侧地图跟着预览
       return;
     }
     if (e.key === 'Enter') {
@@ -5891,7 +6702,29 @@ function cbBind(box, i) {
     inp.focus();
     cbOpen(box, i, true);                     // ▾ 展开全部
   });
+  // 鼠标划过候选也预览（和方向键一致），别等点下去才换地图
+  pop.addEventListener('pointermove', e => {
+    if (kind !== 'line') return;
+    const it = e.target.closest('.cb-item');
+    if (!it) return;
+    const k = Number(it.dataset.k);
+    if (!Number.isFinite(k) || k === CB.idx) return;
+    CB.idx = k;
+    cbHilite(box);
+    cbPreviewLine(box);
+  });
   pop.addEventListener('click', e => {
+    const all = e.target.closest('.cb-scope-all');
+    if (all) {                                 // 过滤太紧时一键放宽
+      CU.showAllLines = true;
+      const cb = $('#ceAllLines');
+      if (cb) cb.checked = true;
+      cbPaintList(box, '');
+      const k = CB.items.findIndex(r => r.name === inp.value.trim());
+      CB.idx = k; cbHilite(box);
+      cbPlace(box); cbKick();
+      return;
+    }
     const it = e.target.closest('.cb-item');
     if (!it) return;
     const r = CB.items[Number(it.dataset.k)];
@@ -5903,13 +6736,580 @@ document.addEventListener('pointerdown', e => {
   if (CB.box && !CB.box.contains(e.target)) cbClose();
 }, true);
 
+/* ============================================================
+ * 数据校对 · 右侧「线路走向 / 停站」图
+ *
+ * 有腾讯地图 Key 就复用已加载的 TMap SDK 开第二个地图实例（真底图）；
+ * 没 Key 用 Canvas 自绘示意图：只画经纬网格 / 线路折线 / 站点，
+ * **不画国界、不搬瓦片**（PROJECT-CONTEXT 规则 14）。
+ * 数据一次只取「当前一条确认线路」的 parts + 带坐标站序，
+ * 线路 / 车站以后再增加也不会让这个面板变重。
+ * ============================================================ */
+const CUMAP = {
+  cache: new Map(), pending: new Map(), seq: 0,
+  name: '', data: null, focus: null,
+  view: { zoom: 1, dx: 0, dy: 0 },
+  backend: null, tmap: null, tLayers: [], drag: null, bound: false, ro: null,
+};
+
+function cuMapTrainStops() {
+  return ((CU.detail && CU.detail.stops) || [])
+    .filter(s => s && s.lat != null && s.lon != null);
+}
+
+function cuMapInfo(txt) {
+  const el = $('#cuMapInfo');
+  if (el) el.textContent = txt;
+}
+
+function cuMapFillInfo() {
+  const d = CUMAP.data;
+  if (d && d.name && d.found) {
+    cuMapInfo(`${d.name} · ${d.nPart} 段 / ${d.nPt} 点 · ${d.nStop} 站`
+      + (d.totalKm ? ` · 约 ${Math.round(d.totalKm)} km` : ''));
+  } else if (!CUMAP.name) {
+    cuMapInfo(`本趟车停站 ${cuMapTrainStops().length} 个 · 点任一线路框或上方搜线路看走向`);
+  } else {
+    cuMapInfo(`「${CUMAP.name}」不是整理台确认线路，暂无走向`);
+  }
+}
+
+function cuMapFit() { CUMAP.view = { zoom: 1, dx: 0, dy: 0 }; }
+
+/** 中间这一段选了什么，右侧地图就跟什么（防抖；用户平移缩放过的视野保留） */
+function cuMapSync(i, now, switchLine, delay) {
+  if (i == null || !CU.via[i]) return;
+  const fire = () => {
+    const r = CU.via[i];
+    if (!r) return;
+    const nm = (r.line || '').trim();
+    if (!nm) {                                 // 线路被清空：退回本趟车全景
+      if (switchLine && CUMAP.name) cuMapReset();
+      return;
+    }
+    // 打字打到半截（「京广」还没敲完「线」）别把地图清成「不是确认线路」：
+    // 只要这半截还是某条已确认线路的前缀，就等它打完 / 选中再切
+    if (!now && switchLine) {
+      const all = (CU.lines || []).map(x => x && x.name).filter(Boolean);
+      if (all.length && all.indexOf(nm) < 0 && all.some(n => n.startsWith(nm))) return;
+    }
+    // 只改起讫站时别把地图从别的线路（或本趟车全景）上抢走，只在已经看这条线时挪红圈
+    if (!switchLine && CUMAP.name !== nm) return;
+    cuMapShow(nm, { from: r.from, to: r.to });
+  };
+  clearTimeout(cuMapTimers.get('sync'));
+  if (now) { fire(); return; }
+  cuMapTimers.set('sync', setTimeout(fire, delay || 180));
+}
+
+/** 方向键 / 鼠标在候选里浏览时，地图先跟着预览，选中前就能看出是哪条线 */
+function cbPreviewLine(box) {
+  if (!box || cbKind(box) !== 'line') return;
+  const i = box._i;
+  if (i == null || !CU.via[i]) return;
+  const pop = box.querySelector('.cb-pop');
+  const it = pop && pop.querySelector('.cb-item.active');
+  if (!it || it.classList.contains('custom')) return;
+  const r = CB.items[Number(it.dataset.k || -1)];
+  if (!r || !r.name) return;
+  const cur = CU.via[i];
+  if ((cur.line || '').trim() === r.name) return;   // 和现在填的一样，不用预览
+  box._preview = true;
+  clearTimeout(cuMapTimers.get('preview'));
+  cuMapTimers.set('preview', setTimeout(() => {
+    const seg = CU.via[i];
+    if (!seg) return;
+    cuMapShow(r.name, { from: seg.from, to: seg.to });
+  }, 140));
+}
+
+/** 行重建（增删段 / 换车次 / 改标签）后让地图回到「中间选的那一段」，别停在不存在的线上 */
+function cuMapFollowRows() {
+  if (!CUMAP.name) return;                   // 还没选过线就保持本趟车全景，不主动拉数据
+  const segs = CU.via.map(r => (r.line || '').trim()).filter(Boolean);
+  if (!segs.length) { cuMapReset(); return; }
+  if (segs.indexOf(CUMAP.name) >= 0) {        // 当前线还在：顺手把红圈挪到这一段
+    const r = CU.via.find(x => (x.line || '').trim() === CUMAP.name);
+    if (r) { CUMAP.focus = { from: r.from, to: r.to }; cuMapDraw(); }
+    return;
+  }
+  const i = CU.via.findIndex(r => (r.line || '').trim());
+  if (i >= 0) cuMapSync(i, true, true); else cuMapReset();
+}
+
+/** 切到某条线路（下拉选中 / 点线路框 / 顶部搜索）；focus 是当前段的起讫站 */
+function cuMapShow(name, focus) {
+  const nm = String(name || '').trim();
+  if (!nm) return;
+  CUMAP.focus = focus || null;
+  if (CUMAP.name === nm && CUMAP.data) { cuMapDraw(); return; }
+  CU.mapLine = nm;
+  if (CUMAP.cache.has(nm)) {
+    CUMAP.name = nm; CUMAP.data = CUMAP.cache.get(nm);
+    cuMapFillInfo(); cuMapFit(); cuMapDraw(); return;
+  }
+  const seq = ++CUMAP.seq;
+  cuMapInfo(`正在读取「${nm}」的走向…`);
+  if (CUMAP.pending.has(nm)) return;
+  const p = api('/api/curate/lineMap', { name: nm }).then(d => {
+    CUMAP.cache.set(nm, d);
+    CUMAP.pending.delete(nm);
+    if (seq !== CUMAP.seq || CU.mapLine !== nm) return;
+    CUMAP.name = nm; CUMAP.data = d;
+    cuMapFillInfo(); cuMapFit(); cuMapDraw();
+  }).catch(e => {
+    CUMAP.pending.delete(nm);
+    if (seq === CUMAP.seq) cuMapInfo(`读取失败：${e.message}`);
+  });
+  CUMAP.pending.set(nm, p);
+}
+
+/** 换车次：回到「本趟车停站」全景，别留着上一趟车的线路 */
+function cuMapReset() {
+  ++CUMAP.seq;
+  CUMAP.name = ''; CUMAP.data = null; CUMAP.focus = null;
+  CU.mapLine = '';
+  cuMapFit(); cuMapFillInfo(); cuMapDraw();
+}
+
+function cuMapToggle() {
+  CU.mapOn = !CU.mapOn;
+  const b = $('#ceMapToggle');
+  if (b) b.textContent = CU.mapOn ? '收起走向图' : '显示走向图';
+  cuMapEnsure();
+  if (CU.mapOn) cuMapDraw();
+}
+
+function cuMapEnsure() {
+  const stage = $('#curateStage');
+  if (!stage) return;
+  if (!CUMAP.bound) { cuMapWire(); CUMAP.bound = true; }
+  stage.classList.toggle('with-map', CU.mapOn);
+  if (!CU.mapOn) return;
+  // Key 可能是页面运行中才填的：SDK 到位后允许 canvas → tmap 升级，别把后端锁死
+  if (window.TMap && !TMapSDK.disabled && CUMAP.backend === 'canvas') CUMAP.backend = null;
+  cuMapBackend();
+  cuMapKeyBadge();
+  requestAnimationFrame(() => {
+    if (CUMAP.backend === 'tmap' && CUMAP.tmap) {
+      try { CUMAP.tmap.resize(); } catch (_) { /* SDK 还没量到尺寸 */ }
+    }
+    cuMapFillInfo(); cuMapDraw();
+  });
+}
+
+/** 工具条上的 Key 按钮同时是「当前底图后端」的状态灯：
+ *  真底图 = 「腾讯底图 ✓」；填了 Key 却没起来 = 「底图未就绪」（重点排查 Key）；
+ *  没填 = 「设置底图 Key」。 */
+function cuMapKeyBadge() {
+  const b = $('#cuMapKey');
+  if (!b) return;
+  const real = CUMAP.backend === 'tmap';
+  const hasKey = !!mapKey();
+  b.textContent = real ? '腾讯底图 ✓' : (hasKey ? '底图未就绪' : '设置底图 Key');
+  b.classList.toggle('on', real);
+  b.classList.toggle('warn', !real && hasKey);
+  b.title = real
+    ? '当前是腾讯地图真底图；若仍空白，检查 Key 类型（Web 端 GL JS）与域名白名单。点这里可更换 Key'
+    : (hasKey
+      ? 'Key 已填但底图 SDK 没就绪 / 鉴权失败；点这里查看或更换 Key，检查类型、域名白名单与网络'
+      : '当前是无底图示意模式；点这里粘贴腾讯地图 Key，保存后原地生效、不刷新页面');
+}
+
+/** 用户是在页面运行中填的 Key：SDK 到位后把校对页地图升级成真底图，
+ *  换 Key 时旧实例已被销毁，这里重建；全程不刷新页面。 */
+function cuMapUpgrade() {
+  if (!window.TMap || TMapSDK.disabled) { cuMapKeyBadge(); return; }
+  CUMAP.backend = null;
+  const stage = $('#curateStage');
+  if (CU.mapOn && stage && !stage.classList.contains('hidden')) {
+    cuMapBackend();
+    requestAnimationFrame(() => {
+      if (CUMAP.tmap) { try { CUMAP.tmap.resize(); } catch (_) { } }
+      cuMapDraw();
+    });
+  }
+  cuMapKeyBadge();
+}
+
+function cuMapBackend() {
+  if (CUMAP.backend) return;
+  const tdiv = $('#cuTMap'), cv = $('#cuMapCanvas');
+  if (window.TMap && tdiv && !TMapSDK.disabled) {
+    try {
+      // 腾讯 GL JS 在 display:none 的容器里创建会拿到 0 尺寸、底图不渲染：
+      // 必须先让 #cuTMap 可见、量得到尺寸，再 new TMap.Map。
+      tdiv.innerHTML = '';
+      tdiv.classList.remove('hidden');
+      cv.classList.add('hidden');
+      CUMAP.tmap = new TMap.Map('cuTMap', {
+        center: new TMap.LatLng(35, 105), zoom: 4, viewMode: '2D',
+        showControl: false, pitch: 0, rotation: 0,
+      });
+      CUMAP.backend = 'tmap';
+      requestAnimationFrame(() => {
+        try { CUMAP.tmap && CUMAP.tmap.resize(); } catch (_) { /* SDK 还没量到尺寸 */ }
+      });
+      return;
+    } catch (e) {
+      CUMAP.tmap = null;
+      tdiv.classList.add('hidden');
+      cv.classList.remove('hidden');
+    }
+  }
+  CUMAP.backend = 'canvas';
+  tdiv.classList.add('hidden');
+  cv.classList.remove('hidden');
+  cuMapBindCanvas();
+}
+
+function cuMapBindCanvas() {
+  const cv = $('#cuMapCanvas');
+  if (!cv || cv._cuBound) return;
+  cv._cuBound = true;
+  const pos = e => {
+    const r = cv.getBoundingClientRect();
+    return [e.clientX - r.left, e.clientY - r.top];
+  };
+  cv.addEventListener('wheel', e => {
+    e.preventDefault();
+    const k = e.deltaY < 0 ? 1.18 : 1 / 1.18;
+    CUMAP.view.zoom = Math.max(0.5, Math.min(24, CUMAP.view.zoom * k));
+    cuMapDraw();
+  }, { passive: false });
+  cv.addEventListener('pointerdown', e => {
+    const [x, y] = pos(e);
+    CUMAP.drag = { x, y, dx: CUMAP.view.dx, dy: CUMAP.view.dy };
+    try { cv.setPointerCapture(e.pointerId); } catch (_) { /* 忽略 */ }
+  });
+  cv.addEventListener('pointermove', e => {
+    const [x, y] = pos(e);
+    if (CUMAP.drag) {
+      CUMAP.view.dx = CUMAP.drag.dx + (x - CUMAP.drag.x);
+      CUMAP.view.dy = CUMAP.drag.dy + (y - CUMAP.drag.y);
+      cuMapDraw();
+      return;
+    }
+    cuMapHover(x, y);
+  });
+  cv.addEventListener('pointerup', () => { CUMAP.drag = null; });
+  cv.addEventListener('pointerleave', () => {
+    CUMAP.drag = null;
+    const t = $('#cuMapTip'); if (t) t.classList.add('hidden');
+  });
+  cv.addEventListener('dblclick', () => { cuMapFit(); cuMapDraw(); });
+}
+
+/** 顶部工具条 / 线路搜索 / 地图开关（DOM 是静态的，只绑一次） */
+function cuMapWire() {
+  const q = $('#cuMapQ'), sugg = $('#cuMapSugg');
+  let timer = null;
+  const hide = () => { if (sugg) sugg.classList.add('hidden'); };
+  if (q) {
+    q.addEventListener('input', () => {
+      clearTimeout(timer);
+      const v = q.value.trim();
+      if (!v) { hide(); return; }
+      // 按线名让服务端搜、只回 20 条：线路以后上千条也不会把整份名单拉下来
+      timer = setTimeout(async () => {
+        try {
+          const d = await api('/api/curate/lineNames', { q: v, limit: 20 });
+          if (q.value.trim() !== v || !sugg) return;
+          const items = d.items || [];
+          sugg.innerHTML = items.length
+            ? items.map(x => `<div class="cu-map-sugg-i" data-nm="${esc(x.name)}">`
+              + `${esc(x.name)}<span>${x.n || ''} 站</span></div>`).join('')
+            : '<div class="cu-map-sugg-i empty">没有匹配的确认线路</div>';
+          sugg.classList.remove('hidden');
+        } catch (_) { hide(); }
+      }, 180);
+    });
+    q.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { q.value = ''; hide(); }
+      if (e.key === 'Enter') {
+        const first = sugg && sugg.querySelector('.cu-map-sugg-i[data-nm]');
+        if (first) { cuMapShow(first.dataset.nm); q.value = first.dataset.nm; hide(); }
+      }
+    });
+  }
+  if (sugg) sugg.addEventListener('click', e => {
+    const it = e.target.closest('.cu-map-sugg-i[data-nm]');
+    if (!it) return;
+    cuMapShow(it.dataset.nm);
+    if (q) q.value = it.dataset.nm;
+    hide();
+  });
+  const fit = $('#cuMapFit');
+  if (fit) fit.addEventListener('click', () => { cuMapFit(); cuMapDraw(); });
+  const hideBtn = $('#cuMapHide');
+  if (hideBtn) hideBtn.addEventListener('click', cuMapToggle);
+  const edit = $('#cuMapEdit');
+  if (edit) edit.addEventListener('click', () => {
+    const nm = CUMAP.name || (q && q.value.trim());
+    window.open('/osmedit.html' + (nm ? '?line=' + encodeURIComponent(nm) : ''), '_blank');
+  });
+  // 「显示地图」按钮在 cuRenderEditor 里动态生成，用委托
+  const editor = $('#cuEditor');
+  if (editor) editor.addEventListener('click', e => {
+    if (e.target.closest('#ceMapToggle')) cuMapToggle();
+  });
+  // 右侧地图上的 Key 入口：复用顶栏那个弹窗，填一次全站生效
+  const kb = $('#cuMapKey');
+  if (kb) kb.addEventListener('click', () => $('#btnKey').click());
+  // 三栏宽度 / 窗口尺寸变了要重画：Canvas 不会自己跟着 CSS 尺寸走，
+  // TMap 也要 resize，否则底图只画到旧宽度那一块。
+  const body = $('#cuMapBody');
+  if (body && window.ResizeObserver && !CUMAP.ro) {
+    CUMAP.ro = new ResizeObserver(() => {
+      const stage = $('#curateStage');
+      if (!CU.mapOn || !stage || stage.classList.contains('hidden')) return;
+      if (CUMAP.backend === 'tmap' && CUMAP.tmap) {
+        try { CUMAP.tmap.resize(); } catch (_) { /* SDK 还没量到尺寸 */ }
+      }
+      cuMapDraw();
+    });
+    CUMAP.ro.observe(body);
+  }
+}
+
+function cuMapPoints() {
+  const pts = [];
+  const d = CUMAP.data;
+  if (d && d.found) {
+    (d.parts || []).forEach(p => p.forEach(x => {
+      if (x && x.length > 1) pts.push([+x[0], +x[1]]);
+    }));
+    (d.stations || []).forEach(s => {
+      if (s.lat != null && s.lon != null) pts.push([+s.lon, +s.lat]);
+    });
+  }
+  cuMapTrainStops().forEach(s => pts.push([+s.lon, +s.lat]));
+  return pts.filter(p => Number.isFinite(p[0]) && Number.isFinite(p[1]));
+}
+
+function cuMapBBox() {
+  const pts = cuMapPoints();
+  if (!pts.length) return null;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  pts.forEach(([x, y]) => {
+    x0 = Math.min(x0, x); y0 = Math.min(y0, y);
+    x1 = Math.max(x1, x); y1 = Math.max(y1, y);
+  });
+  if (x1 - x0 < 0.002) { x0 -= 0.01; x1 += 0.01; }
+  if (y1 - y0 < 0.002) { y0 -= 0.01; y1 += 0.01; }
+  return { x0, y0, x1, y1, cos: Math.cos(((y0 + y1) / 2) * Math.PI / 180) || 1 };
+}
+
+function cuMapProj(lon, lat, bb, W, H) {
+  const pad = 28;
+  const wx = Math.max(1e-6, (bb.x1 - bb.x0) * bb.cos);
+  const wy = Math.max(1e-6, bb.y1 - bb.y0);
+  const k = Math.min((W - 2 * pad) / wx, (H - 2 * pad) / wy) * CUMAP.view.zoom;
+  const cx = (bb.x0 + bb.x1) / 2, cy = (bb.y0 + bb.y1) / 2;
+  return [W / 2 + (lon - cx) * bb.cos * k + CUMAP.view.dx,
+          H / 2 - (lat - cy) * k + CUMAP.view.dy, k];
+}
+
+function cuMapDraw() {
+  const stage = $('#curateStage');
+  if (!CU.mapOn || !stage || stage.classList.contains('hidden')) return;
+  if (CUMAP.backend === 'tmap') cuMapTMapDraw();
+  else cuMapCanvasDraw();
+}
+
+function cuMapCanvasDraw() {
+  const cv = $('#cuMapCanvas');
+  if (!cv || cv.classList.contains('hidden')) return;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  if (W < 20 || H < 20) return;
+  const dpr = window.devicePixelRatio || 1;
+  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) {
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  }
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.fillStyle = '#f4f8fd'; g.fillRect(0, 0, W, H);
+  const bb = cuMapBBox();
+  const empty = $('#cuMapEmpty');
+  if (!bb) {
+    if (empty) { empty.classList.remove('hidden'); empty.textContent = '这趟车还没有可用的站点坐标'; }
+    return;
+  }
+  if (empty) empty.classList.add('hidden');
+
+  // 经纬参考网格（只是坐标线，不是地图底图，不画国界）
+  g.strokeStyle = '#e5ecf5'; g.lineWidth = 1;
+  g.fillStyle = '#9aa9bd'; g.font = '10px sans-serif';
+  for (let t = 1; t < 6; t++) {
+    const lon = bb.x0 + (bb.x1 - bb.x0) * t / 6;
+    const x = cuMapProj(lon, bb.y0, bb, W, H)[0];
+    g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke();
+    g.fillText(lon.toFixed(1) + '°E', x + 3, H - 34);
+    const lat = bb.y0 + (bb.y1 - bb.y0) * t / 6;
+    const y = cuMapProj(bb.x0, lat, bb, W, H)[1];
+    g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke();
+    g.fillText(lat.toFixed(1) + '°N', 4, y - 3);
+  }
+
+  // 线路几何（多段）；没选线路时把本趟车停站连成淡线作全景
+  const d = CUMAP.data;
+  const parts = (d && d.found) ? (d.parts || []) : [];
+  const paths = parts.length ? parts : [cuMapTrainStops().map(s => [s.lon, s.lat])];
+  g.lineJoin = 'round'; g.lineCap = 'round';
+  paths.forEach(part => {
+    if (!part || part.length < 2) return;
+    const xy = part.map(x => cuMapProj(x[0], x[1], bb, W, H));
+    g.beginPath();
+    xy.forEach((p, i) => i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1]));
+    g.strokeStyle = 'rgba(255,255,255,.95)'; g.lineWidth = 6; g.stroke();
+    g.strokeStyle = parts.length ? '#1f6feb' : '#93a9c6';
+    g.lineWidth = 2.6; g.stroke();
+  });
+
+  // 线路停站：站点多了按视野抽稀，站名最多标 60 个，避免糊成一片
+  const stops = (d && d.found) ? (d.stations || []) : [];
+  const showNames = stops.length <= 60 || CUMAP.view.zoom >= 2.2;
+  const step = showNames ? 1 : Math.max(1, Math.ceil(stops.length / 160));
+  stops.forEach((s, i) => {
+    if (s.lat == null || s.lon == null || i % step) return;
+    const [x, y] = cuMapProj(s.lon, s.lat, bb, W, H);
+    if (x < -30 || x > W + 30 || y < -30 || y > H + 30) return;
+    g.beginPath(); g.arc(x, y, 2.2, 0, Math.PI * 2);
+    g.fillStyle = '#8ea2bd'; g.fill();
+    if (showNames && stops.length <= 60) {
+      g.fillStyle = '#6b7c93'; g.font = '9px sans-serif';
+      g.fillText(s.name, x + 4, y - 4);
+    }
+  });
+
+  // 本趟车经停站（橙）+ 当前段起讫站（红圈）
+  const focusKeys = new Set([cuStaKey((CUMAP.focus || {}).from),
+                             cuStaKey((CUMAP.focus || {}).to)].filter(Boolean));
+  cuMapTrainStops().forEach(s => {
+    const [x, y] = cuMapProj(s.lon, s.lat, bb, W, H);
+    g.beginPath(); g.arc(x, y, 4, 0, Math.PI * 2);
+    g.fillStyle = '#e8590c'; g.fill();
+    g.strokeStyle = '#fff'; g.lineWidth = 1.5; g.stroke();
+    g.fillStyle = '#a4400a'; g.font = 'bold 10px sans-serif';
+    g.fillText(s.name, x + 6, y - 6);
+    if (focusKeys.has(cuStaKey(s.name))) {
+      g.beginPath(); g.arc(x, y, 9, 0, Math.PI * 2);
+      g.strokeStyle = '#d92d20'; g.lineWidth = 2; g.stroke();
+    }
+  });
+
+  // 比例尺（当前缩放下 100px 约合多少公里）
+  const k = cuMapProj(bb.x0, bb.y0, bb, W, H)[2];
+  const km = 111.32 * 100 / k;
+  g.strokeStyle = '#5a6b82'; g.lineWidth = 1.5;
+  g.beginPath();
+  g.moveTo(12, H - 20); g.lineTo(112, H - 20);
+  g.moveTo(12, H - 24); g.lineTo(12, H - 16);
+  g.moveTo(112, H - 24); g.lineTo(112, H - 16);
+  g.stroke();
+  g.fillStyle = '#5a6b82'; g.font = '10px sans-serif';
+  g.fillText(`约 ${km >= 10 ? Math.round(km) : km.toFixed(1)} km`, 12, H - 7);
+}
+
+function cuMapHover(x, y) {
+  const tip = $('#cuMapTip'), cv = $('#cuMapCanvas');
+  if (!tip || !cv) return;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  const bb = cuMapBBox();
+  if (!bb) return;
+  const collect = [];
+  ((CUMAP.data && CUMAP.data.found) ? (CUMAP.data.stations || []) : [])
+    .forEach(s => collect.push(s));
+  cuMapTrainStops().forEach(s => collect.push(s));
+  let best = null, bd = 12;
+  collect.forEach(s => {
+    if (s.lat == null || s.lon == null) return;
+    const p = cuMapProj(s.lon, s.lat, bb, W, H);
+    const dist = Math.hypot(p[0] - x, p[1] - y);
+    if (dist < bd) { bd = dist; best = { s, x: p[0], y: p[1] }; }
+  });
+  if (!best) { tip.classList.add('hidden'); return; }
+  tip.textContent = best.s.name
+    + (best.s.km != null ? ` · ${Math.round(best.s.km)} km` : '');
+  tip.style.left = Math.min(W - 150, best.x + 10) + 'px';
+  tip.style.top = Math.max(4, best.y - 24) + 'px';
+  tip.classList.remove('hidden');
+}
+
+function cuMapTMapDraw() {
+  const m = CUMAP.tmap;
+  if (!m || !window.TMap) return;
+  CUMAP.tLayers.forEach(l => { try { l.setMap(null); } catch (_) { /* 忽略 */ } });
+  CUMAP.tLayers = [];
+  const toLL = (lon, lat) => {
+    const t = GCJ(lon, lat);
+    return new TMap.LatLng(t[1], t[0]);
+  };
+  const d = CUMAP.data;
+  const parts = (d && d.found) ? (d.parts || []) : [];
+  const paths = parts.filter(p => p && p.length > 1)
+    .map(p => p.map(q => toLL(q[0], q[1])));
+  const train = cuMapTrainStops();
+  if (!paths.length && train.length > 1) {
+    paths.push(train.map(s => toLL(s.lon, s.lat)));
+  }
+  if (paths.length) {
+    CUMAP.tLayers.push(new TMap.MultiPolyline({
+      map: m,
+      styles: { main: new TMap.PolylineStyle({
+        color: '#1f6feb', width: 4, lineCap: 'round', borderWidth: 0,
+      }) },
+      geometries: [{ id: 'ln', styleId: 'main', paths }], zIndex: 5,
+    }));
+  }
+  const dot = (color, r) => 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${r * 2}" height="${r * 2}">`
+    + `<circle cx="${r}" cy="${r}" r="${r - 2}" fill="${color}" stroke="#fff" stroke-width="2"/></svg>`);
+  const geos = [];
+  ((d && d.found) ? (d.stations || []) : []).forEach((s, i) => {
+    if (s.lat != null && s.lon != null) {
+      geos.push({ id: 's' + i, styleId: 'sta', position: toLL(s.lon, s.lat) });
+    }
+  });
+  train.forEach((s, i) => {
+    geos.push({ id: 't' + i, styleId: 'train', position: toLL(s.lon, s.lat) });
+  });
+  if (geos.length) {
+    CUMAP.tLayers.push(new TMap.MultiMarker({
+      map: m,
+      styles: {
+        sta: new TMap.MarkerStyle({ width: 10, height: 10,
+          anchor: { x: 5, y: 5 }, src: dot('#8ea2bd', 5) }),
+        train: new TMap.MarkerStyle({ width: 16, height: 16,
+          anchor: { x: 8, y: 8 }, src: dot('#e8590c', 8) }),
+      },
+      geometries: geos, zIndex: 6,
+    }));
+  }
+  const pts = cuMapPoints();
+  if (pts.length) {
+    let a = Infinity, b = Infinity, c = -Infinity, e = -Infinity;
+    pts.forEach(([lon, lat]) => {
+      a = Math.min(a, lon); b = Math.min(b, lat);
+      c = Math.max(c, lon); e = Math.max(e, lat);
+    });
+    if (c - a < 0.01 && e - b < 0.01) {
+      m.easeTo({ center: toLL(a, b), zoom: 11 });
+    } else {
+      m.fitBounds(new TMap.LatLngBounds(toLL(a, b), toLL(c, e)),
+        { padding: { top: 30, bottom: 30, left: 30, right: 30 } });
+    }
+  }
+}
+
 /* ---------- 「经由」里的车站候选：跟着线路走 ---------- */
 
-/** 取某条线路的车站名单（带缓存；取不到就返回空数组） */
+/** 取某条线路的车站名单（带缓存；取不到就返回空数组）
+ *  `confirmed:1` = 站序只认整理台确认的那一份（数据校对的口径，见 confvia.py） */
 async function cuLineStops(name) {
   if (CUSTA.cache.has(name)) return CUSTA.cache.get(name);
   if (CUSTA.pending.has(name)) return CUSTA.pending.get(name);
-  const p = api('/api/line/stops', { q: name })
+  const p = api('/api/line/stops', { q: name, confirmed: 1 })
     .then(d => {
       const arr = (d && d.items) || [];
       if (arr.length) CUSTA.cache.set(name, arr);
@@ -6033,12 +7433,18 @@ function cuRenderViaRows() {
       CU.via.splice(i, 1);
       cuRenderViaRows();
     });
+    // 点这一行的空白处（不是输入框 / 按钮）= 选这一段，右侧地图跟着换
+    row.addEventListener('click', e => {
+      if (e.target.closest('input, button')) return;
+      cuMapSync(i, true, true);
+    });
     const tag = row.querySelector('.ve-src.auto');
     if (tag) tag.addEventListener('click', () => cuMarkManual(i));
     cuSyncRowCands(i);                        // 异步补上这一行的车站候选
   });
   cbClose();
   cuMarkChain();                              // 链上「已加入」的勾选状态跟着变
+  cuMapFollowRows();                          // 增删段之后地图仍停在「中间选的那一段」
   cuCheck();
 }
 

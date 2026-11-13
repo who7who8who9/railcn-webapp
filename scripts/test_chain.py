@@ -50,7 +50,7 @@ ENUM_CALLS = []
 REAL_ENUM = collector.enumerate_trains        # 备份真身，第 6 步要用
 
 
-def fake_enum(job, date, delay=2.0):
+def fake_enum(job, date, delay=2.0, future=True):
     ENUM_CALLS.append(date)
     job.phase = "enum"
     job.message = "假枚举完成"
@@ -174,7 +174,7 @@ for _ in range(600):
     time.sleep(0.05)
 print("  最终:", collector.chain_status()["status"])
 
-print("\n== 6. 刷新全集：只细分顶到单页上限的前缀（以前 891 个请求）==")
+print("\n== 6. 刷新全集：只细分顶到上限的前缀 + 双日期（改号新车次）==")
 calls = []
 
 
@@ -188,10 +188,19 @@ def fake_search(keyword, date_compact, retries=2):
 
 collector._search = fake_search
 collector.enumerate_trains = REAL_ENUM
+npx = len(collector.enum_prefixes())
 job = collector.Job(PLAN[0], 4)
 collector.enumerate_trains(job, PLAN[0], delay=0)
-print("  搜索请求数:", len(calls), "（81 个一位前缀 + 10 个细分）")
-assert len(calls) == 91, len(calls)
-assert calls[81:].count("G1") == 0 and "G10" in calls[81:]
+# 默认同时搜「起始日 + 预售窗口最后一天」；G1 在两天都顶到上限 → 2×10 个细分
+print("  搜索请求数:", len(calls),
+      f"（{npx} 个前缀 × 2 天 + {20} 个细分）")
+assert len(calls) == npx * 2 + 20, (len(calls), npx * 2 + 20)
+assert calls.count("G1") == 2 and calls.count("G10") == 2, calls.count("G1")
+
+calls.clear()
+job2 = collector.Job(PLAN[0], 4)
+collector.enumerate_trains(job2, PLAN[0], delay=0, future=False)
+assert len(calls) == npx + 10, (len(calls), npx + 10)
+print("  关掉未来日期:", len(calls), f"（{npx} 个前缀 + 10 个细分）")
 
 print("\n全部通过 ✓")

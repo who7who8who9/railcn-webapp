@@ -89,6 +89,8 @@ main{flex:1;display:flex;min-height:0}
 .ld-item .nm .st.draft{color:var(--muted)}
 .ld-item .meta{display:flex;gap:6px;font-size:10.5px;color:var(--muted);flex-wrap:wrap;align-items:center}
 .ld-item .meta .k{background:#f1f4f9;border-radius:5px;padding:0 4px}
+/* 来源确认进度：线路✓ 站点✓（没确认的是灰的 ○） */
+.ld-item .meta .srcf{color:#9aa6b8;letter-spacing:-.2px}
 .ld-item .meta .s{display:inline-block;width:7px;height:7px;border-radius:2px}
 .ld-item .meta .als{display:inline-flex;gap:2px;align-items:center}
 .ld-item.pick{outline:2px solid var(--warn);outline-offset:-2px}
@@ -97,7 +99,12 @@ main{flex:1;display:flex;min-height:0}
 
 /* ---------- 地图 ---------- */
 .ld-stage{flex:1;position:relative;min-width:0;background:#f8fafc;overflow:hidden}
-.ld-canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+/* z-index:0 + isolation:isolate → 地图容器自成层叠上下文。
+   腾讯地图 / Leaflet 内部 DOM 的 z-index 再高（label、控件层常到 1000+）也翻不出
+   这个笼子，否则它们会盖住 .ld-mapinfo/.ld-mapctl 等浮窗，看着见点不着、
+   点击直接穿到底图（2026-11-03 修） */
+.ld-canvas{position:absolute;inset:0;width:100%;height:100%;display:block;
+  z-index:0;isolation:isolate}
 #ldSvg{cursor:grab;touch-action:none}
 #ldSvg.dragging{cursor:grabbing}
 /* Leaflet 自带控件位置调一下，别跟我们的按钮打架 */
@@ -105,7 +112,7 @@ main{flex:1;display:flex;min-height:0}
 .leaflet-control-attribution{font-size:10px !important;background:rgba(255,255,255,.82) !important}
 .leaflet-bar a{color:var(--text)}
 .ld-basebar{
-  position:absolute;left:12px;bottom:12px;display:flex;align-items:center;gap:4px;z-index:900;
+  position:absolute;left:12px;bottom:12px;display:flex;align-items:center;gap:4px;z-index:1100;
   background:rgba(255,255,255,.94);border:1px solid var(--line);border-radius:9px;
   padding:5px 7px;box-shadow:var(--shadow);font-size:11px;
 }
@@ -123,16 +130,16 @@ main{flex:1;display:flex;min-height:0}
   text-decoration:none;font-size:11px;
 }
 .ld-basebar .orm:hover{color:var(--rail);text-decoration:underline}
-/* Leaflet 常驻站名标签 */
+/* Leaflet 常驻站名标签 —— interactive，点标签 = 选中这一站 */
 .ld-tip{
   background:rgba(255,255,255,.9)!important;border:1px solid rgba(140,158,180,.45)!important;
   color:#33415c!important;font-size:10.5px!important;padding:0 3px!important;border-radius:3px!important;
-  box-shadow:none!important;white-space:nowrap;
+  box-shadow:none!important;white-space:nowrap;pointer-events:auto!important;cursor:pointer;
 }
 .ld-tip.sel{background:#e8590c!important;border-color:#e8590c!important;color:#fff!important;font-weight:700}
 .ld-tip::before{display:none!important}
 .ld-mapctl{
-  position:absolute;right:12px;top:12px;display:flex;flex-direction:column;gap:5px;z-index:900;
+  position:absolute;right:12px;top:12px;display:flex;flex-direction:column;gap:5px;z-index:1100;
 }
 .ld-mapctl button{
   width:30px;height:30px;border-radius:8px;border:1px solid var(--line);background:#fff;
@@ -141,7 +148,7 @@ main{flex:1;display:flex;min-height:0}
 .ld-mapctl button:hover{background:#f1f5fb}
 .ld-mapctl button.wide{width:auto;padding:0 8px;font-size:11px}
 .ld-mapinfo{
-  position:absolute;left:12px;top:12px;z-index:900;background:rgba(255,255,255,.94);border:1px solid var(--line);
+  position:absolute;left:12px;top:12px;z-index:1100;background:rgba(255,255,255,.94);border:1px solid var(--line);
   border-radius:10px;padding:8px 11px;box-shadow:var(--shadow);min-width:230px;max-width:42%;
 }
 .ld-mapinfo .t{font-weight:700;font-size:13px;display:flex;align-items:center;gap:7px}
@@ -150,7 +157,7 @@ main{flex:1;display:flex;min-height:0}
 .ld-mapinfo .r{font-size:11px;color:var(--muted);margin-top:3px;line-height:1.55}
 .ld-mapinfo .r b{color:var(--text)}
 .ld-legend{
-  position:absolute;right:12px;bottom:24px;z-index:900;background:rgba(255,255,255,.94);border:1px solid var(--line);
+  position:absolute;right:12px;bottom:24px;z-index:1100;background:rgba(255,255,255,.94);border:1px solid var(--line);
   border-radius:9px;padding:6px 9px;font-size:11px;color:var(--muted);box-shadow:var(--shadow);
   display:flex;flex-direction:column;gap:3px;
 }
@@ -170,6 +177,30 @@ main{flex:1;display:flex;min-height:0}
 
 .sec{border-bottom:1px solid var(--line-2);padding:11px 13px}
 .sec:last-child{border-bottom:none}
+/* 来源确认过的段落：左边一条绿边，一眼看出哪步做完了 */
+.sec.ok{border-left:3px solid #35b06b;padding-left:10px;background:#fbfefc}
+/* 定稿四步进度条 */
+.ld-flow{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:9px 13px;
+  border-bottom:1px solid var(--line-2);background:#f7f9fd;font-size:11.5px}
+.ld-flow .fl{padding:2px 8px;border-radius:999px;background:#eef1f6;color:#7b879b;
+  border:1px solid transparent}
+.ld-flow .fl.on{background:#e9f7ef;color:#0f7a45;border-color:#b8dfc9;font-weight:600}
+.ld-flow i{color:#c3cddd;font-style:normal}
+/* 资料库介绍 */
+.ref .rl{display:flex;align-items:baseline;gap:6px;margin-bottom:4px}
+.ref .rl b{font-size:13px}
+.ref .rl .m{font-size:11px;color:var(--muted)}
+.ref .rm{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:6px}
+.ref .rm span{font-size:10.5px;background:#f1f4f9;color:#5a6b82;border-radius:6px;padding:1px 6px}
+.ref .ri{font-size:11.5px;line-height:1.75;color:#42506a;white-space:pre-wrap;
+  max-height:260px;overflow:auto;background:#fbfcfe;border:1px solid var(--line-2);
+  border-radius:8px;padding:8px 10px}
+.ref .ru{margin-top:4px;font-size:11px}
+.ref .ru a{color:var(--accent)}
+/* 定为基本线路：整理完定稿，全项目接管（校对 / 地图 / 选经由都用这一份） */
+.sec.ld-base{background:#fbfcfe}
+.sec.ld-base.on{background:#f2fbf5}
+.sec.ld-base.on h4{color:#0f7a45}
 .sec h4{
   margin:0 0 8px;font-size:11.5px;color:var(--muted);font-weight:600;letter-spacing:.4px;
   display:flex;align-items:center;gap:7px;
@@ -202,9 +233,49 @@ main{flex:1;display:flex;min-height:0}
 .al .s.huirui{background:#1f6feb}
 .al .s.ce{background:#0f9d58}
 .al .s.osm{background:#8b93a5}
+/* 2026-11-05 新加的三套走向来源：先前漏了配色，白字没底色 = 看起来像没显示 */
+.al .s.rg{background:#0e7490}
+.al .s.hdx{background:#b45309}
+.al .s.cnrail{background:#0d9488}
 .al .x{cursor:pointer;color:var(--muted);font-size:12px;line-height:1}
 .al .x:hover{color:var(--bad)}
+/* 别名整条可点：点一下把那个来源的站序画到地图上（再点回本线） */
+.al{cursor:pointer}
+.al:hover{border-color:var(--accent);color:var(--accent)}
+.al.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent)}
 .al.add{cursor:pointer;color:var(--accent);border-style:dashed}
+
+/* ①② 候选行：点一行单选（① 走向 / ② 站点+定位），右边标体量 */
+.srcrows{display:flex;flex-direction:column;gap:4px;margin:6px 0 2px}
+.srcrow{
+  display:flex;align-items:center;gap:7px;padding:4px 7px;font-size:12px;
+  border:1px solid var(--line);border-radius:8px;background:#fbfcfe;cursor:pointer;
+}
+.srcrow:hover{border-color:var(--accent);background:#f7fafd}
+.srcrow.on{background:var(--accent-soft);border-color:var(--accent)}
+.srcrow .rd{
+  width:11px;height:11px;flex:0 0 11px;border:1.5px solid #c3ccdb;border-radius:50%;
+  background:#fff;
+}
+.srcrow.on .rd{border-color:var(--accent);box-shadow:inset 0 0 0 2.5px var(--accent)}
+.srcrow .s{font-size:9.5px;color:#fff;border-radius:4px;padding:0 4px;line-height:14px;flex:0 0 auto}
+.srcrow .s.lib{background:#0f2d52}
+.srcrow .s.custom{background:#6b46c1}
+.srcrow .s.huirui{background:#1f6feb}
+.srcrow .s.ce{background:#0f9d58}
+.srcrow .s.osm{background:#8b93a5}
+.srcrow .s.rg{background:#0e7490}
+.srcrow .s.hdx{background:#b45309}
+.srcrow .s.cnrail{background:#0d9488}
+.srcrow .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.srcrow .m{color:var(--muted);font-size:10.5px;white-space:nowrap}
+.srcrow .x{cursor:pointer;color:var(--muted);font-size:12px;line-height:1;padding:0 2px}
+.srcrow .x:hover{color:var(--bad)}
+
+/* ③ 合并保存：走向 / 站点 / 合成一条，三行对照 */
+.mergebox{background:#f8fafc;border:1px solid var(--line);border-radius:9px;padding:7px 9px;margin:6px 0}
+.mergebox .mrow{display:flex;gap:8px;font-size:11.5px;line-height:1.9;color:var(--text)}
+.mergebox .mrow label{width:34px;flex:0 0 34px;color:var(--muted)}
 
 .stops{max-height:340px;overflow:auto;border:1px solid var(--line);border-radius:9px}
 .st{display:flex;align-items:center;gap:6px;padding:3px 7px;font-size:12px;border-bottom:1px solid #f4f6fa}
@@ -225,6 +296,7 @@ main{flex:1;display:flex;min-height:0}
 }
 .st .op button:hover{background:#e8edf5;color:var(--text)}
 .st .op button.del:hover{background:#fdecea;color:var(--bad)}
+.st .op button.ins:hover{background:#e4f6ec;color:var(--ok)}
 .st.nocoord .nm{color:var(--warn)}
 
 .kv{display:flex;gap:8px;font-size:11.5px;color:var(--muted);flex-wrap:wrap}
@@ -242,12 +314,15 @@ main{flex:1;display:flex;min-height:0}
 .cand .m{color:var(--muted);font-size:10.5px}
 
 /* ---------- 弹窗 ---------- */
+/* z-index 要压过地图控件（.ld-mapctl/.ld-mapinfo 是 900），
+   否则弹框浮在地图上却点不动（2026-11-03 修） */
 .modal{position:fixed;inset:0;background:rgba(16,24,40,.34);display:flex;align-items:center;
-  justify-content:center;z-index:60}
+  justify-content:center;z-index:2000}
 .modal-card{
   background:#fff;border-radius:14px;box-shadow:0 18px 50px rgba(16,24,40,.24);
   width:520px;max-width:92vw;max-height:82vh;display:flex;flex-direction:column;overflow:hidden;
 }
+.modal-card.wide{width:720px}
 .modal-card h3{margin:0;padding:14px 16px 10px;font-size:14px}
 .modal-body{padding:0 16px 8px;overflow:auto;flex:1}
 .modal-foot{display:flex;align-items:center;gap:8px;padding:10px 16px 14px;border-top:1px solid var(--line-2)}
@@ -262,10 +337,20 @@ main{flex:1;display:flex;min-height:0}
 .pick .m{margin-left:auto;color:var(--muted);font-size:10.5px}
 .pick .s{font-size:9.5px;color:#fff;border-radius:4px;padding:0 4px;line-height:14px}
 
+/* ---------- 使用说明 ---------- */
+.md-help{font-size:12.5px;line-height:1.75;color:var(--text)}
+.md-help .lead{margin:2px 0 10px;padding:8px 10px;background:#f6f9fd;border-left:3px solid var(--rail);
+  border-radius:0 8px 8px 0;color:#2c3a52}
+.md-help h4{margin:13px 0 5px;font-size:12.5px;color:var(--rail)}
+.md-help ol,.md-help ul{margin:4px 0 4px;padding-left:20px}
+.md-help li{margin:3px 0}
+.md-help code{background:#f1f4f9;border-radius:4px;padding:0 4px;font-size:11.5px}
+.md-help b{color:#0f2d52}
+
 .toast{
   position:fixed;left:50%;bottom:28px;transform:translateX(-50%);
   background:#131b2b;color:#fff;padding:8px 16px;border-radius:9px;font-size:12.5px;
-  box-shadow:0 10px 28px rgba(16,24,40,.3);z-index:99;opacity:0;transition:opacity .18s,transform .18s;
+  box-shadow:0 10px 28px rgba(16,24,40,.3);z-index:2100;opacity:0;transition:opacity .18s,transform .18s;
   pointer-events:none;
 }
 .toast.on{opacity:1;transform:translateX(-50%) translateY(-4px)}

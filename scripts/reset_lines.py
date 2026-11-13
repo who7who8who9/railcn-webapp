@@ -55,6 +55,8 @@ BACKUP_ROOT = os.path.join(BASE, "data", "backup")
 # rail.db 里要清的线路表（顺序无关，全在一个事务里）
 RAIL_TABLES = [
     "line_custom", "line_override", "line_src_pick", "line_src_fix",
+    # 同一条线的默认来源版本（京沪线 → 京沪线（底表））：线都清了，这个勾也没意义
+    "line_default",
     "line_osm", "line_osm_stop", "line_ce", "line_ce_stop",
     "station_osm_line", "line_geom",
     # 线路资料库（辉睿 844 条 + 站表）：默认一起清，--keep-catalog 才留

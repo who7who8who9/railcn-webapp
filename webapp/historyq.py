@@ -10,16 +10,19 @@ historyq.py — 历史数据查询
 三张表的关系：
   trains     每日枚举到的可售车次        → 某日有该车次 = 当天开行
   routes     已下载的经停站（raw JSON）  → 有记录 = 停站已入库
-  day_skip   试过但查不到经停站的车次     → 明确「当天不开行」
+  day_skip   最近一次查验没拿到经停站     → 「当时未查到」，不是永久结论
 
 单日状态判定顺序（从上往下，命中即止）：
-  routes 命中       → open   开行，停站已存
-  day_skip 命中     → skip   明确不开行
-  trains 命中       → open   开行，但停站没下
-  该日 trains 非空  → skip   推断：当天枚举里没有这趟
-  该日无任何采集    → nodata 不知道
+  routes 命中           → open   开行，停站已存
+  day_skip 且仍在屏蔽期 → skip   当时未查到（旧文案叫「不开行」）
+  day_skip 已放行待复核 → nodata 待复核，下一轮下载会重查（不冒充开行/不开行）
+  trains 命中           → open   开行，但停站没下
+  该日 trains 非空      → skip   推断：当天枚举里没有这趟
+  该日无任何采集        → nodata 不知道
 
-注意：开行与否以 12306「当日可售车次」为准，停运但留有数据的车次不会出现在这里。
+注意：12306 在预售期滚动放票、临时加开、接口偶发空响应时都会返回空 body，
+「当时查不到」不等于「这天不开行」。day_skip 带复核期限（expire），
+发车日过去后才算终态；开行与否始终以拿到经停站为准。
 """
 from __future__ import annotations
 
@@ -33,10 +36,21 @@ import railcore
 WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
 MAX_DAYS = 400          # 一次查询最多覆盖的天数，避免全表长扫
 
-TYPE_LABEL = {
+# 2026-11-25 车次改号：同一字母新旧含义不同（T 旧=特快 / 新=高速动车组；K 旧=快速 /
+# 新=高速动车；N 旧=纯数字车次 / 新=快速普速；新增 V 普通快速、X 超高速）。
+# 按日期分时代取名字，别用一套标签硬套两代数据（docs/renumber-2026.md）。
+RENUM_CUTOFF = "2026-11-25"
+TYPE_LABEL_OLD = {
     "G": "高铁", "D": "动车", "C": "城际", "Z": "直达特快", "T": "特快",
     "K": "快速", "S": "市郊", "Y": "旅游", "N": "数字车次",
+    "V": "V 字头", "X": "X 字头",
 }
+TYPE_LABEL_NEW = {
+    "X": "超高速", "G": "高铁", "T": "高速动车组", "K": "高速动车",
+    "D": "动车", "C": "城际", "S": "市郊",
+    "Z": "直达特快", "N": "快速普速", "V": "普通快速", "Y": "旅游",
+}
+TYPE_LABEL = TYPE_LABEL_NEW        # 兼容旧引用（默认按新时代）
 
 # trains.type 里除了字母，还混着纯数字车次的首字符（4/5/6/7/8…），统一归到 N
 _TYPE_EXPR = "CASE WHEN type GLOB '[A-Z]' THEN type ELSE 'N' END"
@@ -44,8 +58,11 @@ _TYPE_EXPR = "CASE WHEN type GLOB '[A-Z]' THEN type ELSE 'N' END"
 _ENSURED = False
 
 
-def _label(t: str) -> str:
-    return TYPE_LABEL.get(t, t)
+def _label(t: str, date: Optional[str] = None) -> str:
+    """车种名按日期分时代：date >= 切换日用新版，否则旧版；date 为空按新版。"""
+    d = (date or "")[:10]
+    book = TYPE_LABEL_NEW if (not d or d >= RENUM_CUTOFF) else TYPE_LABEL_OLD
+    return book.get(t, TYPE_LABEL_NEW.get(t, t))
 
 
 def ensure_indexes() -> None:
@@ -219,9 +236,14 @@ def train_calendar(code: str, date_from: Optional[str] = None,
                  (x.get("arrive_time") or "").replace("----", ""),
                  (x.get("start_time") or "").replace("----", ""))
                 for x in raw)
-        skipped = {r["date"] for r in c.execute(
-            "SELECT date FROM day_skip WHERE code=? AND date BETWEEN ? AND ?",
-            (code, df, dt_))}
+        # SELECT * 是故意的：老库可能还没升级出 expire 列（collector.init_db 会加），
+        # 没有这一列就按「旧结论仍有效」处理，不报错。
+        skipped, rechecking = set(), set()
+        for r in c.execute(
+                "SELECT * FROM day_skip WHERE code=? AND date BETWEEN ? AND ?",
+                (code, df, dt_)):
+            exp = r["expire"] if "expire" in r.keys() else 1
+            (rechecking if exp == 0 else skipped).add(r["date"])
         covered = _enumerated_dates(c, df, dt_)
         known = c.execute(
             """SELECT 1 FROM trains WHERE code=?
@@ -254,6 +276,8 @@ def train_calendar(code: str, date_from: Optional[str] = None,
             state, has_route = "open", True
         elif s in skipped:
             state, has_route = "skip", False
+        elif s in rechecking:
+            state, has_route = "nodata", False   # 已放行待复核，别冒充「不开行」
         elif meta:
             state, has_route = "open", False
         elif s in covered:
@@ -274,6 +298,8 @@ def train_calendar(code: str, date_from: Optional[str] = None,
         }
         if state == "skip" and s not in skipped:
             row["inferred"] = True
+        if s in rechecking:
+            row["rechecking"] = True
 
         # 车次信息（trains 的起讫）和停站表（routes 的首尾站）打架：
         # 常见于同号同编号套跑不同区段，12306 两个接口给出的结果互相矛盾。
@@ -443,7 +469,7 @@ def type_stats(date_from: Optional[str] = None, date_to: Optional[str] = None,
         open_times = sum(open_days)
         skip_times = sum(max(0, pool - v) for v in open_days)
         types.append({
-            "type": t, "label": _label(t),
+            "type": t, "label": _label(t, dt_),      # 按查询区间末日判断新旧时代
             "pool": pool,
             "unionInRange": unions.get(t, 0),
             "openTimes": open_times,
@@ -504,8 +530,8 @@ def type_stats(date_from: Optional[str] = None, date_to: Optional[str] = None,
             })
         row = next((x for x in types if x["type"] == fk), None)
         out["focus"] = {
-            "type": fk, "label": _label(fk),
-            "summary": row or {"type": fk, "label": _label(fk), "pool": pools.get(fk, 0),
+            "type": fk, "label": _label(fk, dt_),
+            "summary": row or {"type": fk, "label": _label(fk, dt_), "pool": pools.get(fk, 0),
                                "openTimes": 0, "skipTimes": 0, "avgOpen": 0,
                                "openDays": 0, "unionInRange": 0},
             "days": daily_f,
@@ -526,14 +552,18 @@ def stops_of(code: str, date: str) -> dict:
         r = c.execute(
             "SELECT raw FROM routes WHERE code=? AND date=?", (code, date)).fetchone()
         skipped = c.execute(
-            "SELECT 1 FROM day_skip WHERE code=? AND date=?", (code, date)).fetchone()
+            "SELECT * FROM day_skip WHERE code=? AND date=?", (code, date)).fetchone()
         meta = c.execute(
             "SELECT train_no, type, start_sta, end_sta, stop_count FROM trains WHERE code=? AND date=?",
             (code, date)).fetchone()
     if not r or not r["raw"]:
+        exp = (skipped["expire"] if "expire" in skipped.keys() else 1) if skipped else None
+        reason = ("还没下载这天的经停站" if not skipped else
+                  "当时未查到经停站，已标记待复核（下一轮下载会重查）" if exp == 0 else
+                  "当时未查到经停站（可能后来开放，可在数据下载页点「复核旧标记」）")
         return {
             "code": code, "date": date, "found": False,
-            "reason": "不开行（当天查不到经停站）" if skipped else "还没下载这天的经停站",
+            "reason": reason,
             "meta": dict(meta) if meta else None,
             "stops": [],
         }

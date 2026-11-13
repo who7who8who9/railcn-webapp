@@ -1,0 +1,124 @@
+:root{
+  --bg:#f5f6f8; --panel:#ffffff; --border:#e3e6eb; --text:#1f2329; --muted:#6b7280;
+  --accent:#2563eb; --accent-d:#1d4ed8; --warn:#d97706; --warn-d:#b45309;
+  --track:#d93025; --station:#2563eb; --ok:#16a34a;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+  color:var(--text);background:var(--bg)}
+.oe-app{display:flex;flex-direction:column;height:100vh}
+
+/* 顶栏 */
+.oe-top{display:flex;align-items:center;gap:14px;padding:10px 16px;background:var(--panel);
+  border-bottom:1px solid var(--border)}
+.oe-back{color:var(--muted);text-decoration:none;font-size:14px}
+.oe-back:hover{color:var(--text)}
+.oe-title{font-size:16px;font-weight:700;flex:0 0 auto}
+.oe-sub{font-size:12px;color:var(--muted);font-weight:400;margin-left:6px}
+.oe-top-actions{margin-left:auto;display:flex;gap:8px}
+
+/* 主体 */
+.oe-body{flex:1;display:flex;min-height:0}
+.oe-side{width:340px;min-width:340px;background:var(--panel);border-right:1px solid var(--border);
+  overflow:auto;padding:12px}
+.oe-stage{position:relative;flex:1;min-width:0;isolation:isolate;background:#e9edf2}
+#oeMap,#oeCanvas{position:absolute;inset:0;width:100%;height:100%;z-index:0}
+
+/* 侧栏卡片 */
+.oe-sec{border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:12px;
+  background:#fff}
+.oe-sec-h{font-size:13px;font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+.oe-mini{margin-left:auto;font-weight:400;color:var(--muted);font-size:11px}
+.oe-hint{font-size:11px;color:var(--muted);line-height:1.5;margin-top:8px}
+.oe-in{width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:14px;outline:none}
+.oe-in:focus{border-color:var(--accent)}
+.oe-range{width:100%;accent-color:var(--accent)}
+.btn{border:1px solid var(--border);background:#fff;color:var(--text);border-radius:8px;
+  padding:7px 12px;font-size:13px;cursor:pointer;transition:.15s}
+.btn:hover{border-color:var(--accent);color:var(--accent)}
+.btn.sm{padding:5px 9px;font-size:12px}
+.btn.block{width:100%;margin-top:8px}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.primary:hover{background:var(--accent-d);color:#fff}
+.btn.warn{background:var(--warn);border-color:var(--warn);color:#fff}
+.btn.warn:hover{background:var(--warn-d);color:#fff}
+.btn.on{background:var(--accent-d);border-color:var(--accent-d);color:#fff}
+.oe-tools{display:flex;flex-wrap:wrap;gap:6px}
+
+/* 新建线路 */
+.oe-newrow{display:flex;gap:6px;align-items:center;margin-bottom:8px}
+.oe-newrow .oe-in{flex:1;min-width:0}
+.oe-newrow .btn{flex:0 0 auto;white-space:nowrap}
+.oe-sel{padding:5px 6px;border:1px solid var(--border);border-radius:8px;font-size:12px;
+  background:#fff;color:var(--text);cursor:pointer}
+.oe-addsta{display:flex;gap:6px;margin-top:8px}
+.oe-addsta .oe-in{flex:1;min-width:0}
+.oe-sta-list{max-height:260px;overflow:auto;margin-top:8px;border:1px solid var(--border);
+  border-radius:8px;background:#fff}
+.oe-sta{display:flex;align-items:center;gap:8px;padding:5px 9px;border-bottom:1px solid #f0f1f3;
+  font-size:12px;cursor:pointer}
+.oe-sta:last-child{border-bottom:none}
+.oe-sta:hover{background:#f7f9fc}
+.oe-sta input[type=checkbox]{margin:0;accent-color:var(--accent);flex:0 0 auto}
+.oe-sta .nm{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.oe-sta .km{color:var(--muted);font-variant-numeric:tabular-nums;flex:0 0 auto}
+.oe-sta .dist{color:#9aa3af;font-size:11px;flex:0 0 auto}
+.oe-sta.off .nm{color:#b0b6bf;text-decoration:line-through}
+.oe-sta-empty{padding:10px;font-size:12px;color:var(--muted);text-align:center}
+
+/* 线路列表 */
+.oe-list{max-height:300px;overflow:auto;margin-top:8px;border:1px solid var(--border);border-radius:8px}
+.oe-item{padding:8px 10px;border-bottom:1px solid #f0f1f3;cursor:pointer;display:flex;
+  justify-content:space-between;gap:8px;align-items:center}
+.oe-item:last-child{border-bottom:none}
+.oe-item:hover{background:#eef4ff}
+.oe-item.active{background:#dbeafe}
+.oe-item .nm{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px}
+.oe-item .meta{font-size:11px;color:var(--muted);white-space:nowrap}
+.oe-item .tag{display:inline-block;font-size:10px;padding:1px 5px;border-radius:6px;
+  background:#eef2f7;color:var(--muted);margin-left:4px}
+.oe-item .tag.edit{background:#fef3c7;color:var(--warn-d)}
+/* 整理台已确认线路：线名标红、排最前（2026-11-10）。改完写回 ld_geom，
+   不动 ld_line 的确认字段，所以保存完仍是确认线路。 */
+.oe-item.confirmed{border-left:3px solid #d93025;background:#fff8f7}
+.oe-item.confirmed .nm{color:#c5221f}
+.oe-item.confirmed:hover{background:#ffeceb}
+.oe-item.confirmed.active{background:#ffe0dd}
+.oe-item.confirmed.active .nm{color:#a50e0e}
+.oe-item .tag.cf{background:#fde8e7;color:#a50e0e;font-weight:600}
+.oe-cf-num{color:#c5221f;font-weight:600}
+.oe-cf-tip{color:#a50e0e}
+.oe-cf-badge{display:inline-block;font-size:10px;font-weight:600;padding:1px 6px;
+  border-radius:6px;background:#fde8e7;color:#a50e0e;margin-right:4px;vertical-align:1px}
+.oe-hint code{font-size:11px;background:#eef2f7;padding:0 3px;border-radius:3px}
+
+/* 状态条 */
+.oe-stat{font-size:12px;line-height:1.7;background:#f8fafc}
+.oe-stat b{color:var(--text)}
+.oe-stat.is-new{background:#fff7ed;border-color:#fed7aa}
+.oe-tag-new{display:inline-block;font-size:10px;font-weight:400;padding:1px 6px;border-radius:6px;
+  background:#fed7aa;color:var(--warn-d);margin-left:4px;vertical-align:1px}
+
+/* 地图浮层 */
+.oe-mapbar{position:absolute;left:12px;bottom:14px;z-index:5;display:flex;gap:10px;align-items:center}
+.oe-badge{background:rgba(255,255,255,.92);border:1px solid var(--border);border-radius:8px;
+  padding:4px 10px;font-size:12px;color:var(--muted)}
+.oe-zoom{font-size:11px;color:var(--muted)}
+.oe-toast{position:absolute;left:50%;top:16px;transform:translateX(-50%);z-index:20;
+  background:rgba(31,35,41,.9);color:#fff;padding:8px 14px;border-radius:8px;font-size:13px}
+.hidden{display:none!important}
+
+/* 弹窗 */
+.oe-modal{position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;
+  justify-content:center;z-index:50}
+.oe-modal-card{background:#fff;border-radius:12px;padding:20px 22px;max-width:420px;width:92%}
+.oe-modal-card h3{margin:0 0 10px;font-size:16px}
+.oe-modal-card p{font-size:13px;color:var(--muted);line-height:1.6}
+.oe-modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
+.oe-small{font-size:11px;color:var(--muted)}
+.oe-count{font-size:11px;color:var(--muted);margin-top:6px;min-height:14px}
+.oe-chk{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);margin-top:8px;cursor:pointer}
+.oe-chk input{margin:0;accent-color:var(--accent)}
+.oe-more{padding:8px 10px;text-align:center;font-size:11px;color:var(--muted);cursor:pointer;background:#f8fafc;border-top:1px solid var(--border)}
+.oe-more:hover{background:#eef4ff;color:var(--accent)}
+.oe-item .meta{flex:1;text-align:right;overflow:hidden;text-overflow:ellipsis}

@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>列车位置地图 · railcn</title>
+<link rel="stylesheet" href="/trainmap.css">
+</head>
+<body>
+<div class="tm-app">
+
+  <header class="tm-top">
+    <a class="tm-back" href="/" title="返回主页面">← 返回</a>
+    <div class="tm-title">🚄 列车位置地图
+      <span class="tm-sub" id="tmClock">—</span>
+    </div>
+    <div class="tm-note" title="12306 不提供列车 GPS；本页按时刻表计算位置，晚点会有偏差">
+      ⚠ 时刻表推算位置，非 GPS 实时定位
+    </div>
+    <div class="tm-top-actions">
+      <a class="btn ghost sm" href="/osmedit.html" title="在腾讯地图上画 / 改一条线路的 OSM 走向">走向编辑器</a>
+      <button id="tmKey" class="btn ghost sm" title="设置腾讯地图 Key（和主页面共用）">地图底图</button>
+      <button id="tmRebuild" class="btn ghost sm" title="库里新下载了经停站时，点这里重建位置索引">重建索引</button>
+      <button id="tmReload" class="btn primary sm">刷新</button>
+    </div>
+  </header>
+
+  <div class="tm-body">
+    <aside class="tm-side">
+
+      <section class="tm-sec">
+        <div class="tm-sec-h">① 查询条件 <button id="tmReset" class="tm-mini">清空</button></div>
+
+        <label class="tm-lb">车次号 / 起讫站关键词</label>
+        <input id="tmQ" class="tm-in" placeholder="如 G1、京沪、上海虹桥（回车即查）">
+
+        <label class="tm-lb">车种（可多选，不选=全部）</label>
+        <div class="tm-chips" id="tmTypes"></div>
+
+        <div class="tm-2col">
+          <div><label class="tm-lb">始发站</label><input id="tmFrom" class="tm-in" placeholder="北京"></div>
+          <div><label class="tm-lb">终到站</label><input id="tmTo" class="tm-in" placeholder="上海"></div>
+        </div>
+        <label class="tm-lb">途经站（含起讫）</label>
+        <input id="tmStation" class="tm-in" placeholder="如 郑州东">
+
+        <label class="tm-lb">运行状态</label>
+        <div class="tm-chips" id="tmStatus">
+          <button class="chip on" data-v="in">在途（运行+停靠）</button>
+          <button class="chip" data-v="run">仅运行中</button>
+          <button class="chip" data-v="stop">仅停靠中</button>
+        </div>
+
+        <label class="tm-chk"><input type="checkbox" id="tmInView"> 只统计当前地图视野内</label>
+        <label class="tm-chk"><input type="checkbox" id="tmHideAssumed"> 隐藏「推定开行」的车次</label>
+      </section>
+
+      <section class="tm-sec">
+        <div class="tm-sec-h">② 时间（可回放到任意时刻）
+          <button id="tmNow" class="tm-mini primary">⏱ 回到实时</button>
+        </div>
+        <input type="datetime-local" id="tmWhen" class="tm-in" step="60">
+        <div class="tm-timebtns">
+          <button data-d="-60">−1时</button><button data-d="-10">−10分</button>
+          <button data-d="-1">−1分</button><button data-d="1">+1分</button>
+          <button data-d="10">+10分</button><button data-d="60">+1时</button>
+          <button id="tmPlay" class="tm-play">▶ 播放</button>
+        </div>
+        <div class="tm-hint" id="tmTimeHint">实时模式：每 30 秒自动刷新一次位置</div>
+      </section>
+
+      <section class="tm-sec tm-stat" id="tmStat">正在计算…</section>
+
+      <section class="tm-sec tm-sec-list">
+        <div class="tm-sec-h">③ 结果 <span id="tmListCount" class="tm-count"></span>
+          <select id="tmSort" class="tm-sel">
+            <option value="code">按车次号</option>
+            <option value="speed">按速度</option>
+            <option value="pct">按进度</option>
+            <option value="type">按车种</option>
+          </select>
+        </div>
+        <div class="tm-list" id="tmList"></div>
+      </section>
+    </aside>
+
+    <main class="tm-stage">
+      <section class="tm-detail tm-float hidden" id="tmDetail"></section>
+      <div id="tmMap"></div>
+      <canvas id="tmCanvas" class="hidden"></canvas>
+      <div class="tm-mapbar">
+        <span class="tm-badge" id="tmMapMode">底图加载中…</span>
+        <label class="tm-lbinline">标注
+          <select id="tmLabelMode" class="tm-sel">
+            <option value="auto">自动（按数量）</option>
+            <option value="full">全部：车次号+起讫站</option>
+            <option value="code">只标车次号</option>
+            <option value="none">不标注</option>
+          </select>
+        </label>
+        <span class="tm-zoom" id="tmZoom"></span>
+      </div>
+      <div class="tm-legend">
+        <b>图例</b>
+        <span><i style="background:#e8590c"></i>运行中</span>
+        <span><i style="background:#1f6feb"></i>停靠中</span>
+        <span><i style="background:#8a5cf6"></i>聚合（数字=趟数）</span>
+        <span title="已整理确定的线路，按库里的真实走向折线画"><i style="background:#d93025;width:15px;height:3px;border-radius:2px"></i>实际走向</span>
+        <span title="这条线路还没有真实走向，只能停站间直线连"><i style="background:#f0a04b;width:15px;height:2px;border-radius:2px"></i>站间直线</span>
+        <span class="tm-legend-note">数字簇可点开 / 放大自动拆散；点击列车看详情</span>
+      </div>
+      <div class="tm-toast hidden" id="tmToast"></div>
+    </main>
+  </div>
+
+  <div class="tm-modal hidden" id="tmKeyModal">
+    <div class="tm-modal-card">
+      <h3>地图底图设置</h3>
+      <p>本页使用<b>腾讯地图</b>作底图。Key 与主页面「地图 Key」按钮（以及数据校对右侧地图）共用，填一次全站生效；
+         不填则自动切换为<b>自绘铁路网模式</b>（离线、无需联网，只画车站散点和列车位置）。</p>
+      <input id="tmKeyInput" class="tm-in" placeholder="粘贴腾讯位置服务 Key（留空=自绘模式）">
+      <div class="tm-modal-actions">
+        <button class="btn ghost" id="tmKeyCancel">取消</button>
+        <button class="btn primary" id="tmKeySave">保存并重载</button>
+      </div>
+      <p class="tm-small">Key 只保存在本机浏览器 localStorage，不会写进代码或上传。</p>
+    </div>
+  </div>
+</div>
+
+<script src="/trainmap.js"></script>
+</body>
+</html>

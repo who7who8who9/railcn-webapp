@@ -398,7 +398,12 @@ def main():
         src, dst = SRC, DST
     else:
         picked = find_pair()
-        assert picked, "库里找不到「同起讫点 + 自动认全」的车次组"
+        if not picked:
+            # 2026-11-04 起：车次改号已切到新口径，老校正和老待校对行都清空了，
+            # 新号出现 + 重新扫描之前库里本来就没有「同起讫点 + 自动认全」的样本。
+            # 这不是代码坏了，明确跳过，别当成回归失败。
+            print("校对清单为空（改号切换后的正常状态）——先跑一次「重新扫描」再测，跳过")
+            return
         src, dst, f, t = picked
         print(f"样本：{src} / {dst}（{f} → {t}）")
     try:

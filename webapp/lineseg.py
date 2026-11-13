@@ -28,6 +28,7 @@ import threading
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import cnrail
+import linegroup
 import railcore
 import railgeom
 
@@ -914,21 +915,50 @@ def line_sources(name: str) -> List[dict]:
         return out
 
     ln = cnrail.line(name)
+    cur_name = ""
+    ms: List[dict] = []
+    try:
+        ms = linegroup.members(name)
+    except Exception:                        # noqa: BLE001
+        ms = []
+    # 同一条线有多个「来源版本」（备份导回来的「京沪线（底表）/（OSM）/（自建）/…」）时，
+    # 版本条上把它们**平铺**出来（含当前看的这一份），每份都能点、都能 ★ 设默认。
+    # 只在单版本时才走下面「当前这条线」的老路子，免得同一份出现两遍。
+    if len(ms) > 1:
+        for m in ms:
+            nm = str(m.get("name") or "")
+            mln = cnrail.line(nm) or {}
+            st = mln.get("stations") or []
+            if len(st) < 2:
+                continue
+            short = m["origin"] or ("GeoJSON" if mln.get("source") == "geojson" else "备份")
+            out.append({"source": "v", "kind": "member",
+                        "label": (short or "导入") + "（导入）", "short": short,
+                        "sourceName": nm, "n": len(st),
+                        "km": m.get("km") if m.get("km") is not None else mln.get("totalKm"),
+                        "first": st[0].get("name"), "last": st[-1].get("name"),
+                        "reversed": False,
+                        "kmDone": sum(1 for x in st if x.get("km") is not None)})
+        ln = None                            # 当前这份已在上面平铺过
     if ln and len(ln.get("stations") or []) >= 2:
         st = ln["stations"]
+        cur_name = str(ln.get("name") or name)
         src = "custom" if ln.get("custom") else "lib"
         label = _SRC_LABEL[src]
         # 从备份 / GeoJSON 导入的线，站序确实算「自建」那一档，但徽标写「自建」会跟
-        # 线名后缀打架（「京沪线（底表）· 自建 150站」）。这里给个更准的短名，
-        # 前端优先用它；source 键不动（`from=custom` 取站序还照旧）
+        # 线名后缀打架（「京沪线（底表）· 自建 150站」）。线名里带了来源后缀就用后缀
+        # 当短名（底表 / OSM / 线路资料库）；没有后缀才退回 备份 / GeoJSON。
         short = ""
+        _base, _ori = linegroup.split(cur_name)
         ori = str(ln.get("source") or "")
-        if ori == "backup":
+        if _ori:
+            label, short = _ori + "（导入）", _ori
+        elif ori == "backup":
             label, short = "备份导入", "备份"
         elif ori == "geojson":
             label, short = "GeoJSON 导入", "GeoJSON"
         out.append({"source": src, "label": label, "short": short,
-                    "sourceName": ln.get("name"), "n": len(st),
+                    "sourceName": cur_name, "n": len(st),
                     "km": ln.get("totalKm"),
                     "first": st[0].get("name"), "last": st[-1].get("name"),
                     "reversed": False,

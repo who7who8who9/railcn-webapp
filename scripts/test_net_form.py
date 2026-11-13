@@ -82,20 +82,9 @@ def main():
             bad.append("详情只占 %dpx（面板 %dpx），被空列表挤到下半屏" % (det[3], pane[3]))
         pg.locator("#paneNet").screenshot(path=os.path.join(SHOT, "station.png"))
 
-        # ---------- 站站查询 ----------
-        pg.click('[data-tab="od"]')
-        pg.wait_for_timeout(300)
-        f, t, sw = box(pg, "#odFrom"), box(pg, "#odTo"), box(pg, "#btnSwap")
-        print("出发:", f, "到达:", t, "交换:", sw)
-        if abs(f[2] - t[2]) > 2:
-            bad.append("出发/到达 不等宽（%d / %d）" % (f[2], t[2]))
-        if f[2] < 100:
-            bad.append("出发输入框被挤到 %dpx" % f[2])
-        if not (f[0] + f[2] <= sw[0] and sw[0] + sw[2] <= t[0] + 1):
-            bad.append("交换按钮没夹在出发/到达中间")
-        pg.locator("#paneOD").screenshot(path=os.path.join(SHOT, "od.png"))
-
         # 表单行仍然是 flex（不是同起讫点列表那套六列 grid）
+        # 注：首页的「站站查询」页签 2026-11-05 按用户要求删了，这里不再切页签，
+        # 车站/线路页的查询框还在用 .od-form，仍旧盯这一条。
         disp = pg.evaluate("() => getComputedStyle(document.querySelector('.od-form .od-row')).display")
         print("表单行 display:", disp)
         if disp != "flex":

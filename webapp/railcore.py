@@ -36,12 +36,14 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 import routestore  # noqa: E402  经停站存储：一天一条指针 + 内容按趟去重
+import stationcoords                   # noqa: E402  车站多坐标候选（只读，供车站卡片确认）
 
 import config as rail_config            # noqa: E402
 import trainclaw                        # noqa: E402
 import cnrail                            # noqa: E402   cnrail_data_v2 静态知识库
 import railgeom                          # noqa: E402   OSM 线路几何 / 12306 站资料
-import railosm                           # noqa: E402   车次路线的 OSM 版
+import railosm                           # noqa: E402   车次路线的 OSM 版（原画法，保留）
+import routeshape                        # noqa: E402   车次路线按确认线路站序的新画法
 
 # ---------------------------------------------------------------------------
 # 基础设施
@@ -71,6 +73,24 @@ def db() -> sqlite3.Connection:
     return conn
 
 
+def cfg_get(key: str, default: str = "") -> str:
+    try:
+        with db() as conn:
+            row = conn.execute("SELECT value FROM app_cfg WHERE key=?", (key,)).fetchone()
+    except sqlite3.Error:
+        return default
+    return ((row["value"] if row else None) or default)
+
+
+def cfg_set(key: str, value: str) -> None:
+    with _db_lock, db() as conn:
+        conn.execute(
+            "INSERT INTO app_cfg(key, value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+
+
 def init_db() -> None:
     with _db_lock, db() as conn:
         conn.executescript(
@@ -95,7 +115,9 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS coord_override (
                 name        TEXT PRIMARY KEY,
                 lat         REAL,
-                lon         REAL
+                lon         REAL,
+                src         TEXT,          -- 确认自哪个候选来源（车站卡片「用这个」）
+                picked_at   REAL
             );
 
             -- 人工校正：经由 / 总里程 / 站间里程 / 备注（按车次，与日期无关）
@@ -171,6 +193,12 @@ def init_db() -> None:
                 scanned_at  REAL
             );
             CREATE INDEX IF NOT EXISTS idx_curate_issues ON curate(issues);
+
+            -- 全局小配置（key/value）：2026 车次改号的切换日等（scripts/renumber_cutover.py 写入）
+            CREATE TABLE IF NOT EXISTS app_cfg (
+                key     TEXT PRIMARY KEY,
+                value   TEXT
+            );
             """
         )
         # 经停站表结构（route_tpl / route_day / routes 视图）
@@ -199,6 +227,12 @@ def init_db() -> None:
         for col in ("type", "source", "alias", "coord_src"):
             if col not in scols:
                 conn.execute(f"ALTER TABLE station_custom ADD COLUMN {col} TEXT")
+        # 老库迁移：人工坐标记下「确认自哪个来源」（车站/线路页多坐标确认）
+        ocols = {r[1] for r in conn.execute("PRAGMA table_info(coord_override)")}
+        if "src" not in ocols:
+            conn.execute("ALTER TABLE coord_override ADD COLUMN src TEXT")
+        if "picked_at" not in ocols:
+            conn.execute("ALTER TABLE coord_override ADD COLUMN picked_at REAL")
 
 
 # ---------------------------------------------------------------------------
@@ -1182,11 +1216,20 @@ def line_override_map() -> Dict[str, dict]:
 
 
 def _apply_line_overrides() -> None:
-    """把库里的人工线路站序 / 里程灌进 cnrail，并重建「站名→线路里程」索引"""
+    """把库里的人工线路站序 / 里程灌进 cnrail，并重建「站名→线路里程」索引
+
+    基本线路（line_base）的校正**不灌**：它有自己的站序（沪昆线 207 站，
+    同名来源版本 183 站），按索引灌过去会整体错位；它由 linebase.detail_payload 自己算。
+    """
+    try:
+        import linebase as _lb
+        has_base = _lb.has
+    except Exception:                 # 独立脚本里没装 linebase 也别让里程失效
+        has_base = lambda _n: False   # noqa: E731
     cnrail.set_line_overrides({
         name: {"segKm": ov.get("segKm") or {}, "staKm": ov.get("staKm") or {},
                "stops": ov.get("stops") or [], "totalKm": ov.get("totalKm")}
-        for name, ov in line_override_map().items()
+        for name, ov in line_override_map().items() if not has_base(name)
     })
 
 
@@ -1233,6 +1276,8 @@ def _build_custom_line(name: str, stations, note: str = "", raw: bool = False) -
         sn = (str(rawname or "").strip() if raw else _entry_name(rawname))
         if not sn:
             continue
+        # 站名一律不带「站」后缀（杭州东站 → 杭州东）；「十八站」「同名站」这类真名保留
+        sn = canon_station(sn)
         if sn in seen and not raw:
             raise ValueError("站点重复：" + sn)
         seen.add(sn)
@@ -1779,9 +1824,17 @@ def osm_station_card(name: str) -> Optional[dict]:
             "ref": r["ref"], "lifecycle": r["lifecycle"]} for r in rows]
     # 字段名与 station_detail 保持一致：详情页也用 osmLines，前端 stOsmLines()
     # 只认这一个键。档案里的 lines（线路名字符串数组）OSM 卡没有，别用空数组占位。
-    return {"found": False, "osmOnly": True, "name": nm, "points": pts,
-            "osmLines": lines, "services": [], "trainsFrom": 0, "trainsTo": 0,
-            "trainsVia": [], "custom": False, "archive": False}
+    info = stations.coord_info(nm)
+    manual = info.get("source") == "manual"
+    out = {"found": False, "osmOnly": True, "name": nm, "points": pts,
+           "lat": info.get("lat") if manual else (pts[0]["lat"] if pts else None),
+           "lon": info.get("lon") if manual else (pts[0]["lon"] if pts else None),
+           "coordSource": "manual" if manual else "osm",
+           "coordConfirmSrc": info.get("confirmSrc") or "",
+           "osmLines": lines, "services": [], "trainsFrom": 0, "trainsTo": 0,
+           "trainsVia": [], "custom": False, "archive": False}
+    # OSM 独有站一样能「列出全部坐标 → 点一下确认」，走同一个人工坐标通道
+    return _attach_coord_candidates(out, nm, nm + "站")
 
 
 def merge_catalog_nodes(line_name: str, names: List[str]) -> List[str]:
@@ -1940,6 +1993,10 @@ def _apply_coord_overrides() -> int:
         st = cnrail.station(r["name"])
         if not st:
             continue
+        # 记一份「档案原值」：车站详情要显示「档案里是多少」，重建 _STATIONS 后
+        # 会重新走这里，那时 lat 又变回档案值，所以只在第一次（lat0 还没记）记
+        if st.get("lat0") is None or st.get("lon0") is None:
+            st["lat0"], st["lon0"] = st.get("lat"), st.get("lon")
         st["lat"] = float(r["lat"])
         st["lon"] = float(r["lon"])
         st["coordSrc"] = "manual"
@@ -2268,10 +2325,31 @@ def save_line_override(name: str, seg_km=None, total_km=None, note: str = "",
       sta_km 键为车站序号，值是「自起点站算起的累计里程」，None = 这一站明确不详。
     全部为空即撤销，回到档案值。给了总里程时只把「没手填」的段等比缩放到 totalKm − 手填段之和。
     """
+    # 基本线路（整理台定稿）：站序以 line_base 为准。库里常躺着同名但站数不同的
+    # 来源版本（沪昆线 base 207 站 / line_custom 183 站），按后者校验索引会整体串位，
+    # 用户看到的就是「改了第 2 站，保存后变成第 2 站在另一条线里的样子」。
+    try:
+        import linebase as _lb
+        base = _lb.get(name) if name else None
+    except Exception:
+        base = None
+    # 车站/线路页现在只显示「整理台完成全部确认」的线路：这些线的站序直接读
+    # linedesk.db，可能还没定成基本线路（或 base 是脚本写的临时版本、站数不同），
+    # 校验区间/站点下标要按确认线路自己的站数来，否则保存后整条站序会串位。
+    try:
+        import confirmed as _cf
+        cinfo = _cf.get(name) if name else None
+    except Exception:
+        cinfo = None
     ln = cnrail.line(name)
-    if not ln:
+    if cinfo:
+        lname = name
+    elif base:
+        lname = base["name"]
+    elif ln:
+        lname = ln["name"]
+    else:
         raise ValueError("线路库里没有这条线：" + str(name or ""))
-    lname = ln["name"]
     segs = _clean_seg_km(seg_km)
     stas = _clean_sta_km(sta_km)
     try:
@@ -2281,7 +2359,8 @@ def save_line_override(name: str, seg_km=None, total_km=None, note: str = "",
     if km is not None and not (1 <= km <= 20000):
         raise ValueError("线路总里程超出合理范围（1~20000 km）")
 
-    nst = len(ln.get("stations") or [])
+    nst = (cinfo["n_stop"] if cinfo else
+           (len(base["stops"]) if base else len(ln.get("stations") or [])))
     nseg = max(nst - 1, 0)
     bad = [k for k in segs if int(k) >= nseg]
     if bad:
@@ -2407,13 +2486,15 @@ def save_line_stations(name: str, stations, note: str = "") -> dict:
             raise ValueError("线路库里没有这条线：" + str(name or "")
                              + "，资料库里也查不到它的站序")
     stops = _clean_stops(stations)
-    # 用 GeoJSON 原样导进来的线（source='geojson'）：站名不改、允许同名站，
-    # 改了就等于偷偷动了用户的文件内容；其它线仍按档案 / 12306 口径归一
+    # 原样通道（GeoJSON / 备份导回来的线）也去掉「站」后缀：全项目站名统一
+    # 「杭州东」而不是「杭州东站」，否则同一个站会分裂成两条记录。同名站照样保留。
+    # 只剥「站」这一个后缀 —— 「十八站」「同名站」这类真名靠白名单保住。
     cust = next((x for x in list_custom_lines() if x["name"] == ln["name"]), None) \
         if ln.get("custom") else None
     raw = bool(cust and cust.get("source") in ("geojson", "backup"))
     if raw:
-        stops = [{"name": str(s["name"] or "").strip(), "km": s["km"]} for s in stops]
+        stops = [{"name": canon_station(str(s["name"] or "").strip()), "km": s["km"]}
+                 for s in stops]
     else:
         # 落库前按档案 / 12306 口径归一（「唐海南站」→「唐海南」），和车次经停站对得上
         stops = [{"name": _entry_name(s["name"]), "km": s["km"]} for s in stops]
@@ -2514,10 +2595,12 @@ def _coord_pair(lat, lon) -> Tuple[float, float]:
     return round(a, 6), round(b, 6)
 
 
-def set_coord(name: str, lat, lon, coord=None) -> dict:
-    """人工补录车站坐标（写 coord_override，并让坐标缓存失效重载）
+def set_coord(name: str, lat, lon, coord=None, src=None) -> dict:
+    """人工补录 / 确认车站坐标（写 coord_override，并让坐标缓存失效重载）
 
     coord 可以直接给一行文本（「经度:126.576636,纬度:42.038926」），这时 lat/lon 留空。
+    src 是「车站/线路」页在多坐标候选里点「用这个」时传来的来源说明，
+    只是给界面显示「已确认自 XX」，不参与坐标计算；手填补坐标时不传。
     """
     name = _norm(name)
     if not name:
@@ -2531,9 +2614,10 @@ def set_coord(name: str, lat, lon, coord=None) -> dict:
         lat, lon = _coord_pair(lat, lon)
     with _db_lock, db() as conn:
         conn.execute(
-            """INSERT INTO coord_override(name, lat, lon) VALUES(?,?,?)
-               ON CONFLICT(name) DO UPDATE SET lat=excluded.lat, lon=excluded.lon""",
-            (name, lat, lon),
+            """INSERT INTO coord_override(name, lat, lon, src, picked_at) VALUES(?,?,?,?,?)
+               ON CONFLICT(name) DO UPDATE SET lat=excluded.lat, lon=excluded.lon,
+                                              src=excluded.src, picked_at=excluded.picked_at""",
+            (name, lat, lon, (str(src)[:200] if src else None), time.time()),
         )
     _apply_coord_overrides()          # 线路页 / 地图读的是 cnrail 那份，一起更新
     stations.reload_coords()
@@ -2556,6 +2640,35 @@ def clear_coord(name: str) -> dict:
     return {"name": name, "removed": removed, **info}
 
 
+_MASTER_NAMES: Optional[set] = None
+
+
+def _master_station_names() -> set:
+    """station_master 里的站名（六源合并后的规范名，基本都不带「站」）
+
+    只用来判「XX站」里的「站」是不是多余后缀，所以缓存一份全集就够（1.8 万条）。
+    """
+    global _MASTER_NAMES
+    if _MASTER_NAMES is None:
+        try:
+            with db() as conn:
+                rows = conn.execute("SELECT name FROM station_master").fetchall()
+            _MASTER_NAMES = {_norm(r["name"]) for r in rows if r["name"]}
+        except sqlite3.Error:
+            _MASTER_NAMES = set()
+    return _MASTER_NAMES
+
+
+def canon_station(name: str) -> str:
+    """对外统一站名：不带「站」后缀（杭州东站 → 杭州东）
+
+    判定在 `cnrail.station_name()`：只有剥完的裸名本身是个认得的站，才剥；
+    「十八站」「新九站」「同名站」这种本来带「站」的地名原样保留。
+    """
+    stations.ensure()
+    return cnrail.station_name(name)
+
+
 class StationRegistry:
     def __init__(self) -> None:
         self.by_code: Dict[str, dict] = {}
@@ -2563,6 +2676,7 @@ class StationRegistry:
         self.coords: Dict[str, Tuple[float, float]] = {}   # name -> (lat, lon)，已含人工值
         self.base_coords: Dict[str, Tuple[float, float]] = {}   # 仅档案/OSM 的原值
         self.overrides: Dict[str, Tuple[float, float]] = {}     # 人工改过的站
+        self.override_src: Dict[str, str] = {}                 # 确认自哪个候选来源
         self.loaded = False
 
     def ensure(self) -> None:
@@ -2583,11 +2697,15 @@ class StationRegistry:
                 self.by_name.setdefault(name, code)
 
         # 2) cnrail_data_v2 车站库（含路局/电报码/连接线路，坐标优先用它）
+        #    lat0/lon0 是 _apply_coord_overrides 留下的「档案原值」，有人工值时
+        #    lat/lon 已经是人工值，别把人工值当成档案原值记进 base_coords
         base: Dict[str, Tuple[float, float]] = {}
         cnrail.load()
         for name, st in (cnrail._STATIONS or {}).items():
-            if st.get("lat") is not None and st.get("lon") is not None:
-                base[_norm(name)] = (float(st["lat"]), float(st["lon"]))
+            la = st.get("lat0", st.get("lat"))
+            lo = st.get("lon0", st.get("lon"))
+            if la is not None and lo is not None:
+                base[_norm(name)] = (float(la), float(lo))
 
         # 3) OSM 派生坐标（补足 cnrail 没有的站）
         if os.path.exists(COORDS_PATH):
@@ -2600,17 +2718,31 @@ class StationRegistry:
 
         # 4) 人工修正覆盖：单独存一份，编辑器要区分「档案原值」和「人工改过的值」
         overrides: Dict[str, Tuple[float, float]] = {}
+        override_src: Dict[str, str] = {}
         try:
             with db() as conn:
                 for row in conn.execute("SELECT name, lat, lon FROM coord_override"):
                     overrides[_norm(row["name"])] = (row["lat"], row["lon"])
+                try:
+                    for row in conn.execute("SELECT name, src FROM coord_override WHERE src IS NOT NULL"):
+                        override_src[_norm(row["name"])] = row["src"] or ""
+                except sqlite3.Error:            # 老库还没加 src 列
+                    pass
         except sqlite3.Error:
             pass
 
         self.base_coords = base
         self.overrides = overrides
+        self.override_src = override_src
         self.coords = dict(base)
         self.coords.update(overrides)
+
+        # 5) 告诉 cnrail 哪些裸名是「认得的站名」—— 站名去「站」后缀（杭州东站→杭州东）
+        #    靠这份白名单判定，避免把「十八站」「新九站」这种本来带「站」的地名截坏
+        try:
+            cnrail.set_known_names(set(self.by_name) | _master_station_names())
+        except Exception:                 # noqa: BLE001  —— 站名归一失败不该拖垮整站
+            pass
 
         self.loaded = True
 
@@ -2629,17 +2761,26 @@ class StationRegistry:
         self.coords = {}
         self.base_coords = {}
         self.overrides = {}
+        self.override_src = {}
         self.loaded = False
         self.ensure()
 
     def _coord_key(self, name: str) -> str:
-        """站名归一化，并兼容「XX」↔「XX站」两种写法"""
+        """站名归一化，并兼容「XX」↔「XX站」两种写法
+
+        人工改过的坐标最优先：档案里常有「杭州东」（key）和「杭州东站」（name）
+        两个键，override 存的是 key，别让另一个键把人工值挡住（2026-11-05 用户报的
+        「改了杭州东坐标保存不下来」就是这个）。
+        """
         n = _norm(name)
-        if n in self.coords:
-            return n
-        for cand in (n[:-1] if n.endswith("站") else None, n + "站"):
-            if cand and cand in self.coords:
-                return cand
+        cands = [n]
+        cands.append(n[:-1] if n.endswith("站") else n + "站")
+        for c in cands:
+            if c in self.overrides:
+                return c
+        for c in cands:
+            if c in self.coords:
+                return c
         return n
 
     def coord_info(self, name: str) -> dict:
@@ -2656,6 +2797,7 @@ class StationRegistry:
             "source": "manual" if manual else ("base" if cur else "none"),
             "baseLat": base[0] if base else None,
             "baseLon": base[1] if base else None,
+            "confirmSrc": self.override_src.get(key, ""),
         }
 
     def meta(self, name: str) -> Optional[dict]:
@@ -2715,7 +2857,9 @@ class StationRegistry:
         def put(name: str, city: str, archived: bool,
                 pinyin: str = "", short: str = "") -> None:
             nm = _norm(name)
-            b = _bare(nm)
+            # 归并键 = 规范站名（不带多余「站」）：「杭州东站」和「杭州东」算同一个站，
+            # 「十八站站」并进「十八站」；「十八站」「九站」这种真名不会被截
+            b = canon_station(nm) or _bare(nm)
             if not b:
                 return
             if b == bare_q:
@@ -2731,7 +2875,7 @@ class StationRegistry:
             has = bool(self.coords.get(b) or self.coords.get(nm) or self.coords.get(b + "站"))
             cur = cand.get(b)
             if cur is None:
-                cand[b] = {"hit": hit, "name": nm, "city": city,
+                cand[b] = {"hit": hit, "name": b, "city": city,
                            "hasCoord": has, "archive": archived,
                            "from123": not archived, "fromArch": archived}
                 return
@@ -2742,8 +2886,6 @@ class StationRegistry:
             cur["hasCoord"] = cur["hasCoord"] or has
             if not cur["city"] and city:
                 cur["city"] = city
-            if len(nm) < len(cur["name"]):          # 「唐山站」和「唐山」并成「唐山」
-                cur["name"] = nm
 
         for name, code in self.by_name.items():
             st = self.by_code.get(code, {})
@@ -2777,17 +2919,15 @@ class StationRegistry:
         names += [st.get("name") or k for k, st in (cnrail._STATIONS or {}).items()]
         for name in names:
             nm = _norm(name)
-            b = _bare(nm)
+            b = canon_station(nm) or _bare(nm)
             if not b:
                 continue
-            # 同一个站按去掉末尾「站」的名字归并，写法取短的（「唐山站」和「唐山」只留
-            # 「唐山」）。档案里有的站只写了长写法（「唐山东站」），照样留着 ——
-            # 不能一律截成「唐山东」：「九站」这种地名去掉「站」就成了另一个站。
-            # 输入「唐山东」也能搜到它（前端 nmBare 按同一口径比对），落库仍按
-            # _entry_name 归一，所以不会造出重复的站。
+            # 同一个站按规范站名归并（「唐山站」和「唐山」只留「唐山」，「十八站站」并进
+            # 「十八站」）。档案里只写了长写法的站（「唐山东站」）不会硬截成「唐山东」：
+            # 白名单里没有「唐山东」这个裸站名时原样保留。
             old = seen.get(b)
-            if old is None or len(nm) < len(old):
-                seen[b] = nm
+            if old is None or len(b) < len(old):
+                seen[b] = b
         return sorted(seen.values())
 
 
@@ -3248,7 +3388,17 @@ def build_route_payload(code: str, date: str, force: bool = False,
     km_mode = km_info.get("mode", "estimate")
     manual = {"via": False, "km": False, "segKm": False, "note": None, "updatedAt": None,
               "source": None, "srcCode": None, "basedDate": None}
-    ov = get_override(code) if use_override else None
+    # 换向车次号（如 N1534 / N1531）是同一趟车，人工经由 / 里程校正按主车次号存。
+    # 用别名打开时也要继承主号那份校正，否则经停站一模一样、走向却回退成自动推断
+    # （N1531 只剩「南疆线（OSM）」一段，库尔勒→乌鲁木齐又变回大直线）。
+    # 已经给自己单独存过校正的（sync 入库会逐号各存一条）仍优先用自己的，别覆盖。
+    ov = None
+    if use_override:
+        ov = get_override(code)
+        if not ov:
+            main = (item_code(raw) or "").strip().upper()
+            if main and main != (code or "").strip().upper():
+                ov = get_override(main)
     if ov:
         manual["note"] = ov.get("note")
         manual["updatedAt"] = ov.get("updatedAt")
@@ -3435,15 +3585,51 @@ def build_route_payload(code: str, date: str, force: bool = False,
 
 _OSM_CACHE: Dict[Tuple[str, str], dict] = {}
 _OSM_LOCK = threading.Lock()
+_OSM_EPOCH: Optional[float] = None
 
 
-def route_osm(code: str, date: str) -> dict:
+def _osm_data_epoch() -> float:
+    """两个库（含 WAL）的修改时间指纹。
+
+    真实走向依赖整理台站序 / 线路几何 / 人工经由，用户改过任何一样，
+    已经看过一趟车的旧结果就必须失效，否则「统一规则」对那趟车不生效。
+    用 mtime 而不是在几十个写接口里逐个清缓存，省得漏掉某一处。
+    """
+    files = [DB_PATH, DB_PATH + "-wal",
+             os.path.join(DATA_DIR, "linedesk.db"),
+             os.path.join(DATA_DIR, "linedesk.db-wal")]
+    v = 0.0
+    for p in files:
+        try:
+            v += os.path.getmtime(p)
+        except OSError:
+            pass
+    return round(v, 3)
+
+
+def route_osm(code: str, date: str, mode: str = "confirmed") -> dict:
     """
     把这条车次的折线换成「沿真实线路」的版本（带里程，缺口用直线跳过去）。
     只读本地缓存，不联网 —— 能点这个按钮时车次详情早已加载过。
+
+    mode（2026-11-12 用户口径）：
+      · `confirmed`（默认）— `routeshape.build()`：全部按整理台确认线路的
+        站序 / 累计 km 逐段拼，中转站在中转站转线、断裂连最近两点、
+        长出截至起讫、不足用首末点补、上下行分线只选含停站的一条。
+      · `legacy` — `railosm.build()`：原来的贪心覆盖画法，**原样保留**，
+        随时可切回去对比。
+
+    新画法拼不出来（例如这趟车压根没有经由段）时自动退回旧画法，
+    并在 `info["fallback"]` 里标明，不让按钮直接失效。
     """
-    key = ((code or "").strip().upper(), date or "")
+    global _OSM_EPOCH
+    mode = "legacy" if str(mode or "").lower() in ("legacy", "old", "orig") else "confirmed"
+    key = ((code or "").strip().upper(), date or "", mode)
+    epoch = _osm_data_epoch()
     with _OSM_LOCK:
+        if epoch != _OSM_EPOCH:
+            _OSM_CACHE.clear()
+            _OSM_EPOCH = epoch
         hit = _OSM_CACHE.get(key)
     if hit:
         return hit
@@ -3453,7 +3639,17 @@ def route_osm(code: str, date: str) -> dict:
     except Exception as exc:                                     # noqa: BLE001
         return {"ok": False, "error": f"取不到这趟车的本地缓存：{exc}"}
 
-    pts, info = railosm.build(payload)
+    # 旧画法先算一份：既是 mode=legacy 的结果，也是新画法里「非确认线路段 /
+    # 经由空隙」按原方式续画的点源，兼作整趟拼不出来时的保底。
+    legacy_pts, legacy_info = railosm.build(payload)
+    if mode == "confirmed":
+        pts, info = routeshape.build(payload, legacy=legacy_pts)
+        if not pts:
+            pts, info = legacy_pts, dict(legacy_info)
+            info["fallback"] = "legacy"
+    else:
+        pts, info = legacy_pts, legacy_info
+    info["mode"] = "legacy" if info.get("fallback") else mode
     if not pts:
         return {"ok": False, "error": info.get("err") or "这段路线拼不出真实走向", **info}
 
@@ -3595,6 +3791,50 @@ def stats() -> dict:
     }
 
 
+def _merged_station_note(*names: str) -> dict:
+    """统一车站主表里的来源备注（2026-11-05 起）。
+
+    站名一律保持干净，各套数据源全部放在 station_master.note / sources 里，
+    这里只给前端「看过哪些源」用，不参与站名匹配。
+    """
+    keys = [n for n in names if n]
+    if not keys:
+        return {}
+    try:
+        with db() as conn:
+            row = None
+            for k in keys:
+                row = conn.execute(
+                    "SELECT n_sources, sources, aliases, coord_src, kind, note "
+                    "FROM station_master WHERE key=? OR name=? LIMIT 1", (k, k)).fetchone()
+                if row:
+                    break
+        if not row:
+            return {}
+        return {"nSources": row["n_sources"] or 0,
+                "mergedSources": (row["sources"] or "").split("|") if row["sources"] else [],
+                "mergedAliases": (row["aliases"] or "").split("|") if row["aliases"] else [],
+                "mergedCoordSrc": row["coord_src"] or "",
+                "mergedKind": row["kind"] or "",
+                "mergedNote": row["note"] or ""}
+    except sqlite3.Error:
+        return {}
+
+
+def _attach_coord_candidates(out: dict, *names: str) -> dict:
+    """车站卡片附上「这个站在各套来源里的全部坐标」。
+
+    只读新表，失败也不能让车站详情 500 —— 候选坐标是锦上添花，不是主数据。
+    """
+    try:
+        out["coordCandidates"] = stationcoords.candidates(
+            *names, cur_lat=out.get("lat"), cur_lon=out.get("lon"))
+    except Exception:                        # noqa: BLE001
+        out["coordCandidates"] = {"items": [], "n": 0, "nRaw": 0,
+                                  "maxDistM": 0, "confirmedSrc": "", "current": None}
+    return out
+
+
 def station_detail(q: str) -> dict:
     """车站档案 + 该站在本地车次库里出现的次数（粗略热度）"""
     stations.ensure()
@@ -3619,9 +3859,13 @@ def station_detail(q: str) -> dict:
                                   "source", "alias", "note")},
         "lat": lat, "lon": lon,
         "coordSource": info.get("source") or ("base" if lat is not None else "none"),
+        "coordConfirmSrc": info.get("confirmSrc") or "",
         "trainsFrom": as_start,
         "trainsTo": as_end,
     }
+    # 档案里的 name 是「杭州东站」，对外统一成「杭州东」（键名本来就是裸名）
+    archive_name = out.get("name") or name
+    out["name"] = canon_station(archive_name)
     # 自建 / 线路补全的站（唐海南、曹妃甸港这批）档案里没有车次数据，
     # 和兜底档案一个口径，把当天经停的车次也列上
     if st.get("custom"):
@@ -3629,12 +3873,13 @@ def station_detail(q: str) -> dict:
         out["viaDate"] = day
         out["trainsVia"] = codes
     # 12306 那份站资料只用来补：缺电报码时补上，顺带给个街道地址
-    extra = railgeom.station_extra(out.get("name") or name) or {}
+    extra = railgeom.station_extra(archive_name) or {}
     if not out.get("tele") and extra.get("code"):
         out["tele"] = extra["code"]
     if extra.get("addr"):
         out["addr"] = extra["addr"]
-    return out
+    out.update(_merged_station_note(name, q, out.get("name") or ""))
+    return _attach_coord_candidates(out, name, q, out.get("name") or "")
 
 
 def _trains_via(name: str):
@@ -3677,14 +3922,15 @@ def _station_detail_loose(q: str) -> dict:
         as_end = conn.execute(
             "SELECT COUNT(*) c FROM trains WHERE end_sta = ?", (nm,)).fetchone()["c"]
     day, codes = _trains_via(nm)
-    return {
+    out = {
         "found": True,
-        "name": nm, "key": nm,
+        "name": canon_station(nm), "key": nm,
         "city": raw.get("city") or extra.get("city") or None,
         "tele": raw.get("station_code") or extra.get("code") or None,
         "addr": extra.get("addr") or None,
         "lat": lat, "lon": lon,
         "coordSource": info.get("source") or ("base" if lat is not None else "none"),
+        "coordConfirmSrc": info.get("confirmSrc") or "",
         "lines": cnrail.lines_of(nm),
         "services": [], "custom": False, "source": "12306", "archive": False,
         "note": "线路库里没有这个站的档案（它所属的线路还没收进线路库），"
@@ -3694,6 +3940,8 @@ def _station_detail_loose(q: str) -> dict:
         "viaDate": day,
         "trainsVia": codes,
     }
+    out.update(_merged_station_note(nm, q, name))
+    return _attach_coord_candidates(out, nm, q, name)
 
 
 init_db()

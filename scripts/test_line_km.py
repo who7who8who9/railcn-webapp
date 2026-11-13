@@ -35,28 +35,36 @@ def _api(path, body=None):
 
 
 def snap_override():
-    """跑之前这条线有没有人工站序；有就整份记下来"""
+    """跑之前这条线在 line_override 里有没有行；整行原样记下来
+
+    2026-11-05 起京沪线是「基本线路」（合并走向接管），`/api/line/stations/clear`
+    对基本线路会 400，所以还原改走 SQLite 原样写回，不再依赖接口。
+    """
+    import sqlite3
     try:
-        d = _api("/api/line?q=" + urllib.parse.quote(LINE))
+        with sqlite3.connect(_db()) as c:
+            return c.execute(
+                "SELECT name,seg_km_json,total_km,note,updated_at,sta_km_json,stops_json"
+                " FROM line_override WHERE name=?", (LINE,)).fetchone()
     except Exception:                        # noqa: BLE001
         return None
-    ov = d.get("override") or {}
-    if not ov:
-        return None
-    return {"stops": [{"name": s["name"], "km": s.get("km")} for s in d.get("stations") or []],
-            "note": ov.get("note") or ""}
+
+
+def _db():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(root, "webapp", "data", "rail.db")
 
 
 def restore_override(snap):
-    """还原：本来没有 → 清掉这次写进去的；本来有 → 按备份写回"""
+    """还原：本来没有 → 删掉这次写进去的；本来有 → 整行按备份写回"""
+    import sqlite3
     try:
-        if snap:
-            _api("/api/line/stations", {"name": LINE, "stations": snap["stops"],
-                                       "note": snap["note"]})
-            print("  已还原京沪线原来的人工站序（%d 站）" % len(snap["stops"]))
-        else:
-            _api("/api/line/stations/clear", {"name": LINE})
-            print("  已清掉本次测试写下的京沪线人工站序")
+        with sqlite3.connect(_db()) as c:
+            c.execute("DELETE FROM line_override WHERE name=?", (LINE,))
+            if snap:
+                c.execute("INSERT INTO line_override VALUES(?,?,?,?,?,?,?)", snap)
+            c.commit()
+        print("  已还原京沪线的 override（%s）" % ("备份行" if snap else "本次测试前没有"))
     except Exception as e:                   # noqa: BLE001
         print("  ⚠ 还原失败：%s" % e)
 

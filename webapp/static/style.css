@@ -153,6 +153,8 @@ main{flex:1;display:flex;min-height:0}
 /* 地图走向开关：站点直连 ⇄ 沿真实线路 */
 .dhead .l3 .geo-sw{display:inline-flex;align-items:center;gap:7px}
 .geo-note{font-style:normal;font-size:10.5px;color:#8493a8;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.geo-mode{height:20px;border:1px solid var(--line);border-radius:6px;background:#fff;
+  color:#5b6b82;font:inherit;font-size:10.5px;padding:0 3px;cursor:pointer;max-width:104px}
 .dhead .tag.warn{background:#fff7ed;color:#b45309}
 .dhead .l3.chips{gap:6px;align-items:center}
 /* 车站详情：一行文本补坐标 */
@@ -163,8 +165,30 @@ main{flex:1;display:flex;min-height:0}
 .st-coord input.ok{border-color:#7bc79a;background:#f6fdf8}
 .st-coord input.bad{border-color:#e8a2a2;background:#fff8f8}
 .st-coord-msg{font-size:11px;color:#0f7a45}
+/* 车站「全部坐标」候选清单：各套来源给的位置逐处列出，点「用这个」即确认 */
+.dhead .st-ccoords{margin:8px 0 0;font-size:11.5px;color:#6d7c93}
+.dhead .st-ccoords>summary{cursor:pointer;color:#2f6fb5;display:inline-block;line-height:1.6}
+.dhead .st-ccoords>summary em{font-style:normal;color:#93a0b4;margin-left:8px;font-size:10.5px}
+.cc-hint{margin:6px 0 8px;padding:6px 9px;border-radius:6px;background:#f4f7fb;color:#5a6b82;line-height:1.65}
+.cc-rows{max-height:290px;overflow:auto;display:flex;flex-direction:column;gap:6px;padding-right:3px}
+.cc-row{border:1px solid var(--line);border-left:3px solid transparent;border-radius:7px;padding:6px 9px;background:#fff}
+.cc-row.cur{border-left-color:var(--ok);background:#f7fcf9}
+.cc-h{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.cc-ll{font-variant-numeric:tabular-nums;color:#33415c;font-size:11.5px}
+.cc-dist{font-size:10.5px;color:#8493a8;white-space:nowrap}
+.cc-dist.cur{color:var(--ok);font-weight:600}
+.cc-dist.far{color:#b45309}
+.cc-srcs{display:flex;flex-wrap:wrap;gap:4px;margin:5px 0}
+.cc-src{font-size:10px;padding:1px 6px;border-radius:4px;background:#eef2f7;color:#5a6b82;border:1px solid #e2e8f0}
+.cc-src.conv{background:#eef6ff;color:#2f6fb5;border-color:#d7e6fa}
+.cc-ops{display:flex;gap:6px}
+.cc-ops .btn{padding:2px 9px;font-size:10.5px;height:22px}
 .dhead .l3.st-note{color:#8b95a8;font-size:11px}
 .dhead .l3.st-addr{color:#6d7c93;font-size:11px}
+.dhead .st-src{margin:5px 0 0;font-size:11px;color:#6d7c93}
+.dhead .st-src summary{cursor:pointer;color:#2f6fb5;display:inline-block}
+.dhead .st-src .src-body{margin:5px 0 2px;padding:7px 9px;border-radius:5px;
+  background:#f4f7fb;color:#4b586b;line-height:1.7;word-break:break-all}
 /* 没有线路档案的站：改列当天经停的车次 */
 .st-via{margin-top:12px;padding-top:10px;border-top:1px dashed var(--line)}
 .st-via-h{font-size:11.5px;color:#5a6b82;margin-bottom:7px}
@@ -182,6 +206,43 @@ main{flex:1;display:flex;min-height:0}
 .kmhyb{background:#eaf1fb;color:#2f5d99}
 .kmest{background:#fff4e6;color:#b45309}
 .net-toggle{display:flex;gap:6px;margin-top:8px}
+/* 线路模式：只列整理台确认线路，说明这一页的口径 */
+.net-conf-hint{font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5}
+.net-conf-hint:empty{display:none}
+/* 线路模式常驻清单：整理台全部确认线路，最新确认在最上；输入时本地筛选 */
+.cf-list{flex:0 0 auto;max-height:min(40vh,360px);overflow:auto;background:#fff}
+.cf-list.hidden,.cf-list:empty{display:none}
+.cf-hd{position:sticky;top:0;z-index:2;display:flex;align-items:baseline;gap:8px;
+  padding:9px 14px 8px;background:#eef4fe;border-bottom:1px solid var(--line-2);
+  font-size:12px;color:var(--text)}
+.cf-hd b{font-size:12.5px;color:var(--accent)}
+.cf-hd em{font-style:normal;margin-left:auto;font-size:11px;color:var(--muted);text-align:right}
+.cf-row{display:flex;align-items:center;gap:10px;padding:8px 14px;cursor:pointer;
+  background:#fff;border-bottom:1px solid var(--line-2);transition:background .12s}
+.cf-row:hover{background:#f2f7ff}
+.cf-row.on{background:var(--accent-soft)}
+.cf-row .no{flex:0 0 auto;min-width:22px;text-align:right;font-size:11px;color:var(--muted);
+  font-family:ui-monospace,Menlo,monospace}
+.cf-row .nm{flex:0 0 auto;min-width:88px;font-size:13px;font-weight:600;color:var(--text);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cf-row.on .nm{color:var(--accent)}
+.cf-row .meta{flex:1;min-width:0;font-size:11px;color:var(--muted);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cf-row .at{flex:0 0 auto;font-size:11px;color:var(--muted);white-space:nowrap;
+  font-family:ui-monospace,Menlo,monospace}
+.cf-empty{padding:18px 14px;font-size:12px;color:var(--muted);line-height:1.8}
+.cf-toggle{flex:0 0 auto;font:inherit;font-size:11px;padding:2px 9px;border-radius:6px;
+  border:1px solid #b7cdf0;background:#fff;color:var(--accent);cursor:pointer}
+.cf-toggle:hover{background:var(--accent-soft)}
+.cf-list.fold{max-height:none}
+.cf-list.fold .cf-row,.cf-list.fold .cf-empty{display:none}
+@media(max-width:640px){
+  .cf-row .meta{display:none}
+  .cf-row .nm{min-width:0;flex:1}
+}
+.suggest .si.conf-head{background:var(--accent-soft);color:var(--accent);font-weight:600;
+  position:sticky;top:0;z-index:1;cursor:default}
+.suggest .si.conf-head .c{color:var(--accent);font-weight:400}
 .chipsel{font:inherit;font-size:12px;padding:4px 12px;border-radius:7px;cursor:pointer;
   border:1px solid var(--line);background:#fff;color:var(--muted)}
 .chipsel.active{background:var(--accent-soft);border-color:#b7cdf0;color:var(--accent);font-weight:600}
@@ -231,8 +292,11 @@ main{flex:1;display:flex;min-height:0}
 .btn.swap{width:30px;padding:0;flex:0 0 30px;margin-bottom:1px}
 .suggest{
   position:absolute;left:0;right:0;top:calc(100% + 4px);background:#fff;border:1px solid var(--line);
-  border-radius:10px;box-shadow:var(--shadow);z-index:40;max-height:240px;overflow:auto;
+  border-radius:10px;box-shadow:var(--shadow);z-index:40;max-height:330px;overflow:auto;
 }
+/* 线路联想要摆「京沪线（线路资料库·82站） 82 站 · 1451.4 km」这么长的名字，
+   跟着输入框宽度会截断，给它一个比输入框宽的最小宽度 */
+#sugNet{min-width:460px;max-width:94vw}
 .suggest .si{padding:8px 12px;cursor:pointer;font-size:12.5px;display:flex;justify-content:space-between}
 .suggest .si:hover,.suggest .si.hl{background:var(--accent-soft)}
 .suggest .si .c{color:var(--muted);font-size:11px}
@@ -247,14 +311,26 @@ main{flex:1;display:flex;min-height:0}
   cursor:pointer;white-space:nowrap;transition:background .1s,color .1s,border-color .1s;
 }
 .suggest .si .srcb:hover{color:var(--accent);border-color:var(--accent);background:var(--accent-soft)}
+/* 同一条线的各来源版本**每份一行**：京广线（底表）212 站 / （OSM）218 站 /
+   （线路资料库）89 站。组与组之间画一道线，行尾 ★ 把这一份定为默认。 */
+.suggest .si.vrow{padding:6px 12px;gap:8px;align-items:center}
+.suggest .si.vrow:not(.vhead){padding-left:24px}
+.suggest .si.vrow .vname{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.suggest .si.vrow .c{white-space:nowrap;flex:0 0 auto}
+.suggest .si.vrow .pick{flex:0 0 auto;margin-left:2px}
+.suggest .si.vhead{border-top:1px solid var(--line);margin-top:3px}
+.suggest .si:first-child.vhead{border-top:none;margin-top:0}
 
 /* ---------- 数据下载 ---------- */
 .dl-head{padding:12px 14px 10px;border-bottom:1px solid var(--line);background:#fbfdff}
 .dl-h1{font-size:13px;font-weight:600;color:var(--text)}
 .dl-h2{font-size:11px;color:var(--muted);margin-top:4px;line-height:1.6}
 .dl-h2 code{background:#eef2f8;padding:1px 5px;border-radius:4px;font-size:10.5px}
-.dl-ctrl{display:flex;align-items:center;gap:8px;margin-top:9px}
-.dl-ctrl label{font-size:11px;color:var(--muted)}
+.dl-ctrl{display:flex;align-items:center;gap:8px;margin-top:9px;flex-wrap:wrap}
+.dl-ctrl label{font-size:11px;color:var(--muted);white-space:nowrap}
+.dl-ctrl label.dl-chk{display:inline-flex;align-items:center;gap:4px;cursor:pointer;
+  user-select:none;white-space:nowrap}
+.dl-ctrl label.dl-chk input{width:13px;height:13px;margin:0;accent-color:#2f6fd0;cursor:pointer}
 .dl-ctrl select{height:28px;border:1px solid var(--line);border-radius:7px;
   background:#fff;font-size:12px;padding:0 6px;color:var(--text);outline:none}
 .dl-list{overflow:auto;flex:1;min-height:0;padding:6px 0}
@@ -512,6 +588,11 @@ body.modal-open .stage,body.modal-open #curateStage{pointer-events:none}
 .modal-card input{width:100%;height:36px;border:1px solid var(--line);border-radius:9px;padding:0 10px;font-size:12.5px;outline:none}
 .modal-card input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
 .modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
+/* 配置 Key 时的就地反馈：加载中 / 失败原因，不靠刷新页面看结果 */
+.key-msg{font-size:12px!important;line-height:1.55!important;margin:9px 0 0!important;
+  padding:7px 10px;border-radius:7px;background:#f0f6ff;color:#2f5c9e;border:1px solid #cfe0f7}
+.key-msg:empty{display:none}
+.key-msg.bad{background:#fff2e6;color:#a4530a;border-color:#f0c99b}
 .small{font-size:11px !important}
 .muted{color:var(--muted)}
 a{color:var(--accent)}
@@ -559,6 +640,16 @@ a{color:var(--accent)}
   font:inherit;font-size:12px;outline:none}
 .cu-search input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
 
+/* 2026 车次改号：两个阶段勾选框（勾上才把那批新字头纳入校对） */
+.cu-era{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:7px 14px;
+  border-bottom:1px solid var(--line-2);background:#f7f9fd;font-size:11.5px;color:#4a5a72}
+.cu-era .lbl{font-weight:600;color:#33415c}
+.cu-era label{display:flex;align-items:center;gap:4px;cursor:pointer;white-space:nowrap}
+.cu-era input{margin:0;cursor:pointer}
+.cu-era .tip{color:var(--muted);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cu-era .tip.warn{color:#b45a08;font-weight:600}
+.cu-era .cut{font-family:ui-monospace,Menlo,monospace;color:#33415c}
+
 .cu-row{display:grid;grid-template-columns:1fr auto;gap:2px 8px;padding:9px 14px;
   border-bottom:1px solid var(--line-2);cursor:pointer;transition:background .12s}
 .cu-row:hover{background:#f7faff}
@@ -575,9 +666,84 @@ a{color:var(--accent)}
 .cu-flag.coord{background:#fdecec;color:#b42318}
 .cu-flag.manual{background:#e8f6ee;color:#0f7a45}
 
-/* ---------- 校对编辑器（占右侧地图区） ---------- */
-.curate-stage{flex:1;min-width:0;background:var(--bg);overflow:auto}
-.cu-editor{padding:18px 22px 46px;max-width:920px}
+/* ---------- 校对编辑器（左编辑 + 右线路走向/停站图） ---------- */
+.curate-stage{display:flex;flex:1;min-width:0;background:var(--bg);overflow:hidden}
+/* 校对页三栏：左侧名单收窄 60px、右侧走向图放宽，中间编辑区自然跟着变窄。
+   只在校对页加 .curate，其他页签的侧栏宽度不受影响。 */
+.side.curate{width:330px;flex:0 0 330px}
+.cu-editor{flex:1;min-width:0;overflow:auto;padding:16px 18px 46px;max-width:none}
+.curate-stage:not(.with-map) .cu-map-pane{display:none}
+.cu-map-pane{
+  flex:0 0 560px;min-width:0;min-height:0;display:flex;flex-direction:column;
+  border-left:1px solid var(--line);background:var(--panel);
+}
+@media(max-width:1600px){.cu-map-pane{flex-basis:500px}}
+@media(max-width:1400px){.cu-map-pane{flex-basis:450px}}
+@media(max-width:1250px){.side.curate{width:300px;flex-basis:300px}.cu-map-pane{flex-basis:390px}}
+/* 窄屏改成上下布局，别无条件隐藏：否则「显示走向图」按钮点了没反应 */
+@media(max-width:1080px){
+  .curate-stage{flex-direction:column}
+  .cu-editor{flex:1 1 auto}
+  .cu-map-pane{flex:0 0 300px;width:100%;border-left:0;border-top:1px solid var(--line)}
+}
+.cu-map-bar{
+  display:flex;align-items:center;gap:6px;flex-wrap:wrap;
+  padding:8px 9px;border-bottom:1px solid var(--line);flex:0 0 auto;
+}
+.cu-map-title{font-size:12.5px;white-space:nowrap}
+/* 填了 Key 但底图没起来：按钮变橙，提示去查 Key 类型 / 白名单 */
+.cu-map-bar .btn.warn{color:#b45309;border-color:#e6c08a;background:#fff8ef}
+.cu-map-search{position:relative;flex:1;min-width:110px}
+.cu-map-search input{
+  width:100%;box-sizing:border-box;font-size:12px;padding:5px 8px;
+  border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--text);
+}
+.cu-map-sugg{
+  position:absolute;top:100%;left:0;right:0;z-index:70;max-height:250px;overflow:auto;
+  background:var(--panel);border:1px solid var(--line);border-radius:6px;
+  box-shadow:0 6px 20px rgba(16,24,40,.16);
+}
+.cu-map-sugg-i{
+  display:flex;justify-content:space-between;gap:8px;padding:6px 9px;
+  font-size:12px;cursor:pointer;
+}
+.cu-map-sugg-i:hover{background:var(--accent-soft)}
+.cu-map-sugg-i span{color:var(--muted);font-size:11px}
+.cu-map-sugg-i.empty{color:var(--muted);cursor:default}
+.cu-map-body{position:relative;flex:1;min-height:0;background:#f4f8fd;overflow:hidden}
+#cuTMap{position:absolute;inset:0}
+#cuMapCanvas{position:absolute;inset:0;width:100%;height:100%;cursor:grab;touch-action:none}
+#cuMapCanvas:active{cursor:grabbing}
+.cu-map-tip{
+  position:absolute;z-index:20;pointer-events:none;white-space:nowrap;
+  background:rgba(19,27,43,.92);color:#fff;font-size:11px;padding:3px 7px;border-radius:4px;
+}
+.cu-map-empty{
+  position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  color:var(--muted);font-size:12px;pointer-events:none;text-align:center;padding:12px;
+}
+.cu-map-foot{
+  flex:0 0 auto;padding:7px 10px;border-top:1px solid var(--line);
+  font-size:11px;color:var(--muted);display:flex;flex-direction:column;gap:4px;
+}
+.cu-map-legend{display:flex;align-items:center;gap:4px;white-space:nowrap}
+.cu-map-legend i{font-style:normal;display:inline-block;margin-left:7px}
+.cu-map-legend i:first-child{margin-left:0}
+.lg-line{width:14px;height:3px;background:#1f6feb;border-radius:2px}
+.lg-sta{width:7px;height:7px;border-radius:50%;background:#8ea2bd}
+.lg-train{width:9px;height:9px;border-radius:50%;background:#e8590c;border:1px solid #fff}
+/* 线路下拉顶部的「按发车站筛」说明 */
+.cb-scope{
+  padding:6px 9px;font-size:11px;color:var(--muted);background:var(--accent-soft);
+  border-bottom:1px solid var(--line);
+}
+.cb-scope.warn{background:#fff7e6;color:#a15c00}
+.cb-scope b{color:var(--text)}
+.cb-scope-all{
+  margin-left:6px;border:0;background:transparent;color:var(--accent);
+  font-size:11px;cursor:pointer;padding:0;text-decoration:underline;
+}
+.ce-alllines{white-space:nowrap;cursor:pointer}
 .cu-empty{padding:60px 20px;text-align:center;color:var(--muted);font-size:13px;line-height:1.9}
 .ce-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:14px}
 .ce-code{font-family:ui-monospace,Menlo,monospace;font-size:23px;font-weight:700;color:var(--rail)}
@@ -829,14 +995,21 @@ button.vseg:not(.picked):hover::after{opacity:1}
 /* ---------- 线路里程编辑（车站/线路页） ---------- */
 .dhead .l1 .ln-edit{margin-left:auto}
 .dhead .tag.manual{background:#e8f6ee;color:#0f7a45}
-.lnkm{padding:11px 16px 13px;border-bottom:1px solid var(--line);background:#fbfdff}
-.lnkm-head{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
-.lnkm-head b{font-size:12.5px;color:#33415c}
-.lnkm-hint{font-size:11px;color:var(--muted)}
+.lnkm{padding:10px 14px 12px;border-bottom:1px solid var(--line);background:#fbfdff}
+/* 工具条粘在详情滚动区顶部：段距列表再长，「保存 / 取消」也一直在手边 */
+.lnkm-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  position:sticky;top:0;z-index:3;background:#fbfdff;padding:2px 0 8px;
+  border-bottom:1px solid var(--line-2)}
+.lnkm-bar b{font-size:12.5px;color:#33415c;white-space:nowrap}
+.lnkm-count{font-size:11px;color:var(--muted);white-space:nowrap}
+.lnkm-hint{font-size:11px;color:var(--muted);line-height:1.6}
 .lnkm-btns{margin-left:auto;display:flex;gap:6px}
-.lnkm .seg-list{margin-top:9px;background:#fff;max-height:296px}
+.lnkm .seg-list{margin-top:0;background:#fff;max-height:min(38vh,360px)}
 .lnkm .seg-row{grid-template-columns:24px minmax(0,1fr) 84px 22px 24px 46px}
-.lnkm-foot{display:flex;align-items:center;gap:8px;margin-top:10px;flex-wrap:wrap;
+.lnkm-help{margin-top:9px;padding:9px 11px;border:1px solid var(--line-2);
+  border-radius:8px;background:#fff}
+.lnkm-help[hidden]{display:none}
+.lnkm-foot{display:flex;align-items:center;gap:8px;margin:8px 0 9px;flex-wrap:wrap;
   font-size:11.5px;color:#3d4a60}
 .lnkm-foot label{font-size:11.5px;color:#5a6884}
 .lnkm-foot input{width:106px;height:28px;border:1px solid var(--line);border-radius:7px;
@@ -850,6 +1023,20 @@ button.vseg:not(.picked):hover::after{opacity:1}
 .lnkm-seg{margin-left:auto;font-size:11px;color:#0f7a45}
 .lnkm-seg.bad{color:#b42318}
 .lnkm .ve-note{margin-top:7px}
+/* 编辑里程专用布局（2026-11-10）：上方常驻确认清单最多 360px、站序列表
+   上千 px，会把编辑区整块顶出首屏。编辑态把清单折成一行表头、隐藏站序，
+   首屏让给里程编辑；退出编辑移除 class 即自动还原，NET.cfOpen 不动。 */
+#paneNet.km-editing #netConfirmedList{max-height:none;overflow:visible}
+#paneNet.km-editing #netConfirmedList .cf-row,
+#paneNet.km-editing #netConfirmedList .cf-empty,
+#paneNet.km-editing #cfToggle{display:none}
+#paneNet.km-editing .cf-hd em{font-size:0}
+#paneNet.km-editing .cf-hd em::after{
+  content:'编辑里程中已收起 · 收起编辑后恢复';font-size:11px}
+#paneNet.km-editing #lnStops{display:none}
+#paneNet.km-editing .dhead{padding:10px 14px 9px}
+#paneNet.km-editing .dhead .ln-notice{margin-top:5px;padding:5px 8px;font-size:10.5px}
+@media(max-height:760px){.lnkm .seg-list{max-height:min(30vh,260px)}}
 .side.wide{width:560px;flex:0 0 560px}
 .side.full{width:auto;flex:1 1 auto;min-width:0;border-right:0}
 .dhead .l1 .code{white-space:nowrap;flex:0 0 auto}

@@ -10,14 +10,17 @@
 
 const $ = (s, r) => (r || document).querySelector(s);
 const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
-const SRC = { lib: '底表', custom: '自建', huirui: '资料库', ce: 'china-emu', osm: 'OSM' };
+const SRC = { lib: '底表', custom: '自建', huirui: '资料库', ce: 'china-emu', osm: 'OSM',
+              rg: 'rail-globe 走向', hdx: 'OSM 走向', cnrail: 'cnrail 走向' };
 const KIND = { gs: '高速', cj: '城际', sj: '市域', lj: '联络线', zx: '支线', px: '普速', '': '未分' };
 
 const S = {
   q: '', source: '', kind: '', status: '', hasStops: '',
   items: [], total: 0,
-  sel: null, detail: null, geom: null,
+  sel: null, detail: null, geom: null, ref: null,
   merge: false, picks: new Set(),
+  /* ①②里「当前选中的那一条」：line = 'src\u0001name'，stop = {source,name} / {self:true} */
+  pick: { line: '', stop: null },
 };
 
 /* ------------------------------------------------------------------ 工具 */
@@ -38,7 +41,7 @@ function esc(s) {
 }
 
 let toastT = 0;
-function toast(msg, isErr) {
+function toast(msg, isErr, ms) {
   let el = $('#ldToast');
   if (!el) {
     el = document.createElement('div');
@@ -49,7 +52,7 @@ function toast(msg, isErr) {
   el.textContent = msg;
   el.className = 'toast on' + (isErr ? ' err' : '');
   clearTimeout(toastT);
-  toastT = setTimeout(() => { el.className = 'toast' + (isErr ? ' err' : ''); }, 2200);
+  toastT = setTimeout(() => { el.className = 'toast' + (isErr ? ' err' : ''); }, ms || 2200);
 }
 
 function fmtKm(v) {
@@ -331,8 +334,14 @@ const M = {
           x: x + 6, y: y + 3.4, 'font-size': on ? 11.5 : 10.5,
           fill: on ? '#e8590c' : '#33415c', 'font-weight': on ? 700 : 500,
           stroke: '#fff', 'stroke-width': 3, 'paint-order': 'stroke',
+          cursor: 'pointer',
         }, this.gLabels);
         t.textContent = s.name;
+        /* 站名标签（小窗口）也能点：点 = 选中这一站，别穿到底图 */
+        t.addEventListener('click', ev => {
+          ev.stopPropagation();
+          pickStop(i);
+        });
       }
     });
   },
@@ -452,6 +461,11 @@ const MT = {
         position: this.g(s.lat, s.lon), content: s.name,
       } : null)).filter(Boolean),
       zIndex: 7,
+    });
+    /* 站名 label 也要能点选中这一站（否则点击穿到底图） */
+    this.layers.labels.on('click', evt => {
+      const id = evt && evt.geometry && evt.geometry.id;
+      if (id && /^L\d+$/.test(String(id))) pickStop(Number(String(id).slice(1)));
     });
   },
 
@@ -587,10 +601,13 @@ const MO = {
       c.on('click', () => pickStop(i));
       if (on) c.bringToFront();
       if (labelWanted(i, n, this.sel)) {
-        c.bindTooltip(s.name, {
+        /* interactive: 站名标签是「地图上的小窗口」，默认 pointer-events:none
+         * 会穿到底图 —— 要能点，点 = 选中这一站 */
+        const tip = c.bindTooltip(s.name, {
           permanent: true, direction: 'right', offset: [5, 0],
-          className: on ? 'ld-tip sel' : 'ld-tip',
-        });
+          className: on ? 'ld-tip sel' : 'ld-tip', interactive: true,
+        }).getTooltip();
+        if (tip) tip.on('click', () => pickStop(i));
       }
     });
     if (this.sel >= 0 && this.stops[this.sel]) {
@@ -737,11 +754,108 @@ function openKeyModal() {
   }, '保存并切换');
 }
 
+/** 使用规则：这个页面怎么用（顶部「使用说明」） */
+function openHelp() {
+  const w = openModal('线路整理台 · 使用规则', `
+  <div class="md-help">
+    <p class="lead">这个页面的活只有一件：<b>把同一条线的各个来源写法，由你判断归并成一条
+      「确认线路」</b>。③ 合并保存一步到位：既进主站「车站/线路」，也定为基本线路，
+      让数据校对 / 地图 / 选经由都用它。整理成果在独立库 <code>linedesk.db</code>；
+      ③ 会把定稿的站序与走向写进 <code>rail.db</code> 的 <code>line_base</code>（可撤销）。</p>
+
+    <h4>一、整理一条线的完整流程（基本信息 → ① → ② + 站序 → ③）</h4>
+    <ol>
+      <li><b>基本信息</b> —— 规范名 / 类型 / 总里程 / 起讫 / 备注，点「保存基本信息」就
+        <b>正式写入整理库</b>，不依赖后面的步骤。线路库里没有的新线，顶栏 <b>+ 新线</b> 或 <b>导入 GeoJSON</b>。</li>
+      <li><b>① 线路来源</b> —— <b>只确认并保存这条铁路线的 OSM 值（走向）</b>，
+        <b>和线路停靠的车站无关</b>。已收的写法里点一行选中（地图画出它的走向），
+        或 <b>导入走向</b>（GeoJSON，只取线形），点「确认线路来源」正式保存。
+        <b>只要有走向就能选，哪怕这条来源 0 站</b>（行尾标「0 站 · 仅走向」）。
+        这里<b>不新增 / 不改动任何车站</b>，也不改规范名和起讫。</li>
+      <li><b>② 站点来源</b> —— <b>只确认并保存这条线的全部车站与位置</b>，
+        <b>和 OSM 路线无关</b>。点一行选中再点「用它并确认」把站点和定位搬过来；
+        「导入站点」也只取车站。<b>不保存、不改动线路走向</b>。</li>
+      <li><b>站序（就在 ② 下面）</b> —— 逐站改：改站名、↑↓ 调顺序、✕ 删站。
+        <b>+ 新增车站可以指定插入位置</b>：点某一站行的 <b>+</b> 插在它后面，
+        或点顶部「+ 站（可指定位置）」在弹窗里选「最前面 / 第 N 站之后」，
+        一次填多个站名会按填写顺序连续插入；新站里程留空、坐标按站名查档案补。
+        点 <b>「反向站序」</b>整条线倒过来：里程 = 原末站里程 − 原里程、新起点 0，
+        原本缺里程的站仍留空；坐标、总里程、线路走向都不变。<b>改完站序 ② 会自动选中
+        「现在的站序」</b>，再点「用它并确认」只确认这份站序、站序不会被来源覆盖；
+        想用回来源那份完整站序，点来源行再确认（会覆盖你的改动）。</li>
+      <li><b>③ 合并保存为确认线路</b> —— <b>把 ① 和 ② 合并保存，并且同时定为基本线路</b>
+        （原来单独的 ④ 已取消，也不再有单独的走向配置）。做完这一步：
+        主站「车站/线路」就能查到这条线（含<b>停站与线路路线位置</b>），
+        数据校对 / 地图 / 选经由也一起接管。要求：≥2 站且带定位、有真实走向、规范名是正名，缺一样会拦住。
+        已定稿的线改了 ① / ② / 站序，点「重新合并保存（覆盖基本线路）」即可，不用先撤销。</li>
+    </ol>
+
+    <h4>二、导入 GeoJSON（① 只导走向 / ② 只导站点）</h4>
+    <ul>
+      <li>顶栏 <b>导入 GeoJSON</b>：可多选文件，每份文件落成一条<b>待整理</b>的新线（站序 + 走向都进来）。</li>
+      <li>① <b>导入走向</b>：只写线路走向，<b>车站一个都不动</b>。</li>
+      <li>② <b>导入站点</b>：只写车站与定位，<b>线路走向一个字节都不动</b>。</li>
+      <li>站序不是按文件里点的先后，而是<b>按走向算</b>：端点建图 → 车站投影切段 →
+        主轴排序 + 局部调整 → 站间最短路累里程。文件自带里程且递增时以文件为准。</li>
+      <li>导入结果会报「几个车站没落到走向上」「走向断了几处」，跳得多的先看一眼文件质量。</li>
+      <li>走向存在整理库 <code>linedesk.db / ld_geom</code>；③ 合并时直接用 ① 定下的那份。</li>
+    </ul>
+
+    <h4>三、③ 合并保存后的效力（全面接管）</h4>
+    <ul>
+      <li>主站「车站/线路」只列这样的确认线路（含<b>停站 + 线路路线位置</b>）；
+        其它线路、来源版本、选线都不再显示。</li>
+      <li>数据校对的线路下拉只列这一条（排最前），地图用它的走向，选经由用它的站序。</li>
+      <li>备份导回来的各来源版本<b>数据仍在库里、只是让位</b>：数据校对 / 备份面板还能查。</li>
+      <li>③ 区块右上角有<b>「撤销基本线路」</b>，随时退回原来的取数规则；
+        改了内容想覆盖，直接点「重新合并保存」。</li>
+    </ul>
+
+    <h4>四、地图操作</h4>
+    <ul>
+      <li><b>点站点圆点或站名小标签</b> = 选中该站，右侧站序对应行滚动并高亮。</li>
+      <li><b>点候选行</b> = 选中这条来源（① 走向 / ② 站点+定位），地图同时画出它的线；
+        再点「← 回到本线」回到本线。</li>
+      <li>右上 <b>+ / − / 适应</b> 缩放；左下切换 <b>腾讯 / OSM / 示意</b> 底图（腾讯要配 Key）。</li>
+      <li>信息窗里随时能看出当前画的是本线还是某个来源的预览。</li>
+    </ul>
+
+    <h4>五、规则与注意</h4>
+    <ul>
+      <li><b>规范名 = 资料库（辉睿）介绍里的中文名称</b>；资料库里没有的线才用别的名字。
+        想套用资料库的正式名称 / 起讫，用面板底部「资料库介绍」里的两个按钮手动点（① 不再自动改名）。
+        「京沪铁路」和「京沪高铁」是两条线，名字不同就算两条。</li>
+      <li><b>规范名不能带来源后缀</b>（「（底表）」「（OSM）」「（线路资料库·82站）」）——
+        ③ 合并保存会拦住，面板里给了一键改成正名。</li>
+      <li><b>来源一开始是空的</b>：新线、导入的线都不带来源，必须自己收、自己确认。
+        换过站序或改过站名，站点来源要重新确认。</li>
+      <li>③ 的前提：<b>① ② 都确认</b> + 站序 <b>≥ 2 站</b>且至少 2 站带定位 + 有真实走向。</li>
+      <li>「补新线」从 rail.db 同步新出现的线名，已整理过的不动。</li>
+      <li>所有改动进顶栏「<b>记录</b>」可追溯；「导出 JSON」可带走整理成果。</li>
+    </ul>
+
+    <h4>六、名词</h4>
+    <ul>
+      <li><b>线路来源（①）</b> —— 这条线用哪一家来源的<b>走向 / OSM 值</b>。一条线只选一条，
+        只决定线形，<b>不决定车站</b>。</li>
+      <li><b>站点来源（②）</b> —— 站序和<b>每一站的定位</b>从哪来（底表 / 资料库 / china-emu / 自建 /
+        GeoJSON / 各走向包）。同样只选一条，只决定车站，<b>不决定线形</b>。</li>
+      <li><b>同一条线</b> —— 去掉「（来源）」后缀后同名：「京沪线」「京沪线（底表）」算一条。</li>
+      <li><b>确认线路 / 基本线路</b> —— ③ 合并保存的产物，主站与全项目取数都用它。</li>
+    </ul>
+  </div>`,
+    (wrap) => wrap.remove(), '知道了');
+  /* 帮助弹窗宽一点，正文要能滚动看完 */
+  const card = w.querySelector('.modal-card');
+  if (card) card.classList.add('wide');
+}
+
 /* ------------------------------------------------------------------ 列表 */
 
 function chipsHtml() {
   const srcs = [['', '全部来源'], ['lib', '底表'], ['custom', '自建'], ['huirui', '资料库'],
-                ['ce', 'china-emu'], ['osm', 'OSM']];
+                ['ce', 'china-emu'], ['osm', 'OSM'], ['rg', 'rail-globe 走向'],
+                ['hdx', 'OSM 走向'], ['cnrail', 'cnrail 走向']];
   const kinds = [['', '全部类型'], ['gs', '高速'], ['cj', '城际'], ['px', '普速'],
                  ['lj', '联络线'], ['zx', '支线']];
   const sts = [['', '全部状态'], ['draft', '待整理'], ['confirmed', '已确认']];
@@ -784,12 +898,15 @@ function renderList() {
     const pick = S.picks.has(it.id) ? ' pick' : '';
     const cb = S.merge ? `<span class="cb${S.picks.has(it.id) ? ' on' : ''}"></span>` : '';
     const st = it.status === 'confirmed' ? '<span class="st">已确认</span>' : '<span class="st draft">待整理</span>';
+    /* 来源各自确认的进度：线路✓ / 站点✓，一眼看出这条线还缺哪一步 */
+    const fl = `<span class="srcf">${it.line_ok ? '线路✓' : '线路○'} ${it.stop_ok ? '站点✓' : '站点○'}</span>`;
     return `<div class="ld-item${on}${pick}" data-id="${it.id}">
       <div class="nm">${cb}${esc(it.name)}${st}</div>
       <div class="meta">
         <span class="k">${KIND[it.kind] || it.kind || '—'}</span>
         <span>${it.n_stop || 0} 站</span>
         <span>${fmtKm(it.total_km)}</span>
+        ${fl}
         <span>${al || '<span style="color:#c3cddd">无别名</span>'}</span>
         ${it.n_child ? `<span>· ${it.n_child} 个子段</span>` : ''}
       </div>
@@ -818,7 +935,8 @@ function renderList() {
 }
 
 function SRCBG(s) {
-  return { lib: '#0f2d52', custom: '#6b46c1', huirui: '#1f6feb', ce: '#0f9d58', osm: '#8b93a5' }[s] || '#8b93a5';
+  return { lib: '#0f2d52', custom: '#6b46c1', huirui: '#1f6feb', ce: '#0f9d58', osm: '#8b93a5',
+           rg: '#0e7490', hdx: '#b45309', cnrail: '#0d9488' }[s] || '#8b93a5';
 }
 
 function renderMergeBar() {
@@ -858,11 +976,15 @@ async function loadList(append) {
 /* ------------------------------------------------------------------ 详情 */
 
 async function selectLine(id) {
+  S.preview = null;                     // 换线了，来源预览作废
+  S.pick = { line: '', stop: null };    // ①②的选中状态也清掉
   S.sel = id;
+  S.ref = null;
   $('#ldPanel').innerHTML = `<div class="ld-empty">读取中…</div>`;
   try {
     const d = await api('/api/ld/line?id=' + id);
     S.detail = d;
+    await refreshRef();
     renderPanel();
     renderList();
     loadGeom(id);
@@ -870,6 +992,30 @@ async function selectLine(id) {
   } catch (e) {
     $('#ldPanel').innerHTML = `<div class="ld-empty">${esc(e.message)}</div>`;
   }
+}
+
+/** 取这条线的资料库介绍（正式名称 / 起讫站点的口径） */
+async function refreshRef() {
+  const d = S.detail;
+  if (!d) { S.ref = null; return; }
+  try {
+    const r = await api('/api/ld/ref?name=' + encodeURIComponent(d.name));
+    S.ref = r.item || null;
+  } catch (_) { S.ref = null; }
+}
+
+/** 把资料库的中文名称 / 起止站点应用到这条线 */
+async function applyRef(what) {
+  const d = S.detail;
+  if (!d) return;
+  try {
+    const r = await api('/api/ld/ref/apply', { id: d.id, what });
+    if (r.conflict) toast(r.conflict, true);
+    else toast(`已套用资料库的${r.applied.join('、') || '内容'}`);
+    S.detail = r.line;
+    await refreshRef();
+    renderPanel(); renderMapInfo(); loadList();
+  } catch (e) { toast(e.message, true); }
 }
 
 async function loadGeom(id) {
@@ -914,16 +1060,114 @@ async function loadCandidates(id) {
 function renderMapInfo() {
   const d = S.detail;
   if (!d) { $('#ldMapInfo').innerHTML = '<div class="t" style="color:#77839a">未选线路</div>'; return; }
+  /* 正在预览某个来源写法：地图上画的是那条来源的站序，不是本线 */
+  if (S.preview) {
+    const p = S.preview;
+    const geo = !p.hasGeom
+      ? '这个来源没有走向，按站点直连示意'
+      : p.spineOnly
+        ? `走向 <b>${fmtKm(p.geomKm)}</b>（主轴拼接 ${p.nPart} 段，断口按直线补齐）`
+        : `走向 <b>${fmtKm(p.geomKm)}</b>（原始 ${p.nPart} 段${
+            p.thinned ? ' · 抽稀到 ' + p.nPt + ' 点' : ''}）`;
+    $('#ldMapInfo').innerHTML = `<div class="t" style="color:#c47f17">预览来源 · ${esc(p.name)}
+        <span class="tag">${esc(SRC[p.src] || p.src)}</span></div>
+      <div class="r">${p.n} 站 · 有坐标 <b>${p.coordN}</b> / ${p.n}
+        ${p.totalKm != null ? ' · 里程 <b>' + fmtKm(p.totalKm) + '</b>' : ''}<br>${geo}<br>
+        <a href="#" id="ldPrevBack" style="color:var(--accent)">← 回到本线「${esc(d.name)}」</a></div>`;
+    const back = $('#ldPrevBack');
+    if (back) back.onclick = (e) => { e.preventDefault(); restoreSelf(); };
+    return;
+  }
   const g = (S.geom && S.geom.geom) || null;
   const withC = (d.stops || []).filter(s => s.lat != null).length;
   const geo = g
-    ? `走向 <b>${fmtKm(g.km)}</b>（OSM · ${g.nPart} 段${g.ask && g.ask !== d.name ? ' · 用「' + esc(g.ask) + '」' : ''}）`
-    : `无 OSM 走向，按站点直连示意`;
+    ? `走向 <b>${fmtKm(g.km)}</b>（${g.src === 'route'
+        ? '合并的来源包走向'
+        : (g.src === 'geojson' ? '导入的 GeoJSON' : 'OSM')} · ${g.nPart} 段${
+        g.ask && g.ask !== d.name ? ' · 用「' + esc(g.ask) + '」' : ''}）`
+    : `无走向，按站点直连示意`;
   $('#ldMapInfo').innerHTML = `<div class="t">${esc(d.name)}
       <span class="tag">${KIND[d.kind] || '未分'}</span>
       <span class="tag">${d.status === 'confirmed' ? '已确认' : '待整理'}</span></div>
     <div class="r">${(d.stops || []).length} 站 · 有坐标 <b>${withC}</b> / ${(d.stops || []).length}
       · 里程 <b>${fmtKm(d.total_km)}</b><br>${geo}</div>`;
+}
+
+/** 在地图上预览某个来源写法的站序（各来源写法 / 收一条里搜到的，点了就画） */
+async function previewSource(src, name, alEl, kind = 'line') {
+  if (S.preview && S.preview.src === src && S.preview.name === name) {
+    return restoreSelf();          // 再点一次 = 回到本线
+  }
+  let dd;
+  try {
+    dd = await api('/api/ld/source/stops?source=' + encodeURIComponent(src) +
+                   '&name=' + encodeURIComponent(name));
+  } catch (e) { toast('读不到这条来源：' + e.message, true); return; }
+  const stops = dd.stops || [];
+  const parts = dd.parts || [];
+  /* ① 线路来源只要「有走向」就能用，哪怕这条来源 0 站（line_route 里
+     rg / hdx / cnrail 有大把这种，京沪高铁就是）；② 站点来源才必须有站序。 */
+  if (kind === 'stop' && !stops.length) {
+    toast('这个来源只有走向、没有站序，当不了②站点来源（可以当①线路来源）', true); return;
+  }
+  if (!stops.length && !parts.length) {
+    toast('这个来源既没有站序也没有走向，用不了', true); return;
+  }
+  S.preview = { src, name, n: stops.length,
+                coordN: dd.coordN != null ? dd.coordN : stops.filter(s => s.lat != null).length,
+                totalKm: dd.totalKm,
+                nPart: dd.nPart || 0, nPt: dd.nPt || 0,
+                geomKm: dd.geomKm != null ? dd.geomKm : dd.totalKm,
+                hasGeom: parts.length > 0, thinned: !!dd.thinned,
+                spineOnly: !!dd.spineOnly };
+  /* 新导入的三套走向来源（rail-globe / OSM / cnrail）自带几何，直接画实际走向；
+     底表 / 资料库 / china-emu / 自建只有站序，退回点 + 直连示意 */
+  MAP.setData(stops, parts);
+  renderMapInfo();
+  $$('#ldPanel .al').forEach(x => x.classList.remove('on'));
+  if (alEl) alEl.classList.add('on');
+  toast(!stops.length
+    ? `地图上显示「${name}」的走向（${parts.length} 段）；这条来源没有站点，① 只用它的走向`
+    : parts.length
+      ? `地图上显示来源「${name}」的 ${stops.length} 站 + 实际走向`
+      : `地图上显示的是来源「${name}」（${stops.length} 站，这个来源没有走向）`);
+}
+
+/** ③ 合并保存前的对照：走向来自哪、站点来自哪，一眼看清合成的是什么 */
+function mergeSummary(d) {
+  if (!d) return '';
+  const alAll = d.aliases || [];
+  const lp = alAll.find(a => a.source + '\u0001' + a.name === S.pick.line) || null;
+  const lineTxt = lp
+    ? `<b>${esc(SRC[lp.source] || lp.source)} · ${esc(lp.name)}</b>`
+      + (lp.hasGeom
+        ? `（走向 ${lp.km != null ? fmtKm(lp.km) : '有'}${lp.nPart ? ' · ' + lp.nPart + ' 段' : ''}）`
+        : '（这来源没有走向，只借名字）')
+    : '<span class="warn">还没选</span>';
+  const sp = S.pick.stop;
+  let stopTxt;
+  if (sp && sp.self) {
+    stopTxt = `<b>本线现在的站序</b>（${(d.stops || []).length} 站 · 定位 ${d.coordDone || 0}）`;
+  } else if (sp) {
+    const a = alAll.find(x => x.source === sp.source && x.name === sp.name) || {};
+    stopTxt = `<b>${esc(SRC[sp.source] || sp.source)} · ${esc(sp.name)}</b>`
+      + `（${a.nStop || 0} 站 · 定位 ${a.coordN || 0}）`;
+  } else {
+    stopTxt = '<span class="warn">还没选</span>';
+  }
+  return `<div class="mrow"><label>① 走向</label><span>${lineTxt}</span></div>
+    <div class="mrow"><label>② 站点</label><span>${stopTxt}</span></div>
+    <div class="mrow"><label>③ 合成</label><span>一条确认线路 + 基本线路：按 ① 走向画线，按 ② 站序与定位落站</span></div>`;
+}
+
+/** 回到本线的站序 + 走向 */
+function restoreSelf() {
+  S.preview = null;
+  $$('#ldPanel .al').forEach(x => x.classList.remove('on'));
+  const d = S.detail;
+  MAP.setData((d && d.stops) || [],
+              (S.geom && S.geom.geom && S.geom.geom.parts) || []);
+  renderMapInfo();
 }
 
 function renderPanel() {
@@ -936,21 +1180,78 @@ function renderPanel() {
       结果都存在独立的 <code>linedesk.db</code> 里。</div>`;
     return;
   }
-  const aliases = (d.aliases || []).map(a => `<span class="al">
+  /* ①② 都是「已收的写法里挑一条」：① 挑走向，② 挑站点和定位。
+     每行右边标出体量（有没有走向 / 多少站 / 几个有定位），点一行就选中（单选）。 */
+  const alAll = d.aliases || [];
+  const keyOf = (a) => a.source + '\u0001' + a.name;
+  const confLine = (d.srcLineItems || [])[0];
+  if (!S.pick.line || !alAll.some(a => keyOf(a) === S.pick.line)) {
+    S.pick.line = confLine ? keyOf(confLine) : '';
+  }
+  const stopCands = alAll.filter(a => (a.nStop || 0) >= 2);
+  const pStop = S.pick.stop;
+  const stopPickOk = pStop && (pStop.self ||
+    stopCands.some(a => a.source === pStop.source && a.name === pStop.name));
+  if (!stopPickOk) {
+    const sp = d.stopSrc || {};
+    /* 站序被人工删/加/改名/反向过：② 默认选「现在的站序」，
+       别自动选回来源行 —— 否则点「用它并确认」会把来源那份完整站序灌回来，
+       用户刚删的那一站又冒出来（2026-11-06 实测问题）。 */
+    const canSrc = !d.stopsEdited && sp.source && sp.source !== 'geojson'
+      && stopCands.some(a => a.source === sp.source && a.name === sp.name);
+    S.pick.stop = canSrc ? { source: sp.source, name: sp.name }
+      : ((d.stops || []).length >= 2 ? { self: true } : null);
+  }
+  const rowHtml = (a, kind) => {
+    const on = kind === 'line' ? keyOf(a) === S.pick.line
+      : !!(S.pick.stop && !S.pick.stop.self
+           && S.pick.stop.source === a.source && S.pick.stop.name === a.name);
+    const meta = [];
+    if (kind === 'line') {
+      meta.push(a.hasGeom
+        ? `走向 ${a.km != null ? fmtKm(a.km) : '有'}${a.nPart ? ' · ' + a.nPart + ' 段' : ''}`
+        : '没走向');
+      if (a.nStop) meta.push(`${a.nStop} 站`);
+      /* 0 站但有走向：明确标成「能当①用」，别让人以为选不了 */
+      else if (a.hasGeom) meta.push('0 站 · 仅走向');
+      if (a.ok) meta.push('已确认');
+    } else {
+      meta.push(`${a.nStop || 0} 站`, `定位 ${a.coordN || 0}`);
+      if (a.km != null) meta.push(fmtKm(a.km));
+    }
+    return `<div class="srcrow ${kind}${on ? ' on' : ''}" data-src="${esc(a.source)}"
+        data-name="${esc(a.name)}" data-kind="${kind}"
+        title="点这里选中${kind === 'line' ? '它当这条线的走向' : '它当站点来源'}，地图上同时画出它的${kind === 'line' ? '走向' : '站序'}">
+      <span class="rd"></span>
       <span class="s ${a.source}">${esc(SRC[a.source] || a.source)}</span>
-      <span title="${esc(a.name)}">${esc(a.name)}</span>
-      <span class="x" data-del="${a.id}" title="删掉这个别名">×</span>
-    </span>`).join('');
+      <span class="nm">${esc(a.name)}</span>
+      <span class="m">${meta.join(' · ')}</span>
+      <span class="x" data-del="${a.id}" title="不再收这条写法">×</span>
+    </div>`;
+  };
+  const stopSrc = d.stopSrc;
+  const stopLabel = stopSrc
+    ? (stopSrc.source === 'geojson'
+        ? `GeoJSON · ${esc(stopSrc.name)}`
+        : `${esc(SRC[stopSrc.source] || stopSrc.source)} · ${esc(stopSrc.name)}`)
+    : '<span class="hint">还没选站点来源</span>';
   const stops = (d.stops || []).map((s, i) => `<div class="st${s.lat == null ? ' nocoord' : ''}" data-i="${i}">
       <span class="i">${i + 1}</span>
       <input class="nm" value="${esc(s.name)}" data-nm="${i}">
       <span class="km">${s.km == null ? '—' : (Math.round(Number(s.km) * 10) / 10)}</span>
       <span class="op">
+        <button class="ins" data-ins="${i}" title="在这一站后面插入新站">+</button>
         <button data-up="${i}" title="上移">↑</button>
         <button data-down="${i}" title="下移">↓</button>
         <button class="del" data-rm="${i}" title="删掉这一站">✕</button>
       </span>
     </div>`).join('');
+  /* ④「定为基本线路」连同它里面的走向下拉都取消了（2026-11-06）：
+     走向只由 ① 确认，③ 合并时直接用 ① 定下的那份，不再二次配置。 */
+  /* ③ 现在同时定为基本线路，规范名不能带「（来源）」后缀 —— 提前给个一键改正名 */
+  const renameTo = (d.name || '').replace(/[（(](?:底表|OSM|自建|china-emu|GeoJSON|备份|线路资料库)[^）)]*[）)]/g, '')
+    .replace(/#\d+$/, '').trim();
+  const needRename = renameTo && renameTo !== d.name;
   const parents = (d.parents || []).map(p => `<div class="rel">
       <span style="color:#77839a">属于</span>
       <a href="#" data-goto="${p.id}">${esc(p.name)}</a>
@@ -966,9 +1267,20 @@ function renderPanel() {
   const fillable = (d.aliases || []).filter(a => a.source !== 'osm');
 
   box.innerHTML = `
+  ${(() => {
+    /* 2026-11-06 新流程：基本信息 → ① 走向 → ② 站点 + 站序 → ③ 合并即基本线路。
+       ④「定为基本线路」独立步骤已取消。 */
+    const step = (ok, t) => `<span class="fl${ok ? ' on' : ''}">${ok ? '✓' : '○'} ${t}</span>`;
+    return `<div class="ld-flow">
+      ${step(!!d.name, '基本信息')}<i>›</i>
+      ${step(d.line_ok, '① 走向')}<i>›</i>
+      ${step(d.stop_ok, '② 站点 + 站序')}<i>›</i>
+      ${step(d.status === 'confirmed', '③ 确认 = 基本线路')}
+    </div>`;
+  })()}
+
   <div class="sec">
     <h4>基本信息 <span class="r">
-      <button class="btn sm" id="ldConfirm">${d.status === 'confirmed' ? '取消确认' : '确认这条'}</button>
       <button class="btn sm danger" id="ldDelete">删除</button></span></h4>
     <div class="frow"><label>规范名</label><input id="ldName" value="${esc(d.name)}"></div>
     <div class="frow"><label>类型</label>
@@ -978,34 +1290,122 @@ function renderPanel() {
       <input id="ldKm" value="${d.total_km == null ? '' : d.total_km}" style="flex:0 0 90px">
     </div>
     <div class="frow"><label>起讫</label>
-      <input value="${esc(d.from_sta || '')}" readonly>
-      <input value="${esc(d.to_sta || '')}" readonly>
+      <input id="ldFrom" value="${esc(d.from_sta || '')}" placeholder="起点站">
+      <input id="ldTo" value="${esc(d.to_sta || '')}" placeholder="终点站">
     </div>
     <div class="frow"><label>备注</label><textarea id="ldNote" placeholder="为什么这么归并 / 还差什么">${esc(d.note || '')}</textarea></div>
     <div class="frow" style="justify-content:flex-end;gap:6px">
-      <span class="hint" style="margin-right:auto">改完记得存</span>
-      <button class="btn primary" id="ldSave">保存</button>
+      <span class="hint" style="margin-right:auto">${d.updated_at
+        ? '<span style="color:#0f7a45">✓ 已正式保存到整理库</span> · 最近更新 ' + esc(d.updated_at)
+        : '改完记得存'}</span>
+      <button class="btn primary" id="ldSave">保存基本信息</button>
     </div>
+    <div class="hint" style="margin-top:-2px">基本信息点「保存」就正式写入整理库；
+      <b>① ② ③ 各自只保存自己那部分</b>，不会回头改这里。</div>
   </div>
 
-  <div class="sec">
-    <h4>各来源写法 <span class="n">${(d.aliases || []).length}</span>
-      <span class="r"><button class="btn sm" id="ldAddAlias">+ 收一条</button></span></h4>
-    <div class="tagline">${aliases || '<span class="hint">还没有别名</span>'}</div>
-    <div class="hint" style="margin-top:8px">同一个线名在不同来源里写法不同（高铁 / 高速线 / 高速铁路），
-      收进来的才算同一条线。</div>
+  <div class="sec${d.line_ok ? ' ok' : ''}">
+    <h4>① 线路来源 <span class="n">已收 ${alAll.length} 条</span>
+      <span class="r">
+        <button class="btn sm" id="ldGeoGeom" title="只导入线路走向（OSM 值），不改动任何车站">导入走向</button>
+        <button class="btn sm" id="ldAddSrc" title="已有的都不合适时，从各来源里再收一条进来">+ 收一条</button>
+        <button class="btn sm${d.line_ok ? '' : ' primary'}" id="ldOkSrc">${d.line_ok ? '重新确认' : '确认线路来源'}</button>
+      </span></h4>
+    <div class="hint">① <b>只确认并保存这条铁路线的 OSM 值（走向）</b>，<b>和线路停靠的车站无关</b> ——
+      这里不新增 / 删除 / 改动任何车站，也不改规范名和起讫站点。
+      已收的写法里点一行选中（地图上画出它的走向）；都不合适就 <b>+ 收一条</b>，
+      或 <b>导入走向</b>（GeoJSON，只取线形）。<b>只要有走向就能用，哪怕这条来源 0 站</b>
+      （行尾标「0 站 · 仅走向」）。选好点「确认线路来源」正式保存。</div>
+    <div class="srcrows">${alAll.length ? alAll.map(a => rowHtml(a, 'line')).join('')
+      : '<div class="hint" style="padding:8px">还没收任何写法，点「+ 收一条」或「导入走向」</div>'}</div>
+    <div class="hint">${d.line_ok ? '<span style="color:#0f7a45">✓ 已确认（只存了走向来源）</span>，换了一条要重新点一次' : '○ 还没确认'}</div>
+  </div>
+
+  <div class="sec${d.stop_ok ? ' ok' : ''}">
+    <h4>② 站点来源 <span class="n">${(d.stops || []).length} 站 · 定位 ${d.coordDone || 0}</span>
+      <span class="r">
+        <button class="btn sm" id="ldAddStopSrc" title="没有合适的站点来源时，从各来源里再收一条进来">+ 收一条</button>
+        <button class="btn sm" id="ldGeoIn" title="只导入车站和定位，不改动线路走向">导入站点</button>
+        <button class="btn sm${d.stop_ok ? '' : ' primary'}" id="ldStopUse">用它并确认</button>
+      </span></h4>
+    <div class="hint">② <b>只确认并保存这条线的全部车站与位置</b>，<b>和 OSM 路线无关</b> ——
+      这里<b>不保存、不改动线路走向</b>。点一行选中（地图上画出那家的站序），
+      再点「用它并确认」把站点和定位搬到本线；「导入站点」也只取车站。<br>
+      <b>改过站序后会默认选中「现在的站序」</b>：这时点「用它并确认」只确认这份站序，
+      <b>不会把来源那份完整站序灌回来</b>；要用回来源那份，点来源行再确认（会覆盖改动）。</div>
+    <div class="srcrows">${stopCands.map(a => rowHtml(a, 'stop')).join('')}
+      ${(d.stops || []).length >= 2 ? `<div class="srcrow stop${
+        S.pick.stop && S.pick.stop.self ? ' on' : ''}" data-self="1" data-kind="stop"
+        title="用本线现在的站序和定位">
+        <span class="rd"></span><span class="s custom">本线</span>
+        <span class="nm">现在的站序${d.stopSrc && d.stopSrc.source === 'geojson' ? '（GeoJSON 导入）' : ''}</span>
+        <span class="m">${(d.stops || []).length} 站 · 定位 ${d.coordDone || 0}</span></div>` : ''}
+    </div>
+    <div class="hint">当前：${stopLabel}${d.stop_ok ? '<br><span style="color:#0f7a45">✓ 已确认（只存了站点与位置）</span>' : ''}</div>
   </div>
 
   <div class="sec">
     <h4>站序 <span class="n">${(d.stops || []).length}</span>
       <span class="r">
-        ${fillable.length ? `<select id="ldFillSel" style="height:26px;font-size:11.5px;border:1px solid #e2e8f0;border-radius:7px">
-          ${fillable.map((a, i) => `<option value="${i}">${esc(SRC[a.source])}：${esc(a.name)}</option>`).join('')}
-        </select><button class="btn sm" id="ldFill">用它</button>` : ''}
-        <button class="btn sm" id="ldAddStop">+ 站</button>
+        <button class="btn sm" id="ldReverse" title="整条线倒过来，里程按「原末站里程 − 原里程」重算">反向站序</button>
+        <button class="btn sm" id="ldAddStop" title="在弹出的窗口里选插到哪一站之后，可一次填多个站名">+ 站（可指定位置）</button>
       </span></h4>
-    <div class="stops" id="ldStops">${stops || '<div class="hint" style="padding:10px">这条线还没有站序，可以从上面的来源导入</div>'}</div>
-    <div class="hint">点地图上的站点会定位到这一站；站名可改，↑↓ 调顺序，✕ 删掉。</div>
+    <div class="stops" id="ldStops">${stops || '<div class="hint" style="padding:10px">这条线还没有站序，可以在上面「② 站点来源」里导入，也可以直接点「+ 站」</div>'}</div>
+    <div class="hint">点地图上的站点会定位到这一站；站名可改，↑↓ 调顺序，✕ 删站。
+      <b>+ 指定插入位置</b>：点某一站行的 <b>+</b> 就直接插在它后面；点顶部「+ 站（可指定位置）」
+      可在弹窗里选「最前面 / 第 N 站之后」，一次填多个站名（换行 / 逗号 / 顿号分隔）按顺序插入。
+      新站<b>里程留空、不自动插值</b>，坐标按站名查档案补；原有各站的里程和坐标不动。
+      <br><b>反向站序</b> = 整条线倒过来，里程按「原末站里程 − 原里程」重算、新起点 0
+      （原本缺里程的站仍留空）；只改站序和里程，不动坐标和总里程。
+      改完站序 ② 会自动选中「现在的站序」，再点一次「用它并确认」即可，站序不会被覆盖。</div>
+  </div>
+
+  <div class="sec${d.status === 'confirmed' ? ' ok' : ''}">
+    <h4>③ 合并保存为确认线路 <span class="n">${d.baseInfo ? '已定为基本线路' : ''}</span>
+      ${d.baseInfo ? '<span class="r"><button class="btn sm danger" id="ldUnpublish">撤销基本线路</button></span>' : ''}</h4>
+    <div class="hint">把 <b>① 的走向（OSM 值）</b>和 <b>② 的站点 + 位置</b>合并保存成一条确认线路，
+      <b>并且同时定为基本线路</b>（数据校对 / 地图 / 选经由一起接管）——
+      原来单独的 ④ 已取消，<b>这一步就到位</b>。
+      <br>确认要求：≥2 个停站且带定位、有真实走向、规范名是正名，缺一样会拦住。
+      <br>① / ② / 站序换过之后要再点一次合并保存，否则用的还是上一次的。</div>
+    <div class="mergebox" id="ldMergeBox">${mergeSummary(d)}</div>
+    ${d.line_ok && d.stop_ok ? '' : '<div class="hint warn">还差：'
+      + [!d.line_ok ? '线路来源' : '', !d.stop_ok ? '站点来源' : ''].filter(Boolean).join('、')
+      + '（两边都要先确认）</div>'}
+    ${needRename ? `<div class="frow"><label>规范名</label>
+        <input value="${esc(d.name)}" readonly style="opacity:.6">
+        <button class="btn sm" id="ldRenameBase">改成「${esc(renameTo)}」</button></div>
+      <div class="hint warn">规范名还带「（来源）」后缀，合并保存会拦住，先改成正名。</div>` : ''}
+    <div class="hint" style="margin-top:-2px">走向就用 <b>① 确认的那份</b>，这里不再单独配置；
+      要换走向回 ① 重新确认 / 重新导入，再点一次合并保存。</div>
+    ${d.baseInfo ? `<div class="hint" style="color:#0f7a45">✓ 已定稿生效：${d.baseInfo.nStop} 站${
+        d.baseInfo.geomName ? ' · 走向 ' + esc(d.baseInfo.geomName) : ' · 走向未配'}。
+        改了站序 / 走向直接点下面「重新合并保存」覆盖，不用先撤销。</div>` : ''}
+    <div class="frow" style="justify-content:flex-end">
+      <button class="btn primary" id="ldFinalize"${d.line_ok && d.stop_ok ? '' : ' disabled'}>
+        ${d.status === 'confirmed' ? '重新合并保存（覆盖基本线路）' : '合并保存为确认线路'}</button>
+    </div>
+  </div>
+
+  <div class="sec">
+    <h4>资料库介绍 <span class="n" style="font-weight:400">正式名称口径</span>
+      <span class="r">
+        <button class="btn sm" id="ldRefName"${S.ref ? '' : ' disabled'}>用它的中文名称</button>
+        <button class="btn sm" id="ldRefFromTo"${S.ref ? '' : ' disabled'}>用它的起讫站点</button>
+      </span></h4>
+    ${S.ref ? `<div class="ref">
+      <div class="rl"><b>${esc(S.ref.name)}</b>
+        <span class="m">${esc(S.ref.full_name || '')}</span></div>
+      <div class="rm">
+        ${S.ref.ltype ? `<span>${esc(S.ref.ltype)}</span>` : ''}
+        ${S.ref.service ? `<span>${esc(S.ref.service)}</span>` : ''}
+        ${S.ref.length_km ? `<span>${esc(S.ref.length_km)} 千米</span>` : ''}
+        ${S.ref.open_date ? `<span>${esc(S.ref.open_date)}</span>` : ''}
+        ${(S.ref.from_sta || S.ref.to_sta) ? `<span>${esc(S.ref.from_sta)} – ${esc(S.ref.to_sta)}</span>` : ''}
+      </div>
+      <div class="ri">${esc(S.ref.intro || '')}</div>
+      ${S.ref.url ? `<div class="ru"><a href="${esc(S.ref.url)}" target="_blank" rel="noreferrer">原页面</a></div>` : ''}
+    </div>` : '<div class="hint">资料库里没有这条线（或名字对不上）。可以从「同族还没收的写法」里收一条资料库写法，或直接改规范名。</div>'}
   </div>
 
   <div class="sec">
@@ -1033,26 +1433,114 @@ function bindPanel() {
         name: $('#ldName').value.trim(),
         kind: $('#ldKind').value,
         total_km: $('#ldKm').value.trim() === '' ? null : Number($('#ldKm').value),
+        from_sta: $('#ldFrom').value.trim(),
+        to_sta: $('#ldTo').value.trim(),
         note: $('#ldNote').value,
       };
       const r = await api('/api/ld/save', body);
-      toast('已保存到整理库');
+      toast(`基本信息已正式保存到整理库${r.line && r.line.savedAt ? '（' + r.line.savedAt + '）' : ''}`);
       S.detail = r.line;
       renderPanel(); renderMapInfo();
       loadList();
     } catch (e) { toast(e.message, true); }
   };
 
-  $('#ldConfirm').onclick = async () => {
+  /* ---- ① 线路来源：只确认并保存走向（OSM 值），不碰车站 / 基本信息 ---- */
+  $('#ldAddSrc').onclick = () => openLineSrcPick();
+  $('#ldGeoGeom').onclick = () => pickGeojson(d.id, 'geom');
+  $('#ldOkSrc').onclick = async () => {
+    const a = (d.aliases || []).find(x => x.source + '\u0001' + x.name === S.pick.line)
+      || (d.aliases || []).find(x => x.ok);
+    if (!a) { toast('先在上面选一条线路来源（没有合适的就「+ 收一条」或「导入走向」）', true); return; }
     try {
-      const r = await api('/api/ld/save', {
-        id: d.id, status: d.status === 'confirmed' ? 'draft' : 'confirmed',
+      const r = await api('/api/ld/src/line', {
+        id: d.id, items: [{ source: a.source, name: a.name }],
+      });
+      S.pick.line = a.source + '\u0001' + a.name;
+      S.detail = r.line;
+      if (r.conflict) toast(r.conflict, true);
+      else toast(`① 走向已正式保存：${SRC[a.source] || a.source} · ${a.name}（站点未改动）`);
+      await refreshRef();
+      renderPanel(); renderMapInfo(); loadList();
+    } catch (e) { toast(e.message, true); }
+  };
+
+  /* ---- ② 站点来源：只保存站点 + 定位，不碰线路走向 ---- */
+  $('#ldAddStopSrc').onclick = () => openLineSrcPick('stop');
+  $('#ldGeoIn').onclick = () => pickGeojson(d.id, 'stops');
+  const useBtn = $('#ldStopUse');
+  if (useBtn) useBtn.onclick = async () => {
+    const p = S.pick.stop;
+    let src = '', nm = '', fill = true, label = '';
+    if (p && p.self) {
+      /* 确认「本线现在的站序」：只置已确认，绝不从来源搬站序回来 */
+      src = 'manual'; nm = ''; fill = false;
+      label = '本线现在的站序';
+    } else if (p) {
+      src = p.source; nm = p.name;
+      label = `${SRC[src] || src} · ${nm}`;
+    } else {
+      toast('先在上面选一家站点来源（想保留手工改的站序就选「现在的站序」）', true); return;
+    }
+    const n0 = (d.stops || []).length;
+    if (fill) {
+      const a = (d.aliases || []).find(x => x.source === src && x.name === nm) || {};
+      if (!confirm(`用「${label}」的 ${a.nStop || '?'} 站站点和定位覆盖现在这 ${n0} 站？\n\n`
+        + (d.stopsEdited ? '⚠ 你手工改过站序（删/加/改名/反向），这一步会把改动丢掉。\n' : '')
+        + '若只想确认当前这份站序，请点「现在的站序」那一行再确认。')) return;
+    }
+    try {
+      const r = await api('/api/ld/src/stop', {
+        id: d.id, source: src, name: nm, fill,
       });
       S.detail = r.line;
       renderPanel(); renderMapInfo(); loadList();
-      toast(r.line.status === 'confirmed' ? '已标记确认' : '改回待整理');
+      loadGeom(d.id);
+      const n = (r.line.stops || []).length;
+      toast(`站点来源已确认：${n} 站 · 定位 ${r.line.coordDone || 0}`
+        + (fill ? '' : '（本线站序，未改动）'));
     } catch (e) { toast(e.message, true); }
   };
+
+  /* ---- ③ 合并保存为确认线路 = 合并 ①② + 直接定为基本线路（④ 已取消） ---- */
+  const fin = $('#ldFinalize');
+  if (fin) fin.onclick = async () => {
+    if (d.status === 'confirmed' &&
+        !confirm(`重新合并保存「${d.name}」？\n\n` +
+          '会用 ① 现在的走向 + ② 现在的站点与站序，覆盖已定的基本线路。')) return;
+    try {
+      const r = await api('/api/ld/finalize', { id: d.id });
+      const nl = r.line || {};
+      const m = nl.merged || {};
+      S.detail = nl;
+      S.preview = null;
+      renderPanel(); renderMapInfo(); loadList();
+      if (m.geom) {
+        loadGeom(d.id);
+        toast(`已合并：${m.geom.label} 走向`
+          + (m.geom.km != null ? ' ' + fmtKm(m.geom.km) : '')
+          + (m.geom.nPart ? ' · ' + m.geom.nPart + ' 段' : '')
+          + ` + ${m.stops} 站（定位 ${m.coordN}）`);
+      } else {
+        toast(`已合并保存：${m.stops || 0} 站`);
+      }
+      if (nl.published) {
+        setTimeout(() => toast('③ 已同时定为基本线路：数据校对 / 地图 / 选经由一起接管，'
+          + '主站「车站/线路」也能查到（含停站与走向）', false, 6000), 1200);
+      } else if (nl.publishError) {
+        toast('已合并成确认线路，但定为基本线路失败：' + nl.publishError
+          + '（改好后再点一次「重新合并保存」即可）', true, 9000);
+      }
+      if (m.warn && m.warn.length) toast(m.warn.join('；'), true);
+    } catch (e) { toast(e.message, true); }
+  };
+
+  /* ---- 资料库中文名称 / 起讫站点 ---- */
+  const rn = $('#ldRefName');
+  if (rn) rn.onclick = () => applyRef('name');
+  const rf = $('#ldRefFromTo');
+  if (rf) rf.onclick = () => applyRef('fromto');
+
 
   $('#ldDelete').onclick = async () => {
     if (!confirm(`删掉「${d.name}」？别名和站序一起删。`)) return;
@@ -1065,17 +1553,95 @@ function bindPanel() {
     } catch (e) { toast(e.message, true); }
   };
 
+  /* 一键把「京沪线（OSM）」这种初稿名改成正名「京沪线」 */
+  const ren = $('#ldRenameBase');
+  if (ren) ren.onclick = async () => {
+    const to = (d.name || '').replace(/[（(](?:底表|OSM|自建|china-emu|GeoJSON|备份|线路资料库)[^）)]*[）)]/g, '')
+      .replace(/#\d+$/, '').trim();
+    if (!to) return;
+    try {
+      const r = await api('/api/ld/save', { id: d.id, name: to });
+      toast(`规范名已改成「${to}」`);
+      S.detail = r.line;
+      renderPanel(); renderMapInfo(); loadList();
+    } catch (e) { toast(e.message, true); }
+  };
+
+  /* ④「定为基本线路」及其走向下拉已取消：③ 一步到位，走向只由 ① 决定。
+     这里只保留「撤销基本线路」的出口，免得定稿后没法退回。 */
+  const unpub = $('#ldUnpublish');
+  if (unpub) unpub.onclick = async () => {
+    const b = d.baseInfo || {};
+    if (!confirm(`撤销基本线路「${b.name || d.name}」？\n\n` +
+        `校对 / 地图 / 选经由退回原来的「默认版本 > 底表 > 站数最多」规则。`)) return;
+    try {
+      await api('/api/ld/unpublish', { name: b.name || d.name });
+      S.detail = await api('/api/ld/line?id=' + d.id);   // 重取，baseInfo 变 null
+      renderPanel(); loadList();
+      toast('已撤销，退回原来的取数规则');
+    } catch (e) { toast(e.message, true); }
+  };
+
   $$('#ldPanel [data-del]').forEach(x => {
-    x.onclick = async () => {
+    x.onclick = async (ev) => {
+      ev.stopPropagation();               // 别名整条可点（地图预览），删掉×要单独响应
       try {
         const r = await api('/api/ld/alias/del', { aliasId: Number(x.dataset.del) });
         S.detail = r.line; renderPanel();
       } catch (e) { toast(e.message, true); }
     };
   });
+  /* ①② 的候选行：点一行 = 选中（单选）+ 地图上画它的走向 / 站序 */
+  $$('#ldPanel .srcrow[data-src]').forEach(x => {
+    x.onclick = (ev) => {
+      if (ev.target.closest('[data-del]')) return;
+      const kind = x.dataset.kind === 'stop' ? 'stop' : 'line';
+      if (kind === 'line') {
+        S.pick.line = x.dataset.src + '\u0001' + x.dataset.name;
+      } else {
+        S.pick.stop = { source: x.dataset.src, name: x.dataset.name };
+      }
+      $$(`#ldPanel .srcrow.${kind}`).forEach(y => y.classList.toggle('on', y === x));
+      const same = S.preview && S.preview.src === x.dataset.src
+        && S.preview.name === x.dataset.name;
+      if (!same) previewSource(x.dataset.src, x.dataset.name, null, kind);
+      const box = $('#ldMergeBox');
+      if (box) box.innerHTML = mergeSummary(S.detail);
+    };
+  });
+  /* ② 的「本线现在的站序」行 */
+  $$('#ldPanel .srcrow[data-self]').forEach(x => {
+    x.onclick = () => {
+      S.pick.stop = { self: true };
+      $$('#ldPanel .srcrow.stop').forEach(y => y.classList.toggle('on', y === x));
+      restoreSelf();
+      const box = $('#ldMergeBox');
+      if (box) box.innerHTML = mergeSummary(S.detail);
+    };
+  });
 
-  $('#ldAddAlias').onclick = () => openAliasPick();
   $('#ldCandReload').onclick = () => loadCandidates(d.id);
+
+  /* 反向站序：整条倒过来，里程按「原末站里程 − 原里程」重算，新起点 0，缺的不插值 */
+  const rev = $('#ldReverse');
+  if (rev) rev.onclick = async () => {
+    const a = d.stops || [];
+    if (a.length < 2) { toast('至少要有 2 个站才能反向', true); return; }
+    if (!confirm(`把「${d.name}」的 ${a.length} 站整条倒过来？\n\n` +
+        '· 起点 ↔ 终点 对调，站序反向\n' +
+        '· 里程 = 原末站里程 − 原里程，新起点 0；原本没里程的站仍留空\n' +
+        '· 站点坐标、总里程、线路走向都不变')) return;
+    try {
+      const r = await api('/api/ld/stops/reverse', { id: d.id });
+      S.detail = r.line;
+      S.pick.stop = { self: true };
+      renderPanel(); renderMapInfo();
+      MAP.setData((r.line.stops || []), (S.geom && S.geom.geom && S.geom.geom.parts) || []);
+      loadList();
+      toast(`站序已反向：${(r.line.stops || []).length} 站，`
+        + `${r.line.from_sta || '?'} → ${r.line.to_sta || '?'}，里程已重算`);
+    } catch (e) { toast(e.message, true); }
+  };
 
   // 站序
   const stops = () => (S.detail.stops || []).slice();
@@ -1083,6 +1649,8 @@ function bindPanel() {
     try {
       const r = await api('/api/ld/stops/save', { id: d.id, stops: arr });
       S.detail = r.line;
+      /* 手工改过站序 → ② 默认确认「本线现在的站序」，别再自动选回来源行 */
+      S.pick.stop = { self: true };
       renderPanel(); renderMapInfo();
       MAP.setData((r.line.stops || []), (S.geom && S.geom.geom && S.geom.geom.parts) || []);
       loadList();
@@ -1120,34 +1688,14 @@ function bindPanel() {
       commit(a);
     };
   });
-  const fillBtn = $('#ldFill');
-  if (fillBtn) {
-    fillBtn.onclick = async () => {
-      const sel = $('#ldFillSel');
-      const a = (S.detail.aliases || []).filter(x => x.source !== 'osm')[Number(sel.value)];
-      if (!a) return;
-      if ((S.detail.stops || []).length &&
-          !confirm(`用「${SRC[a.source]}：${a.name}」的站序覆盖现在这 ${S.detail.stops.length} 站？`)) return;
-      try {
-        const r = await api('/api/ld/stops/fill', { id: d.id, source: a.source, name: a.name });
-        S.detail = r.line;
-        renderPanel(); renderMapInfo();
-        MAP.setData((r.line.stops || []), (S.geom && S.geom.geom && S.geom.geom.parts) || []);
-        loadList();
-        toast(`已导入 ${(r.line.stops || []).length} 站`);
-      } catch (e) { toast(e.message, true); }
-    };
-  }
+  /* 新增车站：不再用 prompt 一律追加到末尾，改成可以指定插入位置的弹窗。
+     - 顶部「+ 站」→ 默认追加到末尾，但弹窗里能改选任意位置；
+     - 每一站行的「+」→ 预选「就插在这一站后面」。 */
   const addStop = $('#ldAddStop');
-  if (addStop) {
-    addStop.onclick = () => {
-      const name = prompt('加哪一站？（写在最后，可以再用 ↑ 调位置）');
-      if (!name || !name.trim()) return;
-      const a = stops();
-      a.push({ name: name.trim(), km: null, lat: null, lon: null, src: 'manual' });
-      commit(a);
-    };
-  }
+  if (addStop) addStop.onclick = () => openInsertStop(null);
+  $$('#ldPanel [data-ins]').forEach(b => {
+    b.onclick = () => openInsertStop(Number(b.dataset.ins) + 1);
+  });
 
   // 父子
   $$('#ldPanel [data-goto]').forEach(a => {
@@ -1196,6 +1744,43 @@ function openModal(title, bodyHtml, onOk, okText) {
     }
   };
   return wrap;
+}
+
+/* -------------------------------------------- 新增车站（可指定插入位置） */
+/* pos = 新站插入后的 0-based 起始下标：0 最前、i+1 插在第 i+1 站之后、n 末尾。
+   null = 默认末尾；站点行的 + 直接传 i+1，预选「就插在这一站后面」。
+   后端 /api/ld/stops/insert 按同一口径落库，前端不用拼整份站序传回去。 */
+function openInsertStop(defaultPos) {
+  const d = S.detail;
+  if (!d || !d.id) return;
+  const cur = d.stops || [], n = cur.length;
+  const raw = defaultPos == null ? n : Number(defaultPos);
+  const pos = Math.max(0, Math.min(isNaN(raw) ? n : raw, n));
+  const opts = [`<option value="0"${pos === 0 ? ' selected' : ''}>最前面（作为第 1 站）</option>`]
+    .concat(cur.map((s, i) => `<option value="${i + 1}"${pos === i + 1 ? ' selected' : ''}>`
+      + `第 ${i + 1} 站「${esc(s.name)}」之后${i === n - 1 ? '（末尾）' : ''}</option>`))
+    .join('');
+  const w = openModal('新增车站 · 指定插入位置', `
+    <div class="frow"><label>站名</label>
+      <textarea id="ldInsName" rows="3" placeholder="一次可填多个：换行 / 逗号 / 顿号分隔，按填写顺序插入"></textarea></div>
+    <div class="frow"><label>插入位置</label><select id="ldInsPos">${opts}</select></div>
+    <div class="hint">当前 ${n} 站。新站<b>里程留空、不自动插值</b>，坐标按站名查档案补；
+      原有各站的里程 / 坐标 / 相对顺序都不变。插完 ② 会自动选中「现在的站序」，
+      再点一次「用它并确认」即可。</div>`, async (wrap, msg) => {
+    const names = $('#ldInsName', wrap).value.trim()
+      .split(/[,，;；、\t\r\n]+/).map(s => s.trim()).filter(Boolean);
+    if (!names.length) throw new Error('先填要插入的站名');
+    const p = Number($('#ldInsPos', wrap).value);
+    const r = await api('/api/ld/stops/insert', { id: d.id, names, pos: p });
+    wrap.remove();
+    S.detail = r.line;
+    S.pick.stop = { self: true };     // 手工改过站序，② 别自动选回来源行
+    renderPanel(); renderMapInfo();
+    MAP.setData((r.line.stops || []), (S.geom && S.geom.geom && S.geom.geom.parts) || []);
+    loadList();
+    toast(`已在第 ${p + 1} 位插入 ${names.length} 站：${names.join('、')}`);
+  }, '插入');
+  setTimeout(() => { const el = $('#ldInsName', w); if (el) el.focus(); }, 0);
 }
 
 async function openParentPick() {
@@ -1274,7 +1859,7 @@ async function openAliasPick() {
   const d = S.detail;
   const w = openModal('收一条来源线名', `
     <div class="frow"><label>来源</label>
-      <select id="apSrc">${Object.entries(SRC).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select>
+      <select id="apSrc"><option value="">全部</option>${Object.entries(SRC).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select>
     </div>
     <div class="frow"><label>找线名</label><input id="apQ" placeholder="在五套来源里搜，如 京沪"></div>
     <div class="picklist" id="apList"><div class="hint" style="padding:10px">输入关键字搜来源线名</div></div>
@@ -1298,20 +1883,151 @@ async function openAliasPick() {
     let items = dd.items || [];
     if (src) items = items.filter(x => x.source === src);
     box.innerHTML = items.map(x => `<div class="pick" data-src="${x.source}" data-name="${esc(x.name)}">
-        <span class="s" style="background:${SRCBG(x.source)}"></span>
+        <span class="s" style="background:${SRCBG(x.source)}">${esc(SRC[x.source] || x.source)}</span>
         <span>${esc(x.name)}</span>
-        <span class="m">${x.n_stop || 0} 站</span></div>`).join('')
+        <span class="m">${x.n_stop || 0} 站${x.has_geom ? ' · 有走向' : ''}</span></div>`).join('')
       || '<div class="hint" style="padding:10px">没找到</div>';
     $$('.pick', box).forEach(p => {
       p.onclick = () => {
         $$('.pick', box).forEach(o => o.classList.remove('on'));
         p.classList.add('on');
+        /* 点选即在地图上预览这条来源，好判断是不是同一条线 */
+        previewSource(p.dataset.src, p.dataset.name);
       };
     });
   };
   $('#apQ', w).oninput = debounce(doSearch, 250);
   $('#apSrc', w).onchange = doSearch;
   doSearch();
+}
+
+/* --------------------------------- 收一条：① 走向来源 / ② 站点+定位来源，都是单选 */
+
+async function openLineSrcPick(mode = 'line') {
+  const d = S.detail;
+  if (!d) return;
+  const forStop = mode === 'stop';
+  let pick = null;                    // {source, name}
+  const w = openModal(forStop ? '收一条站点来源' : '收一条线路来源', `
+    <div class="frow"><label>来源</label>
+      <select id="lsSrc"><option value="">全部</option>${Object.entries(SRC).map(([k, v]) =>
+        `<option value="${k}">${v}</option>`).join('')}</select>
+    </div>
+    <div class="frow"><label>找线名</label><input id="lsQ" placeholder="在各来源里搜，如 京沪"></div>
+    <div class="picklist" id="lsList"><div class="hint" style="padding:10px">输入关键字搜来源线名</div></div>
+    <div class="hint">${forStop
+      ? '收的是<b>站点和定位</b>：选一家带站序的来源（<b>至少 2 站</b>）。点一行会在地图上画出它的站序，好判断是不是同一条线。'
+      : '收的是<b>走向</b>：选一条<b>有走向</b>的来源（rail-globe / OSM 走向 / cnrail 走向）。<b>哪怕 0 站也能用</b>，只要行尾标了「有走向」；点一行会在地图上画出它的走向。'}
+      收下后进入「已收未确认」，在主面板里选中它再确认。</div>`,
+    async (wrap) => {
+      if (!pick) throw new Error('先选一条');
+      const r = await api('/api/ld/alias/add', {
+        id: d.id, source: pick.source, name: pick.name,
+      });
+      wrap.remove();
+      S.detail = r.line;
+      const key = pick.source + '\u0001' + pick.name;
+      const al = (r.line.aliases || []).find(a => a.source + '\u0001' + a.name === key);
+      if (forStop) {
+        if (al && (al.nStop || 0) >= 2) {
+          S.pick.stop = { source: pick.source, name: pick.name };
+          toast(`已收下「${pick.name}」：${al.nStop} 站 · 定位 ${al.coordN || 0}，点「用它并确认」`);
+        } else {
+          toast(`「${pick.name}」没有站序，当不了站点来源`, true);
+        }
+      } else {
+        S.pick.line = key;
+        toast(`已收下「${pick.name}」，点「确认线路来源」生效`);
+      }
+      renderPanel(); loadList();
+    }, forStop ? '收下并选中' : '收下');
+
+  const box = $('#lsList', w);
+  const doSearch = async () => {
+    const q = $('#lsQ', w).value.trim();
+    const src = $('#lsSrc', w).value;
+    const dd = await api('/api/ld/source/search?limit=80' + (q ? '&q=' + encodeURIComponent(q) : ''));
+    let items = dd.items || [];
+    if (src) items = items.filter(x => x.source === src);
+    if (forStop) items = items.filter(x => (x.n_stop || 0) >= 2);
+    box.innerHTML = items.map(x => `<div class="pick" data-src="${x.source}"
+        data-name="${esc(x.name)}" data-n="${x.n_stop || 0}">
+        <span class="s" style="background:${SRCBG(x.source)}">${esc(SRC[x.source] || x.source)}</span>
+        <span>${esc(x.name)}</span>
+        <span class="m">${x.n_stop || 0} 站${!forStop && x.has_geom ? ' · 有走向' : ''}${x.totalKm ? ' · ' + fmtKm(x.totalKm) : ''}</span></div>`).join('')
+      || '<div class="hint" style="padding:10px">没找到'
+        + (forStop ? '（要至少 2 站的来源；只有走向、没有站序的当不了站点来源）' : '') + '</div>';
+    $$('.pick', box).forEach(p => {
+      p.onclick = () => {
+        $$('.pick', box).forEach(o => o.classList.remove('on'));
+        p.classList.add('on');
+        pick = { source: p.dataset.src, name: p.dataset.name };
+        /* 点选即在地图上预览这条来源，好判断是不是同一条线 */
+        previewSource(p.dataset.src, p.dataset.name, null, forStop ? 'stop' : 'line');
+      };
+    });
+  };
+  $('#lsQ', w).oninput = debounce(doSearch, 250);
+  $('#lsSrc', w).onchange = doSearch;
+  doSearch();
+}
+
+/* ------------------------------------------------- 导入 GeoJSON（站序 + 走向） */
+
+function readFileText(file) {
+  return new Promise((res, rej) => {
+    const fr = new FileReader();
+    fr.onload = () => res(fr.result);
+    fr.onerror = () => rej(new Error('读文件失败'));
+    fr.readAsText(file, 'utf-8');
+  });
+}
+
+/** lid 有值 = 导进这条线；没有 = 每份文件新建一条线。
+ *  only: 'stops' 只导站点（②）、'geom' 只导走向（①）、'' 两边都导（顶栏建新线）。 */
+function pickGeojson(lid, only) {
+  const inp = document.createElement('input');
+  inp.type = 'file';
+  inp.accept = '.json,.geojson,application/geo+json,application/json';
+  inp.multiple = !lid;
+  inp.onchange = async () => {
+    const files = Array.from(inp.files || []);
+    if (files.length) await importGeojsonFiles(files, lid || 0, only || '');
+  };
+  inp.click();
+}
+
+async function importGeojsonFiles(files, lid, only) {
+  let firstId = 0, okN = 0;
+  const errs = [];
+  for (const f of files) {
+    try {
+      const text = await readFileText(f);
+      const body = { data: text, fileName: f.name };
+      if (lid) body.id = lid;
+      if (only) body.only = only;
+      const r = await api('/api/ld/import-geojson', body);
+      okN++;
+      if (!firstId) firstId = (r.line && r.line.id) || 0;
+      if (r.dropped) errs.push(`${f.name}：${r.dropped} 个车站没落到走向上`);
+    } catch (e) {
+      errs.push(`${f.name}：${e.message}`);
+    }
+  }
+  await loadList(); loadStats();
+  if (firstId) await selectLine(lid || firstId);
+  if (okN) {
+    if (only === 'stops') {
+      toast(`已导入 ${okN} 个文件的站点与定位（线路走向未改动）；记得到 ② 点「用它并确认」`);
+    } else if (only === 'geom') {
+      toast(`已导入 ${okN} 个文件的线路走向（车站未改动）；记得到 ① 点「确认线路来源」`);
+    } else {
+      toast(`导入 ${okN} 条线，站序和走向都按文件来；记得到「站点来源」点确认`);
+    }
+  } else {
+    toast('导入失败：' + errs.join('；'), true);
+  }
+  if (errs.length) console.warn('GeoJSON 导入：', errs);
 }
 
 function debounce(fn, ms) {
@@ -1337,6 +2053,7 @@ async function loadStats() {
 function bindTop() {
   $('#ldGo').onclick = () => { S.q = $('#ldQ').value.trim(); loadList(); };
   $('#ldQ').onkeydown = e => { if (e.key === 'Enter') { S.q = $('#ldQ').value.trim(); loadList(); } };
+  $('#btnHelp').onclick = openHelp;
 
   $('#btnMerge').onclick = () => {
     S.merge = !S.merge;
@@ -1344,6 +2061,8 @@ function bindTop() {
     $('#btnMerge').classList.toggle('on', S.merge);
     renderList(); renderMergeBar();
   };
+
+  $('#btnGeo').onclick = () => pickGeojson(0);
 
   $('#btnNew').onclick = () => {
     const w = openModal('新建一条线路', `

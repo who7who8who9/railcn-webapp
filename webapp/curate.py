@@ -18,6 +18,7 @@ import threading
 import time
 from typing import Dict, List, Optional, Tuple
 
+import confvia
 import railcore
 
 _lock = threading.Lock()
@@ -57,9 +58,81 @@ ISSUE_LABELS = {
 }
 
 
+# 2026 车次编排改革（docs/renumber-2026.md）：「待校对」只认新车次，老车次不进列表。
+# 配置（页面上两个勾选框 / scripts/renumber_cutover.py 写）：
+#   renum_cutoff        切换日 YYYY-MM-DD。**有值 = 已切到新口径**，老车次全部出范围
+#   renum_phase1        '1' = 阶段一已切换（普速 V/N/Z/Y 纳入校对）
+#   renum_phase2        '1' = 阶段二已切换（高速/动集/城际/市郊 G/T/K/D/C/S/X 纳入）
+# 两个都没勾 = 一律不校（等新号出现）；renum_cutoff 空 = 完全不过滤（改号前的老行为）。
+# 注意别只拿 curate.date 卡切换日 —— 它是扫描时的参考日期，这里只在切换日之后
+# 有新号数据时才有意义，所以是「>= 切换日」而不是「= 某一天」。
+
+PHASE1_LETTERS = ["V", "N", "Z", "Y"]
+PHASE2_LETTERS = ["X", "G", "T", "K", "D", "C", "S"]
+
+
+def renum_state() -> dict:
+    """当前改号口径（页面上两个勾选框就绑这个）"""
+    cut = (railcore.cfg_get("renum_cutoff") or "").strip()
+    p1 = (railcore.cfg_get("renum_phase1") or "").strip() == "1"
+    p2 = (railcore.cfg_get("renum_phase2") or "").strip() == "1"
+    letters = (PHASE1_LETTERS if p1 else []) + (PHASE2_LETTERS if p2 else [])
+    return {"enabled": bool(cut), "cutoff": cut, "phase1": p1, "phase2": p2,
+            "letters": letters}
+
+
+def set_renum(phase1: Optional[bool] = None, phase2: Optional[bool] = None,
+              cutoff: Optional[str] = None) -> dict:
+    """勾选/取消阶段（页面接口）。切换日不传就不动。"""
+    if cutoff is not None:
+        railcore.cfg_set("renum_cutoff", str(cutoff).strip())
+    if phase1 is not None:
+        railcore.cfg_set("renum_phase1", "1" if phase1 else "0")
+    if phase2 is not None:
+        railcore.cfg_set("renum_phase2", "1" if phase2 else "0")
+    return renum_state()
+
+
+def _era() -> Tuple[str, List[str], bool]:
+    st = renum_state()
+    return st["cutoff"], st["letters"], st["enabled"]
+
+
+def _era_where() -> Tuple[str, List[object]]:
+    """给 curate 表查询用：切换日之后的、勾选阶段的字头才在列表里"""
+    cut, letters, on = _era()
+    if not on:
+        return "", []
+    if not letters:                     # 已切新口径但一个阶段都没勾 = 暂时不校任何车次
+        return " AND 1=0", []
+    return (" AND COALESCE(date,'') >= ? AND upper(substr(code,1,1)) IN (%s)"
+            % ",".join("?" * len(letters)), [cut] + letters)
+
+
+def _era_having() -> Tuple[str, List[object]]:
+    """给 routes 的 GROUP BY code 查询用：只认切换日后仍在开行、且是新车次字头的"""
+    cut, letters, on = _era()
+    if not on:
+        return "", []
+    if not letters:
+        return " HAVING 1=0", []
+    return (" HAVING MAX(date) >= ? AND upper(substr(code,1,1)) IN (%s)"
+            % ",".join("?" * len(letters)), [cut] + letters)
+
+
 # ---------------------------------------------------------------------------
 # 单趟车次摘要
 # ---------------------------------------------------------------------------
+
+def _seg_line_names(segs: List[dict]) -> List[str]:
+    """经由里用到的线名，按首次出现去重（清单里「京广线 / 陇海线」用）"""
+    out: List[str] = []
+    for s in segs or []:
+        nm = (s.get("line") or "").strip()
+        if nm and nm not in out:
+            out.append(nm)
+    return out
+
 
 def summarize(code: str, date: str) -> Optional[dict]:
     """算一趟车的校对摘要；算不出来返回 None"""
@@ -70,12 +143,26 @@ def summarize(code: str, date: str) -> Optional[dict]:
     if not d.get("stops"):
         return None
 
-    segs = d.get("viaSegs") or []
-    unknown = d.get("viaUnknown") or []
-    via_text = " / ".join(d.get("viaLines") or [])
+    # 经由口径：人工校正原样照抄；自动推断一律按**整理台确认线路**重算一遍
+    # （见 confvia.py）。线路库里那些来源版本 / 没确认的线不参与识别 —— 认不出
+    # 的区间就是缺口，等人工补，等整理台确认了那条线自己会认出来。
+    manual_via = d.get("viaSource") == "manual"
+    if manual_via:
+        segs = d.get("viaSegs") or []
+        unknown = d.get("viaUnknown") or []
+        via_text = " / ".join(d.get("viaLines") or [])
+        via_cov = float(d.get("viaCoverage") or 0)
+        via_source = "manual"
+    else:
+        cv = confvia.infer(d.get("stops") or [])
+        segs = cv["segs"]
+        unknown = cv["unknown"]
+        via_text = " / ".join(_seg_line_names(segs))
+        via_cov = float(cv["coverage"] or 0)
+        via_source = "auto" if segs else "none"
 
     issues: List[str] = []
-    if d.get("viaSource") == "none" or not segs:
+    if via_source == "none" or not segs:
         issues.append("via")
     elif unknown:
         issues.append("via")
@@ -94,9 +181,9 @@ def summarize(code: str, date: str) -> Optional[dict]:
         "via_text": via_text,
         "via_json": json.dumps(segs, ensure_ascii=False),
         "via_unknown": json.dumps(unknown, ensure_ascii=False),
-        "via_source": d.get("viaSource") or "none",
-        "via_origin": ((d.get("manual") or {}).get("source") or "") if d.get("viaSource") == "manual" else "",
-        "via_cov": float(d.get("viaCoverage") or 0),
+        "via_source": via_source,
+        "via_origin": ((d.get("manual") or {}).get("source") or "") if manual_via else "",
+        "via_cov": via_cov,
         "km_mode": d.get("kmMode") or "estimate",
         "km_matched": d.get("kmMatched") or "0/0",
         "total_km": d.get("totalKm") or 0.0,
@@ -182,11 +269,11 @@ MAX_GAP_CANDS = 8
 
 def gap_candidates(stops: List[str], gaps: List[dict], segs: List[dict]) -> List[dict]:
     """
-    每个缺口「点选加入」用的候选线路。
+    每个缺口「点选加入」用的候选线路 —— **只从整理台确认的线路里挑**（confvia）。
 
     排序有讲究：先说缺口**前后已识别段**用的线路（缺口多半就是这条线中间断了
-    一段，接着填最常见的答案），再补缺口两端车站自己所在的线路（线路表里缺了
-    连接段的时候，两站永远不共线，只报共线等于什么都不给）。
+    一段，接着填最常见的答案），再补两站都在确认线路站序里的线（两站在站序里
+    隔得越近越可能），最后才是只含一头的线。
     """
     gaps = gaps or []
     segs = segs or []
@@ -208,9 +295,9 @@ def gap_candidates(stops: List[str], gaps: List[dict], segs: List[dict]) -> List
                 push({"line": s.get("line"), "src": "neighbor", "srcCn": "相邻段同线",
                       "custom": None, "totalKm": None})
         try:
-            for l in railcore.cand_lines(a or "", b or ""):
+            for l in confvia.cands(a or "", b or "", limit=MAX_GAP_CANDS * 2):
                 # 覆盖这趟车经停站越多的线，越可能就是这一段该走的线
-                l["cover"] = railcore.line_cover(l["line"], stops)
+                l["cover"] = confvia.cover_of(l["line"], stops)
                 push(l)
         except Exception:                    # noqa: BLE001
             pass
@@ -334,18 +421,20 @@ def refresh_station(name: str) -> int:
     targets: List[Tuple[str, str]] = []
     try:
         with railcore.db() as conn:
+            ew, eargs = _era_where()
             rows = conn.execute(
-                "SELECT code, date FROM curate WHERE missing_json LIKE ?",
-                (f"%{name}%",),
+                "SELECT code, date FROM curate WHERE missing_json LIKE ?" + ew,
+                [f"%{name}%"] + eargs,
             ).fetchall()
             targets = [(r["code"], r["date"]) for r in rows]
             if not targets:
                 # 缺失清单里已经没有这个站了（比如刚撤销了坐标），
                 # 就从原始经停数据反查：全表 LIKE 约 0.3s，撤销是低频操作，可以接受
+                hav, hargs = _era_having()
                 rows2 = conn.execute(
                     "SELECT code, MAX(date) AS date FROM routes "
-                    "WHERE raw LIKE ? GROUP BY code",
-                    (f'%"station_name": "{name}"%',),
+                    "WHERE raw LIKE ? GROUP BY code" + hav,
+                    [f'%"station_name": "{name}"%'] + hargs,
                 ).fetchall()
                 targets = [(r["code"], r["date"]) for r in rows2]
     except Exception:                                # noqa: BLE001
@@ -377,8 +466,10 @@ def _scan() -> None:
     read_conn = None
     try:
         read_conn = railcore.db()
+        hav, hargs = _era_having()
         rows = read_conn.execute(
-            "SELECT code, MAX(date) AS d FROM routes WHERE raw IS NOT NULL GROUP BY code"
+            "SELECT code, MAX(date) AS d FROM routes WHERE raw IS NOT NULL GROUP BY code" + hav,
+            hargs,
         ).fetchall()
         total = len(rows)
         read_conn.close()
@@ -462,8 +553,9 @@ def counts() -> dict:
            "manual": 0, "pending": 0, "synced": 0, "clean": 0, "lastScan": None}
     try:
         with railcore.db() as conn:
+            ew, eargs = _era_where()
             for key, sql in (
-                ("scanned", "SELECT COUNT(*) FROM curate"),
+                ("scanned", "SELECT COUNT(*) FROM curate WHERE 1=1"),
                 ("todo", "SELECT COUNT(*) FROM curate WHERE issues <> ''"),
                 ("via", "SELECT COUNT(*) FROM curate WHERE issues LIKE '%via%'"),
                 ("via0", "SELECT COUNT(*) FROM curate WHERE issues LIKE '%via%' AND via_cov < 1"),
@@ -476,7 +568,10 @@ def counts() -> dict:
                 ("clean", "SELECT COUNT(*) FROM curate WHERE issues = ''"),
                 ("lastScan", "SELECT MAX(scanned_at) FROM curate"),
             ):
-                v = conn.execute(sql).fetchone()[0]
+                if key == "lastScan":
+                    v = conn.execute(sql).fetchone()[0]
+                else:
+                    v = conn.execute(sql + ew, eargs).fetchone()[0]
                 out[key] = v
     except Exception:                                # noqa: BLE001
         pass
@@ -493,8 +588,9 @@ def status() -> dict:
 
 
 def listing(mode: str = "todo", q: str = "", limit: int = 60, offset: int = 0) -> dict:
-    where = FILTERS.get(mode or "todo", FILTERS["todo"])
-    args: List[object] = []
+    ew, eargs = _era_where()
+    where = FILTERS.get(mode or "todo", FILTERS["todo"]) + ew
+    args: List[object] = list(eargs)
     if q:
         like = f"%{q.strip()}%"
         where += " AND (code LIKE ? OR from_sta LIKE ? OR to_sta LIKE ? OR via_text LIKE ?)"
@@ -600,16 +696,19 @@ def detail(code: str) -> dict:
         out["error"] = f"{type(exc).__name__}: {exc}"
         return out
 
-    segs = d.get("viaSegs") or []
+    # 自动基线也按整理台确认线路重算（detial 的 payload 本身就绕开了 override，
+    # 这里再把线路口径换掉即可）：没确认的线不认、认不出就是缺口
+    cv = confvia.infer(d.get("stops") or [])
+    segs = cv["segs"]
     out["exists"] = True
     out["from"] = d.get("from")
     out["to"] = d.get("to")
     out["auto"] = {
-        "viaText": " / ".join(d.get("viaLines") or []),
+        "viaText": " / ".join(_seg_line_names(segs)),
         "viaSegs": segs,
-        "viaUnknown": d.get("viaUnknown") or [],
-        "viaSource": d.get("viaSource") or "none",
-        "viaCoverage": d.get("viaCoverage") or 0.0,
+        "viaUnknown": cv["unknown"],
+        "viaSource": "auto" if segs else "none",
+        "viaCoverage": cv["coverage"],
         "kmMode": d.get("kmMode") or "estimate",
         "kmMatched": d.get("kmMatched") or "0/0",
         "totalKm": d.get("totalKm") or 0.0,
@@ -662,12 +761,17 @@ def detail(code: str) -> dict:
                          added=[n for n in new_names if n not in old_names])
     out["overrideStale"] = stale
 
-    # 这趟车实际生效的经由（人工校正优先，否则自动推断）
+    # 这趟车实际生效的经由（人工校正优先，否则就是上面按确认线路算出来的自动基线）
     try:
         eff = railcore.build_route_payload(code, date, cache_only=True, with_path=False)
-        out["effective"] = {"viaSource": eff.get("viaSource"),
-                            "viaSegs": eff.get("viaSegs") or [],
-                            "viaConfirmed": eff.get("viaConfirmed")}
+        if eff.get("viaSource") == "manual":
+            out["effective"] = {"viaSource": "manual",
+                                "viaSegs": eff.get("viaSegs") or [],
+                                "viaConfirmed": True}
+        else:
+            out["effective"] = {"viaSource": out["auto"]["viaSource"],
+                                "viaSegs": out["auto"]["viaSegs"],
+                                "viaConfirmed": False}
     except Exception:                                # noqa: BLE001
         out["effective"] = {"viaSource": "none", "viaSegs": [], "viaConfirmed": False}
     return out

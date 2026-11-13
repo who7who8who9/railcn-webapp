@@ -56,35 +56,47 @@ def main() -> None:
     print("[1] 建初稿")
     st = linedesk.build_seed(force=True)
     s = linedesk.stats()
-    ck(st["sources"].get("lib") == 417, "底表 417 条收进来")
-    ck(st["sources"].get("huirui") == 844, "资料库 844 条收进来")
-    ck(st["sources"].get("ce") == 660, "china-emu 660 条收进来")
-    ck(st["sources"].get("osm") > 2500, "OSM 线名 > 2500")
-    ck(s["lines"] > 3000, "规范线 > 3000 条（实际 %d）" % s["lines"])
+    src = st["sources"]
+    # 2026-11-02 清过库：底表（cnrail_lines.json）和 china-emu 现在是空的，
+    # 有数据才检查条数，没有就明说跳过，别把「来源表已清空」当成代码坏了
+    if src.get("lib"):
+        ck(src["lib"] == 417, "底表 417 条收进来（实际 %s）" % src["lib"])
+    else:
+        print("  -- 底表数据已清空，跳过")
+    ck(src.get("huirui") == 844, "资料库 844 条收进来（实际 %s）" % src.get("huirui"))
+    if src.get("ce"):
+        ck(src["ce"] == 660, "china-emu 660 条收进来（实际 %s）" % src["ce"])
+    else:
+        print("  -- china-emu 数据已清空，跳过")
+    ck(src.get("osm", 0) > 2500, "OSM 线名 > 2500（实际 %s）" % src.get("osm"))
+    ck(src.get("custom", 0) > 2000, "自建线路 > 2000（实际 %s）" % src.get("custom"))
+    ck(s["lines"] > 2500, "规范线 > 2500 条（实际 %d）" % s["lines"])
     ck(s["withStops"] > 1000, "有站序的线 > 1000（实际 %d）" % s["withStops"])
 
     print("[2] 同一线路的多种写法归到一条")
-    d = linedesk.find_line("京沪高速线")
-    ck(bool(d), "找得到京沪高速线")
+    # 资料库的「京沪高铁」和 OSM 的「京沪高速线」是一条线，归到同一个 family
+    d = linedesk.find_line("京沪高铁")
+    ck(bool(d), "找得到京沪高铁")
     names = {a["name"] for a in d["aliases"]}
     srcs = {a["source"] for a in d["aliases"]}
     ck("京沪高铁" in names, "收下了资料库的「京沪高铁」")
-    ck("京沪高速铁路" in names, "收下了 china-emu 的「京沪高速铁路」")
-    ck({"lib", "huirui", "ce", "osm"} <= srcs, "四个来源都归到了这一条")
+    ck(any(a["source"] == "osm" for a in d["aliases"]), "收下了 OSM 的写法")
+    ck({"huirui", "osm"} <= srcs, "资料库和 OSM 都归到了这一条（%s）" % sorted(srcs))
 
     print("[3] 分段挂到整线")
-    kh = linedesk.find_line("京哈高速线")
-    ck(bool(kh), "找得到京哈高速线")
+    kh = linedesk.find_line("京哈高铁") or linedesk.find_line("京哈高速线")
+    ck(bool(kh), "找得到京哈高铁")
     kids = {c["name"] for c in kh["children"]}
-    ck(any("京沈" in k for k in kids), "挂着京沈段")
-    ck(any("沈哈" in k for k in kids), "挂着沈哈段")
-    ck(len(kids) == 2, "同一段的两种写法只挂一次（实际 %d）" % len(kids))
+    ck(any("京沈" in k for k in kids), "挂着京沈段（%s）" % sorted(kids))
+    ck(any("沈哈" in k for k in kids), "挂着沈哈段（%s）" % sorted(kids))
+    ck(len([k for k in kids if "京沈" in k]) == 1,
+       "同一段的两种写法只挂一次（%s）" % sorted(kids))
 
     print("[4] 改规范名 / 别名 / 站序")
-    d = linedesk.save_line(d["id"], {"name": "京沪高速线①", "note": "测试改名"})
-    ck(d["name"] == "京沪高速线①", "规范名改掉了")
+    d = linedesk.save_line(d["id"], {"name": "京沪高铁①", "note": "测试改名"})
+    ck(d["name"] == "京沪高铁①", "规范名改掉了")
     ck(d["family"] == "京沪|gs", "认不出后缀的名字保留原族：%s" % d["family"])
-    d = linedesk.save_line(d["id"], {"name": "京沪高速线"})       # 改回来，后面还要用
+    d = linedesk.save_line(d["id"], {"name": "京沪高铁"})       # 改回来，后面还要用
     n0 = len(d["aliases"])
     d = linedesk.add_alias(d["id"], "custom", "测试别名线")
     ck(len(d["aliases"]) == n0 + 1, "别名加进去了")
@@ -92,25 +104,36 @@ def main() -> None:
     d = linedesk.del_alias(aid)
     ck(len(d["aliases"]) == n0, "别名删掉了")
 
-    print("[5] 从 china-emu 导站序：K 里程换成段内里程")
-    # 陇海铁路西宝段在 china-emu 里是 K1073→K1256，直接搬会算成 1256 km
-    t = linedesk.find_line("陇海铁路西宝段")
-    ck(bool(t), "初稿里就有陇海铁路西宝段")
-    try:
-        other = linedesk.find_line("京沪高速线")
-        linedesk.add_alias(other["id"], "ce", "陇海铁路西宝段")
-        ck(False, "同一个来源线名不该被两条线抢")
-    except ValueError:
-        ck(True, "同一个来源线名不能被两条线抢")
-    r = linedesk.fill_stops(t["id"], "ce", "陇海铁路西宝段")
-    ks = [x["km"] for x in r["stops"] if x["km"] is not None]
-    ck(len(r["stops"]) > 10, "导进来 %d 站" % len(r["stops"]))
-    ck(ks and ks[0] == 0, "首站里程归 0（原 K 里程已平移），首站=%s" % (ks[0] if ks else None))
-    ck(ks == sorted(ks), "里程单调不减")
-    ck(ks and ks[-1] < 250, "末站是段内里程而不是 K 里程（%s）" % (ks[-1] if ks else None))
+    print("[5] 从来源导站序")
+    # 陇海铁路西宝段在 china-emu 里是 K1073→K1256，直接搬会算成 1256 km；
+    # china-emu 表清空后这一步没法测，退而用资料库站序验「首站 0 / 里程不减」
+    if linedesk._ce_lines():
+        t = linedesk.find_line("陇海铁路西宝段")
+        ck(bool(t), "初稿里就有陇海铁路西宝段")
+        try:
+            other = linedesk.find_line("京沪高铁")
+            linedesk.add_alias(other["id"], "ce", "陇海铁路西宝段")
+            ck(False, "同一个来源线名不该被两条线抢")
+        except ValueError:
+            ck(True, "同一个来源线名不能被两条线抢")
+        r = linedesk.fill_stops(t["id"], "ce", "陇海铁路西宝段")
+        ks = [x["km"] for x in r["stops"] if x["km"] is not None]
+        ck(len(r["stops"]) > 10, "导进来 %d 站" % len(r["stops"]))
+        ck(ks and ks[0] == 0, "首站里程归 0（原 K 里程已平移），首站=%s" % (ks[0] if ks else None))
+        ck(ks == sorted(ks), "里程单调不减")
+        ck(ks and ks[-1] < 250, "末站是段内里程而不是 K 里程（%s）" % (ks[-1] if ks else None))
+    else:
+        print("  -- china-emu 数据已清空，改用资料库站序验")
+        t = linedesk.find_line("京沪高铁")
+        r = linedesk.fill_stops(t["id"], "huirui", "京沪高铁")
+        ks = [x["km"] for x in r["stops"] if x["km"] is not None]
+        ck(len(r["stops"]) >= 20, "从资料库导进 %d 站" % len(r["stops"]))
+        ck(ks and ks[0] == 0, "首站里程归 0")
+        ck(ks == sorted(ks), "里程单调不减")
+        ck(bool(r.get("src_stop")), "站点来源记下来了（%s）" % r.get("src_stop"))
 
     print("[6] 合并两条线")
-    a = linedesk.find_line("京沪高速线")
+    a = linedesk.find_line("京沪高铁")
     b = linedesk.find_line("京沪高速铁路二线")
     nb = len(b["aliases"])
     before = linedesk.stats()["lines"]
@@ -119,23 +142,25 @@ def main() -> None:
     ck(len(m["aliases"]) >= nb + 1, "两边的别名都在")
     ck(len(m["stops"]) > 0, "站序留下来了")
     ck(linedesk.stats()["lines"] == before - 1, "少了一条线")
-    ck(linedesk.find_line("京沪高速线") is not None, "旧写法还能按别名找回来")
+    ck(linedesk.find_line("京沪高铁") is not None, "旧写法还能按别名找回来")
 
     print("[7] 父子关系不能成环")
-    p = linedesk.find_line("京哈高速线")
-    c = linedesk.find_line("京哈高速线京沈段")
-    linedesk.set_relation(p["id"], c["id"], "seg", "测试")
+    p = linedesk.find_line("京哈高铁") or linedesk.find_line("京哈高速线")
+    c = [x for x in p["children"] if "京沈" in x["name"]]
+    ck(bool(c), "京哈下面有京沈段")
+    cid = c[0]["id"]
+    linedesk.set_relation(p["id"], cid, "seg", "测试")
     try:
-        linedesk.set_relation(c["id"], p["id"], "seg", "反着挂")
+        linedesk.set_relation(cid, p["id"], "seg", "反着挂")
         ck(False, "反向挂父子应该被拒绝")
     except ValueError as exc:
         ck("环" in str(exc), "反向挂被挡住：%s" % exc)
-    linedesk.del_relation(p["id"], c["id"])
+    linedesk.del_relation(p["id"], cid)
 
     print("[8] 导出")
     ex = linedesk.export_map()
     ck(ex["counts"]["lines"] == linedesk.stats()["lines"], "导出条数对得上")
-    ck(any(x["alias"].get("ce") for x in ex["lines"]), "导出里带各来源写法")
+    ck(any(x["alias"] for x in ex["lines"]), "导出里带各来源写法")
     ck(all("stops" in x for x in ex["lines"]), "导出里带站序")
     ck(isinstance(ex["relations"], list), "导出里带父子关系")
 

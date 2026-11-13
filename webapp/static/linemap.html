@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>确认线路地图 · railcn</title>
+<link rel="stylesheet" href="/linemap.css">
+</head>
+<body>
+<div class="lm-app">
+
+  <aside class="lm-side" id="lmSide">
+    <div class="lm-side-h">
+      <div class="lm-side-t"><a href="/" title="返回主站">←</a> 确认线路地图</div>
+      <div class="lm-side-sub" id="lmTotal">正在读取整理台…</div>
+    </div>
+
+    <div class="lm-tools">
+      <input id="lmQ" class="lm-in" placeholder="搜线路名 / 起讫站" autocomplete="off">
+      <div class="lm-btnrow">
+        <button id="lmAll" class="lm-btn">全选</button>
+        <button id="lmNone" class="lm-btn">清空</button>
+        <button id="lmInvert" class="lm-btn">反选</button>
+        <button id="lmCollapse" class="lm-btn" title="收起左栏，把地图放到最大">‹ 收起</button>
+      </div>
+      <div class="lm-modes">
+        <label title="勾选多条线路，默认全部选中"><input type="radio" name="lmMode" value="multi" checked> 复选</label>
+        <label title="一次只显示一条线路"><input type="radio" name="lmMode" value="single"> 单选</label>
+        <label title="点击线路名只看这一条"><input type="checkbox" id="lmSolo"> 点名单选</label>
+      </div>
+      <div class="lm-opts">
+        <label title="按确认站序画出车站圆点"><input type="checkbox" id="lmStops"> 显示车站</label>
+        <label title="每次改勾选后把视野缩放到选中线路"><input type="checkbox" id="lmFit" checked> 自动缩放</label>
+      </div>
+      <div class="lm-detail">
+        <span>精度</span>
+        <select id="lmDetail" class="lm-sel" title="每条线最多保留多少几何点">
+          <option value="400">简略</option>
+          <option value="900" selected>标准</option>
+          <option value="2000">精细</option>
+        </select>
+        <span class="lm-detail-tip">点越多越贴合，加载越慢</span>
+      </div>
+    </div>
+
+    <div id="lmList" class="lm-list"></div>
+    <div class="lm-foot" id="lmFoot">已选 0 / 0 条</div>
+  </aside>
+
+  <main class="lm-main" id="lmMain">
+    <div id="lmMap"></div>
+    <canvas id="lmCanvas" class="hidden"></canvas>
+
+    <button id="lmExpand" class="lm-expand hidden" title="展开线路栏">› 线路</button>
+
+    <div class="lm-hud">
+      <button id="lmKey" class="lm-hud-btn" title="设置腾讯地图 Key（与主站共用，代码里不含 Key）">地图 Key</button>
+      <span id="lmKeyState" class="lm-hud-tag">检查中…</span>
+      <button id="lmFitAll" class="lm-hud-btn" title="把视野缩放到所有选中线路">⤢ 全图</button>
+      <button id="lmReset" class="lm-hud-btn" title="重新载入选中线路的走向">↻ 重载</button>
+    </div>
+
+    <div class="lm-status" id="lmStatus">准备中…</div>
+    <div class="lm-legend" id="lmLegend"></div>
+    <div class="lm-tip" id="lmTip">点击地图上的线路可查看线路信息；左侧勾选控制显示哪些线路。</div>
+  </main>
+</div>
+
+<div class="lm-modal hidden" id="lmKeyModal">
+  <div class="lm-modal-box">
+    <div class="lm-modal-h">腾讯地图 Key</div>
+    <p>底图使用腾讯地图 GL JS。Key 只保存在本机浏览器的 <code>localStorage['railcn.mapkey']</code>，
+       与主站 / 数据校对页 / 走向编辑器共用，页面代码里不含任何 Key。</p>
+    <div class="lm-modal-site">当前站点：<code id="lmSite"></code><br>
+      注意：浏览器按「域名 + 端口」隔离存储，<code>localhost:8686</code> 与
+      <code>127.0.0.1:8686</code> 各存各的。换地址打开时要重新填一次。</div>
+    <input id="lmKeyInput" class="lm-in" placeholder="粘贴你在腾讯位置服务申请的 Key" autocomplete="off">
+    <div class="lm-modal-note" id="lmKeyNote">没有 Key 也可以看线路形状（自绘示意图，无底图、不画国界）。</div>
+    <div class="lm-modal-row">
+      <button id="lmKeyCancel" class="lm-btn">取消</button>
+      <button id="lmKeyClear" class="lm-btn">清空 Key</button>
+      <button id="lmKeySave" class="lm-btn primary">保存并生效</button>
+    </div>
+  </div>
+</div>
+
+<script src="/linemap.js"></script>
+</body>
+</html>
